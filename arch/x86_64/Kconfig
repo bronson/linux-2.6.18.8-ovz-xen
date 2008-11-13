@@ -135,6 +135,23 @@ config GENERIC_CPU
 
 endchoice
 
+config X86_64_XEN
+	bool "Enable Xen compatible kernel"
+	select XEN
+	select SWIOTLB
+	help
+	  This option will compile a kernel compatible with Xen hypervisor
+
+config X86_NO_TSS
+	bool
+	depends on X86_64_XEN
+	default y
+
+config X86_NO_IDT
+	bool
+	depends on X86_64_XEN
+	default y
+
 #
 # Define implied options from the CPU selection here
 #
@@ -155,6 +172,7 @@ config X86_INTERNODE_CACHE_BYTES
 
 config X86_TSC
 	bool
+	depends on !X86_64_XEN
 	default y
 
 config X86_GOOD_APIC
@@ -197,7 +215,7 @@ config X86_CPUID
 
 config X86_HT
 	bool
-	depends on SMP && !MK8
+	depends on SMP && !MK8 && !X86_64_XEN
 	default y
 
 config MATH_EMULATION
@@ -211,14 +229,22 @@ config EISA
 
 config X86_IO_APIC
 	bool
+	depends !XEN_UNPRIVILEGED_GUEST
+	default y
+
+config X86_XEN_GENAPIC
+	bool
+	depends on X86_64_XEN
 	default y
 
 config X86_LOCAL_APIC
 	bool
+	depends !XEN_UNPRIVILEGED_GUEST
 	default y
 
 config MTRR
 	bool "MTRR (Memory Type Range Register) support"
+	depends on !XEN_UNPRIVILEGED_GUEST
 	---help---
 	  On Intel P6 family processors (Pentium Pro, Pentium II and later)
 	  the Memory Type Range Registers (MTRRs) may be used to control
@@ -259,7 +285,7 @@ config SMP
 
 config SCHED_SMT
 	bool "SMT (Hyperthreading) scheduler support"
-	depends on SMP
+	depends on SMP && !X86_64_XEN
 	default n
 	help
 	  SMT scheduler support improves the CPU scheduler's decision making
@@ -269,7 +295,7 @@ config SCHED_SMT
 
 config SCHED_MC
 	bool "Multi-core scheduler support"
-	depends on SMP
+	depends on SMP && !X86_64_XEN
 	default y
 	help
 	  Multi-core scheduler support improves the CPU scheduler's decision
@@ -280,7 +306,7 @@ source "kernel/Kconfig.preempt"
 
 config NUMA
        bool "Non Uniform Memory Access (NUMA) Support"
-       depends on SMP
+       depends on SMP && !X86_64_XEN
        help
 	 Enable NUMA (Non Uniform Memory Access) support. The kernel 
 	 will try to allocate memory used by a CPU on the local memory 
@@ -341,7 +367,7 @@ config ARCH_DISCONTIGMEM_DEFAULT
 
 config ARCH_SPARSEMEM_ENABLE
 	def_bool y
-	depends on (NUMA || EXPERIMENTAL)
+	depends on (NUMA || EXPERIMENTAL) && !X86_64_XEN
 
 config ARCH_MEMORY_PROBE
 	def_bool y
@@ -365,6 +391,7 @@ config NR_CPUS
 	int "Maximum number of CPUs (2-256)"
 	range 2 255
 	depends on SMP
+	default "16" if X86_64_XEN
 	default "8"
 	help
 	  This allows you to specify the maximum number of CPUs which this
@@ -387,6 +414,7 @@ config ARCH_ENABLE_MEMORY_HOTPLUG
 
 config HPET_TIMER
 	bool
+	depends on !X86_64_XEN
 	default y
 	help
 	  Use the IA-PC HPET (High Precision Event Timer) to manage
@@ -407,7 +435,7 @@ config IOMMU
 	default y
 	select SWIOTLB
 	select AGP
-	depends on PCI
+	depends on PCI && !X86_64_XEN
 	help
 	  Support for full DMA access of devices with 32bit memory access only
 	  on systems with more than 3GB. This is usually needed for USB,
@@ -423,7 +451,7 @@ config CALGARY_IOMMU
 	bool "IBM Calgary IOMMU support"
 	default y
 	select SWIOTLB
-	depends on PCI && EXPERIMENTAL
+	depends on PCI && !X86_64_XEN && EXPERIMENTAL
 	help
 	  Support for hardware IOMMUs in IBM's xSeries x366 and x460
 	  systems. Needed to run systems with more than 3GB of memory
@@ -444,6 +472,7 @@ config SWIOTLB
 
 config X86_MCE
 	bool "Machine check support" if EMBEDDED
+	depends on !X86_64_XEN
 	default y
 	help
 	   Include a machine check error handler to report hardware errors.
@@ -469,7 +498,7 @@ config X86_MCE_AMD
 
 config KEXEC
 	bool "kexec system call (EXPERIMENTAL)"
-	depends on EXPERIMENTAL
+	depends on EXPERIMENTAL && !XEN_UNPRIVILEGED_GUEST
 	help
 	  kexec is a system call that implements the ability to shutdown your
 	  current kernel, and to start another kernel.  It is like a reboot
@@ -564,8 +593,9 @@ config GENERIC_PENDING_IRQ
 	default y
 
 menu "Power management options"
+	depends on !XEN_UNPRIVILEGED_GUEST
 
-source kernel/power/Kconfig
+source "kernel/power/Kconfig"
 
 source "drivers/acpi/Kconfig"
 
@@ -587,6 +617,22 @@ config PCI_DIRECT
 config PCI_MMCONFIG
 	bool "Support mmconfig PCI config space access"
 	depends on PCI && ACPI
+
+config XEN_PCIDEV_FRONTEND
+	bool "Xen PCI Frontend"
+	depends on PCI && X86_64_XEN
+	select HOTPLUG
+	default y
+	help
+	  The PCI device frontend driver allows the kernel to import arbitrary
+	  PCI devices from a PCI backend to support PCI driver domains.
+
+config XEN_PCIDEV_FE_DEBUG
+	bool "Xen PCI Frontend Debugging"
+	depends on XEN_PCIDEV_FRONTEND
+	default n
+	help
+	  Enables some debug statements within the PCI Frontend.
 
 source "drivers/pci/pcie/Kconfig"
 
@@ -657,5 +703,7 @@ source "arch/x86_64/Kconfig.debug"
 source "security/Kconfig"
 
 source "crypto/Kconfig"
+
+source "drivers/xen/Kconfig"
 
 source "lib/Kconfig"

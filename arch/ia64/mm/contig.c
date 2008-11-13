@@ -18,6 +18,9 @@
 #include <linux/efi.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
+#if defined(CONFIG_XEN) && defined(CONFIG_KEXEC)
+#include <linux/kexec.h>
+#endif
 
 #include <asm/meminit.h>
 #include <asm/pgalloc.h>
@@ -172,8 +175,17 @@ find_memory (void)
 	/* Free all available memory, then mark bootmem-map as being in use. */
 	efi_memmap_walk(filter_rsvd_memory, free_bootmem);
 	reserve_bootmem(bootmap_start, bootmap_size);
+#if defined(CONFIG_XEN) && defined(CONFIG_KEXEC)
+	xen_machine_kexec_setup_resources();
+#endif
 
 	find_initrd();
+
+#ifdef CONFIG_CRASH_DUMP
+	/* If we are doing a crash dump, we still need to know the real mem
+	 * size before original memory map is * reset. */
+	saved_max_pfn = max_pfn;
+#endif
 }
 
 #ifdef CONFIG_SMP

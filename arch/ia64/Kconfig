@@ -58,6 +58,28 @@ config GENERIC_IOMAP
 	bool
 	default y
 
+config XEN
+	bool "Xen hypervisor support"
+	default y
+	select XEN_XENCOMM
+	help
+	  Enable Xen hypervisor support.  Resulting kernel runs
+	  both as a guest OS on Xen and natively on hardware.
+
+config XEN_IA64_EXPOSE_P2M
+	bool "Xen/IA64 exposure p2m table"
+	depends on XEN
+	default y
+	help
+	  expose p2m from xen
+
+config XEN_IA64_EXPOSE_P2M_USE_DTR
+	bool "Xen/IA64 map p2m table with dtr"
+	depends on XEN_IA64_EXPOSE_P2M
+	default y
+	help
+	  use dtr to map the exposed p2m table
+
 config SCHED_NO_NO_OMIT_FRAME_POINTER
 	bool
 	default y
@@ -132,6 +154,10 @@ config IA64_SGI_SN2
 
 config IA64_HP_SIM
 	bool "Ski-simulator"
+
+config IA64_XEN
+	bool "Xen guest"
+	depends on XEN
 
 endchoice
 
@@ -431,6 +457,29 @@ config SGI_SN
 
 source "drivers/sn/Kconfig"
 
+config KEXEC
+	bool "kexec system call (EXPERIMENTAL)"
+	depends on EXPERIMENTAL && !IA64_HP_SIM && (!SMP || HOTPLUG_CPU) && !XEN_UNPRIVILEGED_GUEST
+	help
+	  kexec is a system call that implements the ability to shutdown your
+	  current kernel, and to start another kernel.  It is like a reboot
+	  but it is indepedent of the system firmware.   And like a reboot
+	  you can start any kernel with it, not just Linux.
+
+	  The name comes from the similiarity to the exec system call.
+
+	  It is an ongoing process to be certain the hardware in a machine
+	  is properly shutdown, so do not be surprised if this code does not
+	  initially work for you.  It may help to enable device hotplugging
+	  support.  As of this writing the exact hardware interface is
+	  strongly in flux, so no good recommendation can be made.
+
+config CRASH_DUMP
+	  bool "kernel crash dumps (EXPERIMENTAL)"
+	  depends on EXPERIMENTAL && IA64_MCA_RECOVERY && !IA64_HP_SIM && (!SMP || HOTPLUG_CPU)
+	  help
+	    Generate crash dump after being started by kexec.
+
 source "drivers/firmware/Kconfig"
 
 source "fs/Kconfig.binfmt"
@@ -464,6 +513,21 @@ config PCI
 config PCI_DOMAINS
 	bool
 	default PCI
+
+config XEN_PCIDEV_FRONTEND
+	bool "Xen PCI Frontend"
+	depends on PCI && XEN
+	default y
+	help
+	  The PCI device frontend driver allows the kernel to import arbitrary
+	  PCI devices from a PCI backend to support PCI driver domains.
+
+config XEN_PCIDEV_FE_DEBUG
+	bool "Xen PCI Frontend Debugging"
+	depends on XEN_PCIDEV_FRONTEND
+	default n
+	help
+	  Enables some debug statements within the PCI Frontend.
 
 source "drivers/pci/pcie/Kconfig"
 
@@ -528,3 +592,16 @@ source "arch/ia64/Kconfig.debug"
 source "security/Kconfig"
 
 source "crypto/Kconfig"
+
+#
+# override default values of drivers/xen/Kconfig
+#
+if XEN
+config XEN_SMPBOOT
+	default n
+
+config XEN_DEVMEM
+	default n
+endif
+
+source "drivers/xen/Kconfig"

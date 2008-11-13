@@ -375,6 +375,25 @@ salinfo_log_open(struct inode *inode, struct file *file)
 		data->open = 0;
 		return -ENOMEM;
 	}
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		ia64_mca_xencomm_t *entry;
+		unsigned long flags;
+
+		entry = vmalloc(sizeof(ia64_mca_xencomm_t));
+		if (!entry) {
+			data->open = 0;
+			vfree(data->log_buffer);
+			return -ENOMEM;
+		}
+		entry->record = data->log_buffer;
+		entry->handle = xencomm_map(data->log_buffer, 
+					ia64_sal_get_state_info_size(data->type));
+		spin_lock_irqsave(&ia64_mca_xencomm_lock, flags);
+		list_add(&entry->list, &ia64_mca_xencomm_list);
+		spin_unlock_irqrestore(&ia64_mca_xencomm_lock, flags);
+	}
+#endif
 
 	return 0;
 }
@@ -386,6 +405,30 @@ salinfo_log_release(struct inode *inode, struct file *file)
 	struct salinfo_data *data = entry->data;
 
 	if (data->state == STATE_NO_DATA) {
+#ifdef CONFIG_XEN
+		if (is_running_on_xen()) {
+			struct list_head *pos, *n;
+			ia64_mca_xencomm_t *found_entry = NULL;
+			unsigned long flags;
+
+			spin_lock_irqsave(&ia64_mca_xencomm_lock, flags);
+			list_for_each_safe(pos, n, &ia64_mca_xencomm_list) {
+				ia64_mca_xencomm_t *entry;
+
+				entry = list_entry(pos, ia64_mca_xencomm_t, list);
+				if (entry->record == data->log_buffer) {
+					list_del(&entry->list);
+					found_entry = entry;
+					break;
+				}
+			}
+			spin_unlock_irqrestore(&ia64_mca_xencomm_lock, flags);
+			if (found_entry) {
+				xencomm_free(found_entry->handle);
+				vfree(found_entry);
+			}
+		}
+#endif
 		vfree(data->log_buffer);
 		vfree(data->oemdata);
 		data->log_buffer = NULL;

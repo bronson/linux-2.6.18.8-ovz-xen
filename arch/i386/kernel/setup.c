@@ -956,6 +956,28 @@ efi_memory_present_wrapper(unsigned long start, unsigned long end, void *arg)
 	return 0;
 }
 
+/*
+ * This function checks if any part of the range <start,end> is mapped
+ * with type.
+ */
+int
+e820_any_mapped(u64 start, u64 end, unsigned type)
+{
+	int i;
+
+	for (i = 0; i < e820.nr_map; i++) {
+		const struct e820entry *ei = &e820.map[i];
+
+		if (type && ei->type != type)
+			continue;
+		if (ei->addr >= end || ei->addr + ei->size <= start)
+			continue;
+		return 1;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(e820_any_mapped);
+
  /*
   * This function checks if the entire range <start,end> is mapped with type.
   *

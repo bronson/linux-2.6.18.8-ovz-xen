@@ -16,6 +16,9 @@
 static inline void __iomem *
 __ioremap (unsigned long offset, unsigned long size)
 {
+	offset = HYPERVISOR_ioremap(offset, size);
+	if (IS_ERR_VALUE(offset))
+		return NULL;
 	return (void __iomem *) (__IA64_UNCACHED_OFFSET | offset);
 }
 

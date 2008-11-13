@@ -303,16 +303,34 @@ static void __init
 setup_gate (void)
 {
 	struct page *page;
+	void *gate_page_addr = __start_gate_section;
+	
+#ifdef CONFIG_XEN
+	unsigned long unused_gate;
+	extern char __start_xen_gate_section[];
+	if (is_running_on_xen()) {
+		gate_page_addr = __start_xen_gate_section;
+		unused_gate = (unsigned long)ia64_imva(__start_gate_section);
+	} else
+		unused_gate =
+			(unsigned long)ia64_imva(__start_xen_gate_section);
+#ifndef HAVE_BUGGY_SEGREL
+	ClearPageReserved(virt_to_page(unused_gate));
+	init_page_count(virt_to_page(unused_gate));
+	free_page(unused_gate);
+	++totalram_pages;
+#endif
+#endif
 
 	/*
 	 * Map the gate page twice: once read-only to export the ELF
 	 * headers etc. and once execute-only page to enable
 	 * privilege-promotion via "epc":
 	 */
-	page = virt_to_page(ia64_imva(__start_gate_section));
+	page = virt_to_page(ia64_imva(gate_page_addr));
 	put_kernel_page(page, GATE_ADDR, PAGE_READONLY);
 #ifdef HAVE_BUGGY_SEGREL
-	page = virt_to_page(ia64_imva(__start_gate_section + PAGE_SIZE));
+	page = virt_to_page(ia64_imva(gate_page_addr + PAGE_SIZE));
 	put_kernel_page(page, GATE_ADDR + PAGE_SIZE, PAGE_GATE);
 #else
 	put_kernel_page(page, GATE_ADDR + PERCPU_PAGE_SIZE, PAGE_GATE);

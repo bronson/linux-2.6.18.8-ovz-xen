@@ -184,9 +184,37 @@ patch_brl_fsys_bubble_down (unsigned long start, unsigned long end)
 	ia64_srlz_i();
 }
 
+#ifdef CONFIG_XEN
+void __init
+ia64_patch_gate_xen (void)
+{
+	extern char __start_gate_mckinley_e9_patchlist_xen[], __end_gate_mckinley_e9_patchlist_xen[];
+	extern char __start_gate_vtop_patchlist_xen[], __end_gate_vtop_patchlist_xen[];
+	extern char __start_gate_fsyscall_patchlist_xen[], __end_gate_fsyscall_patchlist_xen[];
+	extern char __start_gate_brl_fsys_bubble_down_patchlist_xen[], __end_gate_brl_fsys_bubble_down_patchlist_xen[];
+#	define START(name)	((unsigned long) __start_gate_##name##_patchlist_xen)
+#	define END(name)	((unsigned long)__end_gate_##name##_patchlist_xen)
+
+	patch_fsyscall_table(START(fsyscall), END(fsyscall));
+	patch_brl_fsys_bubble_down(START(brl_fsys_bubble_down), END(brl_fsys_bubble_down));
+	ia64_patch_vtop(START(vtop), END(vtop));
+	ia64_patch_mckinley_e9(START(mckinley_e9), END(mckinley_e9));
+
+#	undef START
+#	undef END
+}
+#else
+#define ia64_patch_gate_xen()	do { } while (0)
+#endif
+
 void __init
 ia64_patch_gate (void)
 {
+	if (is_running_on_xen()) {
+		ia64_patch_gate_xen();
+		return;
+	}
+	
 #	define START(name)	((unsigned long) __start_gate_##name##_patchlist)
 #	define END(name)	((unsigned long)__end_gate_##name##_patchlist)
 

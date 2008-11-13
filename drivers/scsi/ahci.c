@@ -78,6 +78,7 @@ enum {
 
 	board_ahci		= 0,
 	board_ahci_vt8251	= 1,
+	board_ahci_sb700	= 2,
 
 	/* global controller registers */
 	HOST_CAP		= 0x00, /* host capabilities */
@@ -283,6 +284,16 @@ static const struct ata_port_info ahci_port_info[] = {
 		.udma_mask	= 0x7f, /* udma0-6 ; FIXME */
 		.port_ops	= &ahci_ops,
 	},
+	{
+		.sht            = &ahci_sht,
+		.host_flags     = ATA_FLAG_SATA | ATA_FLAG_NO_LEGACY |
+				  ATA_FLAG_MMIO | ATA_FLAG_PIO_DMA |
+				  ATA_FLAG_ACPI_SATA | ATA_FLAG_AN |
+				  ATA_FLAG_IPM,
+		.pio_mask       = 0x1f, /* pio0-4 */
+		.udma_mask      = 0x7f,
+		.port_ops       = &ahci_ops,
+	},
 };
 
 static const struct pci_device_id ahci_pci_tbl[] = {
@@ -317,6 +328,36 @@ static const struct pci_device_id ahci_pci_tbl[] = {
 	  board_ahci }, /* ICH8M */
 	{ PCI_VENDOR_ID_INTEL, 0x282a, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 	  board_ahci }, /* ICH8M */
+	{ PCI_VENDOR_ID_INTEL, 0x2922, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9 */
+	{ PCI_VENDOR_ID_INTEL, 0x2923, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9 */
+	{ PCI_VENDOR_ID_INTEL, 0x2924, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9 */
+	{ PCI_VENDOR_ID_INTEL, 0x2925, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9 */
+	{ PCI_VENDOR_ID_INTEL, 0x2927, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9 */
+	{ PCI_VENDOR_ID_INTEL, 0x2929, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9M */
+	{ PCI_VENDOR_ID_INTEL, 0x292a, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9M */
+	{ PCI_VENDOR_ID_INTEL, 0x292b, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9M */
+	{ PCI_VENDOR_ID_INTEL, 0x292f, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9M */
+	{ PCI_VENDOR_ID_INTEL, 0x294d, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9 */
+	{ PCI_VENDOR_ID_INTEL, 0x294e, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH9M */
+	{ PCI_VENDOR_ID_INTEL, 0x3a02, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH10 */
+	{ PCI_VENDOR_ID_INTEL, 0x3a05, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH10 */
+	{ PCI_VENDOR_ID_INTEL, 0x3a22, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH10 */
+	{ PCI_VENDOR_ID_INTEL, 0x3a25, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci }, /* ICH10 */
 
 	/* JMicron */
 	{ 0x197b, 0x2360, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
@@ -335,6 +376,18 @@ static const struct pci_device_id ahci_pci_tbl[] = {
 	  board_ahci }, /* ATI SB600 non-raid */
 	{ PCI_VENDOR_ID_ATI, 0x4381, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 	  board_ahci }, /* ATI SB600 raid */
+	{ PCI_VENDOR_ID_ATI, 0x4390, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci_sb700 },
+	{ PCI_VENDOR_ID_ATI, 0x4391, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci_sb700 },
+	{ PCI_VENDOR_ID_ATI, 0x4392, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci_sb700 },
+	{ PCI_VENDOR_ID_ATI, 0x4393, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci_sb700 },
+	{ PCI_VENDOR_ID_ATI, 0x4394, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci_sb700 },
+	{ PCI_VENDOR_ID_ATI, 0x4395, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+	  board_ahci_sb700 },
 
 	/* VIA */
 	{ PCI_VENDOR_ID_VIA, 0x3349, PCI_ANY_ID, PCI_ANY_ID, 0, 0,

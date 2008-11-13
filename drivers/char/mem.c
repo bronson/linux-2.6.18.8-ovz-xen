@@ -101,6 +101,7 @@ static inline int valid_mmap_phys_addr_range(unsigned long pfn, size_t size)
 }
 #endif
 
+#ifndef ARCH_HAS_DEV_MEM
 /*
  * This funcion reads the *physical* memory. The f_pos points directly to the 
  * memory location. 
@@ -223,6 +224,7 @@ static ssize_t write_mem(struct file * file, const char __user * buf,
 	*ppos += written;
 	return written;
 }
+#endif
 
 #ifndef __HAVE_PHYS_MEM_ACCESS_PROT
 static pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
@@ -262,6 +264,9 @@ static int mmap_mem(struct file * file, struct vm_area_struct * vma)
 static int mmap_kmem(struct file * file, struct vm_area_struct * vma)
 {
 	unsigned long pfn;
+#ifdef CONFIG_XEN
+	unsigned long i, count;
+#endif
 
 	/* Turn a kernel-virtual address into a physical page frame */
 	pfn = __pa((u64)vma->vm_pgoff << PAGE_SHIFT) >> PAGE_SHIFT;
@@ -275,6 +280,13 @@ static int mmap_kmem(struct file * file, struct vm_area_struct * vma)
 	 */
 	if (!pfn_valid(pfn))
 		return -EIO;
+
+#ifdef CONFIG_XEN
+	count = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+	for (i = 0; i < count; i++)
+		if ((pfn + i) != mfn_to_local_pfn(pfn_to_mfn(pfn + i)))
+			return -EIO;
+#endif
 
 	vma->vm_pgoff = pfn;
 	return mmap_mem(file, vma);
@@ -780,6 +792,7 @@ static int open_port(struct inode * inode, struct file * filp)
 #define open_kmem	open_mem
 #define open_oldmem	open_mem
 
+#ifndef ARCH_HAS_DEV_MEM
 static const struct file_operations mem_fops = {
 	.llseek		= memory_lseek,
 	.read		= read_mem,
@@ -787,6 +800,9 @@ static const struct file_operations mem_fops = {
 	.mmap		= mmap_mem,
 	.open		= open_mem,
 };
+#else
+extern const struct file_operations mem_fops;
+#endif
 
 static const struct file_operations kmem_fops = {
 	.llseek		= memory_lseek,

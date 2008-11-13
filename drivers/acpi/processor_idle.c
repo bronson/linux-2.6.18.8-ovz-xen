@@ -714,8 +714,17 @@ static int acpi_processor_get_power_info_cst(struct acpi_processor *pr)
 		    (reg->space_id != ACPI_ADR_SPACE_FIXED_HARDWARE))
 			continue;
 
+#ifdef CONFIG_XEN
+		if (!processor_pm_external())
+			cx.address = (reg->space_id ==
+				      ACPI_ADR_SPACE_FIXED_HARDWARE) ?
+		    		      0 : reg->address;
+		else
+			cx.address = reg->address;
+#else
 		cx.address = (reg->space_id == ACPI_ADR_SPACE_FIXED_HARDWARE) ?
 		    0 : reg->address;
+#endif /* CONFIG_XEN */
 
 		/* There should be an easy way to extract an integer... */
 		obj = (union acpi_object *)&(element->package.elements[1]);
@@ -724,9 +733,17 @@ static int acpi_processor_get_power_info_cst(struct acpi_processor *pr)
 
 		cx.type = obj->integer.value;
 
+#ifdef CONFIG_XEN
+		/* Following check doesn't apply to external control case */
+		if (!processor_pm_external())
+			if ((cx.type != ACPI_STATE_C1) &&
+			    (reg->space_id != ACPI_ADR_SPACE_SYSTEM_IO))
+				continue;
+#else
 		if ((cx.type != ACPI_STATE_C1) &&
 		    (reg->space_id != ACPI_ADR_SPACE_SYSTEM_IO))
 			continue;
+#endif /* CONFIG_XEN */
 
 		if ((cx.type < ACPI_STATE_C2) || (cx.type > ACPI_STATE_C3))
 			continue;
@@ -742,6 +759,12 @@ static int acpi_processor_get_power_info_cst(struct acpi_processor *pr)
 			continue;
 
 		cx.power = obj->integer.value;
+
+#ifdef CONFIG_PROCESSOR_EXTERNAL_CONTROL
+		/* cache control methods to notify external logic */
+		if (processor_pm_external())
+			memcpy(&cx.reg, reg, sizeof(*reg));
+#endif
 
 		current_count++;
 		memcpy(&(pr->power.states[current_count]), &cx, sizeof(cx));
@@ -985,12 +1008,24 @@ int acpi_processor_cst_has_changed(struct acpi_processor *pr)
 		return -ENODEV;
 
 	/* Fall back to the default idle loop */
+#ifdef CONFIG_XEN
+	if (!processor_pm_external())
+		pm_idle = pm_idle_save;
+#else
 	pm_idle = pm_idle_save;
+#endif /* CONFIG_XEN */
 	synchronize_sched();	/* Relies on interrupts forcing exit from idle. */
 
 	pr->flags.power = 0;
 	result = acpi_processor_get_power_info(pr);
+#ifdef CONFIG_XEN
+	if (processor_pm_external())
+		processor_notify_external(pr,
+			PROCESSOR_PM_CHANGE, PM_TYPE_IDLE);
+	else if ((pr->flags.power == 1) && (pr->flags.power_setup_done))
+#else
 	if ((pr->flags.power == 1) && (pr->flags.power_setup_done))
+#endif /* CONFIG_XEN */
 		pm_idle = acpi_processor_idle;
 
 	return result;
@@ -1122,7 +1157,11 @@ int acpi_processor_power_init(struct acpi_processor *pr,
 				       pr->power.states[i].type);
 		printk(")\n");
 
+#ifdef CONFIG_XEN
+		if (!processor_pm_external() && (pr->id == 0)) {
+#else
 		if (pr->id == 0) {
+#endif /* CONFIG_XEN */
 			pm_idle_save = pm_idle;
 			pm_idle = acpi_processor_idle;
 		}
@@ -1141,6 +1180,11 @@ int acpi_processor_power_init(struct acpi_processor *pr,
 
 	pr->flags.power_setup_done = 1;
 
+#ifdef CONFIG_XEN
+	if (processor_pm_external())
+		processor_notify_external(pr,
+			PROCESSOR_PM_INIT, PM_TYPE_IDLE);
+#endif /* CONFIG_XEN */
 	return 0;
 }
 

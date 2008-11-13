@@ -35,6 +35,7 @@ typedef int ia64_mv_pci_legacy_read_t (struct pci_bus *, u16 port, u32 *val,
 typedef int ia64_mv_pci_legacy_write_t (struct pci_bus *, u16 port, u32 val,
 					u8 size);
 typedef void ia64_mv_migrate_t(struct task_struct * task);
+typedef void ia64_mv_kernel_launch_event_t(void);
 
 /* DMA-mapping interface: */
 typedef void ia64_mv_dma_init (void);
@@ -108,6 +109,8 @@ extern void machvec_tlb_migrate_finish (struct mm_struct *);
 #  include <asm/machvec_hpzx1_swiotlb.h>
 # elif defined (CONFIG_IA64_SGI_SN2)
 #  include <asm/machvec_sn2.h>
+# elif defined (CONFIG_IA64_XEN)
+#  include <asm/machvec_xen.h>
 # elif defined (CONFIG_IA64_GENERIC)
 
 # ifdef MACHVEC_PLATFORM_HEADER
@@ -205,6 +208,7 @@ struct ia64_machine_vector {
 	ia64_mv_readq_relaxed_t *readq_relaxed;
 	ia64_mv_migrate_t *migrate;
 	ia64_mv_msi_init_t *msi_init;
+	ia64_mv_kernel_launch_event_t *kernel_launch_event;
 } __attribute__((__aligned__(16))); /* align attrib? see above comment */
 
 #define MACHVEC_INIT(name)			\
@@ -302,6 +306,9 @@ extern ia64_mv_dma_supported		swiotlb_dma_supported;
 #endif
 #ifndef platform_tlb_migrate_finish
 # define platform_tlb_migrate_finish	machvec_noop_mm
+#endif
+#ifndef platform_kernel_launch_event
+# define platform_kernel_launch_event	machvec_noop
 #endif
 #ifndef platform_dma_init
 # define platform_dma_init		swiotlb_init

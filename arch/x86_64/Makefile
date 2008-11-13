@@ -71,9 +71,22 @@ drivers-$(CONFIG_OPROFILE)		+= arch/x86_64/oprofile/
 
 boot := arch/x86_64/boot
 
-PHONY += bzImage bzlilo install archmrproper \
+PHONY += bzImage bzlilo vmlinuz install archmrproper \
 	 fdimage fdimage144 fdimage288 isoimage archclean
 
+ifdef CONFIG_XEN
+CPPFLAGS := -D__XEN_INTERFACE_VERSION__=$(CONFIG_XEN_INTERFACE_VERSION) \
+	-Iinclude$(if $(KBUILD_SRC),2)/asm/mach-xen $(CPPFLAGS)
+LDFLAGS_vmlinux := -e startup_64
+#Default target when executing "make"
+all: vmlinuz
+
+BOOTIMAGE                     := $(boot)/vmlinuz
+KBUILD_IMAGE                  := $(BOOTIMAGE)
+
+vmlinuz: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(BOOTIMAGE)
+else
 #Default target when executing "make"
 all: bzImage
 
@@ -91,6 +104,7 @@ bzdisk: vmlinux
 
 fdimage fdimage144 fdimage288 isoimage: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) BOOTIMAGE=$(BOOTIMAGE) $@
+endif
 
 install:
 	$(Q)$(MAKE) $(build)=$(boot) BOOTIMAGE=$(BOOTIMAGE) $@ 

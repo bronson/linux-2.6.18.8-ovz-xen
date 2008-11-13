@@ -96,6 +96,7 @@ static inline cputime64_t get_cpu_idle_time(unsigned int cpu)
 	return retval;
 }
 
+
 /************************** sysfs interface ************************/
 static ssize_t show_sampling_rate_max(struct cpufreq_policy *policy, char *buf)
 {
@@ -222,17 +223,14 @@ static struct attribute_group dbs_attr_group = {
 
 /************************** sysfs end ************************/
 
-static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
+#ifndef CONFIG_XEN
+static int dbs_calc_load(struct cpu_dbs_info_s *this_dbs_info)
 {
-	unsigned int idle_ticks, total_ticks;
-	unsigned int load;
-	cputime64_t cur_jiffies;
-
 	struct cpufreq_policy *policy;
+	cputime64_t cur_jiffies;
+	cputime64_t total_ticks, idle_ticks;
 	unsigned int j;
-
-	if (!this_dbs_info->enable)
-		return;
+	int load;
 
 	policy = this_dbs_info->cur_policy;
 	cur_jiffies = jiffies64_to_cputime64(get_jiffies_64());
@@ -240,7 +238,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 			this_dbs_info->prev_cpu_wall);
 	this_dbs_info->prev_cpu_wall = cur_jiffies;
 	if (!total_ticks)
-		return;
+		return 200;
 	/*
 	 * Every sampling_rate, we check, if current idle time is less
 	 * than 20% (default), then we try to increase frequency
@@ -270,6 +268,81 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 			idle_ticks = tmp_idle_ticks;
 	}
 	load = (100 * (total_ticks - idle_ticks)) / total_ticks;
+	return load;
+}
+#else
+
+#include <xen/interface/platform.h>
+static int dbs_calc_load(struct cpu_dbs_info_s *this_dbs_info)
+{
+	int load = 0;
+	struct xen_platform_op op;
+	uint64_t idletime[NR_CPUS];
+	struct cpufreq_policy *policy;
+	unsigned int j;
+	cpumask_t cpumap;
+
+	policy = this_dbs_info->cur_policy;
+	cpumap = policy->cpus;
+
+	op.cmd = XENPF_getidletime;
+	set_xen_guest_handle(op.u.getidletime.cpumap_bitmap, (uint8_t *) cpus_addr(cpumap));
+	op.u.getidletime.cpumap_nr_cpus = NR_CPUS;
+	set_xen_guest_handle(op.u.getidletime.idletime, idletime);
+	if (HYPERVISOR_platform_op(&op))
+		return 200;
+
+	for_each_cpu_mask(j, cpumap) {
+		cputime64_t total_idle_nsecs, tmp_idle_nsecs;
+		cputime64_t total_wall_nsecs, tmp_wall_nsecs;
+		struct cpu_dbs_info_s *j_dbs_info;
+		unsigned long tmp_load, tmp_wall_msecs, tmp_idle_msecs;
+
+		j_dbs_info = &per_cpu(cpu_dbs_info, j);
+		total_idle_nsecs = idletime[j];
+		tmp_idle_nsecs = cputime64_sub(total_idle_nsecs,
+				j_dbs_info->prev_cpu_idle);
+		total_wall_nsecs = op.u.getidletime.now;
+		tmp_wall_nsecs = cputime64_sub(total_wall_nsecs,
+				j_dbs_info->prev_cpu_wall);
+
+		if (tmp_wall_nsecs == 0)
+			return 200;
+
+		j_dbs_info->prev_cpu_wall = total_wall_nsecs;
+		j_dbs_info->prev_cpu_idle = total_idle_nsecs;
+
+		/* Convert nsecs to msecs and clamp times to sane values. */
+		do_div(tmp_wall_nsecs, 1000000);
+		tmp_wall_msecs = tmp_wall_nsecs;
+		do_div(tmp_idle_nsecs, 1000000);
+		tmp_idle_msecs = tmp_idle_nsecs;
+		if (tmp_wall_msecs == 0)
+			tmp_wall_msecs = 1;
+		if (tmp_idle_msecs > tmp_wall_msecs)
+			tmp_idle_msecs = tmp_wall_msecs;
+
+		tmp_load = (100 * (tmp_wall_msecs - tmp_idle_msecs)) /
+				tmp_wall_msecs;
+		load = max(load, min(100, (int) tmp_load));
+	}
+	return load;
+}
+#endif
+
+static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
+{
+	int load;
+
+	struct cpufreq_policy *policy;
+
+	if (!this_dbs_info->enable)
+		return;
+
+	policy = this_dbs_info->cur_policy;
+	load = dbs_calc_load(this_dbs_info);
+	if (load > 100) 
+		return;
 
 	/* Check for frequency increase */
 	if (load > dbs_tuners_ins.up_threshold) {

@@ -188,6 +188,7 @@ static unsigned long __initdata prom_tce_alloc_end;
 #define PLATFORM_LPAR		0x0001
 #define PLATFORM_POWERMAC	0x0400
 #define PLATFORM_GENERIC	0x0500
+#define PLATFORM_GENERIC_XEN	(PLATFORM_GENERIC | PLATFORM_LPAR)
 
 static int __initdata of_platform;
 
@@ -1529,6 +1530,14 @@ static int __init prom_find_machine_type(void)
 	phandle rtas;
 	int x;
 #endif
+#ifdef CONFIG_PPC_XEN
+	phandle xen;
+
+	xen = call_prom("finddevice", 1, 1, ADDR("/xen"));
+	if (PHANDLE_VALID(xen)) {
+		return PLATFORM_GENERIC_XEN;
+	}
+#endif
 
 	/* Look for a PowerMac */
 	len = prom_getprop(_prom->root, "compatible",
@@ -2261,6 +2270,31 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 */
 	if (RELOC(of_platform) == PLATFORM_PSERIES)
 		prom_initialize_tce_table();
+#endif
+#ifdef CONFIG_PPC_XEN
+	if (RELOC(of_platform) & PLATFORM_LPAR) {
+		phandle xen;
+
+		prom_debug("XXX:checking for Xen OF package\n");
+
+		xen = call_prom("finddevice", 1, 1, ADDR("/xen"));
+		if (PHANDLE_VALID(xen)) {
+			u64 res[2];
+			int l;
+			ulong base;
+
+			l = prom_getprop(xen, "reserved", res, sizeof (res));
+			if (l != sizeof(res)) {
+				prom_panic("Xen reserved prop not exist\n");
+			}
+			
+			base = alloc_down(res[1], PAGE_SIZE, 0);
+			if (base != res[0]) {
+				prom_panic("XSI != alloc_down()\n");
+			}
+			reserve_mem(res[0], res[1]);
+		}
+	}	
 #endif
 
 	/*

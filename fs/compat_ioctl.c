@@ -124,6 +124,13 @@
 #include <linux/dvb/video.h>
 #include <linux/lp.h>
 
+#ifdef CONFIG_XEN
+#include <xen/interface/xen.h>
+#include <xen/public/evtchn.h>
+#include <xen/public/privcmd.h>
+#include <xen/compat_ioctl.h>
+#endif
+
 /* Aiee. Someone does not find a difference between int and long */
 #define EXT2_IOC32_GETFLAGS               _IOR('f', 1, int)
 #define EXT2_IOC32_SETFLAGS               _IOW('f', 2, int)
@@ -2948,6 +2955,18 @@ COMPATIBLE_IOCTL(LPRESET)
 /*LPGETSTATS not implemented, but no kernels seem to compile it in anyways*/
 COMPATIBLE_IOCTL(LPGETFLAGS)
 HANDLE_IOCTL(LPSETTIMEOUT, lp_timeout_trans)
+
+#ifdef CONFIG_XEN
+HANDLE_IOCTL(IOCTL_PRIVCMD_MMAP_32, privcmd_ioctl_32)
+HANDLE_IOCTL(IOCTL_PRIVCMD_MMAPBATCH_32, privcmd_ioctl_32)
+COMPATIBLE_IOCTL(IOCTL_PRIVCMD_HYPERCALL)
+COMPATIBLE_IOCTL(IOCTL_EVTCHN_BIND_VIRQ)
+COMPATIBLE_IOCTL(IOCTL_EVTCHN_BIND_INTERDOMAIN)
+COMPATIBLE_IOCTL(IOCTL_EVTCHN_BIND_UNBOUND_PORT)
+COMPATIBLE_IOCTL(IOCTL_EVTCHN_UNBIND)
+COMPATIBLE_IOCTL(IOCTL_EVTCHN_NOTIFY)
+COMPATIBLE_IOCTL(IOCTL_EVTCHN_RESET)
+#endif
 };
 
 int ioctl_table_size = ARRAY_SIZE(ioctl_start);

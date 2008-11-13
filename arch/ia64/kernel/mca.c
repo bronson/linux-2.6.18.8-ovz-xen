@@ -79,6 +79,7 @@
 #include <asm/system.h>
 #include <asm/sal.h>
 #include <asm/mca.h>
+#include <asm/kexec.h>
 
 #include <asm/irq.h>
 #include <asm/hw_irq.h>
@@ -160,11 +161,33 @@ typedef struct ia64_state_log_s
 
 static ia64_state_log_t ia64_state_log[IA64_MAX_LOG_TYPES];
 
+#ifdef CONFIG_XEN
+DEFINE_SPINLOCK(ia64_mca_xencomm_lock);
+LIST_HEAD(ia64_mca_xencomm_list);
+
+#define IA64_MCA_XENCOMM_ALLOCATE(rec, desc) \
+	if (is_running_on_xen()) { \
+		ia64_mca_xencomm_t *entry; \
+		entry = alloc_bootmem(sizeof(ia64_mca_xencomm_t)); \
+		entry->record = rec; \
+		entry->handle = desc; \
+		list_add(&entry->list, &ia64_mca_xencomm_list); \
+	}
+#define IA64_LOG_ALLOCATE(it, size) \
+	{ia64_err_rec_t *rec; \
+	ia64_state_log[it].isl_log[IA64_LOG_CURR_INDEX(it)] = rec = \
+		(ia64_err_rec_t *)alloc_bootmem(size); \
+	IA64_MCA_XENCOMM_ALLOCATE(rec, xencomm_map(rec, size)); \
+	ia64_state_log[it].isl_log[IA64_LOG_NEXT_INDEX(it)] = rec = \
+		(ia64_err_rec_t *)alloc_bootmem(size); \
+	IA64_MCA_XENCOMM_ALLOCATE(rec, xencomm_map(rec, size));}
+#else
 #define IA64_LOG_ALLOCATE(it, size) \
 	{ia64_state_log[it].isl_log[IA64_LOG_CURR_INDEX(it)] = \
 		(ia64_err_rec_t *)alloc_bootmem(size); \
 	ia64_state_log[it].isl_log[IA64_LOG_NEXT_INDEX(it)] = \
 		(ia64_err_rec_t *)alloc_bootmem(size);}
+#endif
 #define IA64_LOG_LOCK_INIT(it) spin_lock_init(&ia64_state_log[it].isl_lock)
 #define IA64_LOG_LOCK(it)      spin_lock_irqsave(&ia64_state_log[it].isl_lock, s)
 #define IA64_LOG_UNLOCK(it)    spin_unlock_irqrestore(&ia64_state_log[it].isl_lock,s)
@@ -1066,6 +1089,11 @@ ia64_mca_handler(struct pt_regs *regs, struct switch_stack *sw,
 		rh->severity = sal_log_severity_corrected;
 		ia64_sal_clear_state_info(SAL_INFO_TYPE_MCA);
 		sos->os_status = IA64_MCA_CORRECTED;
+ 	} else {
+#ifdef CONFIG_KEXEC
+		atomic_set(&kdump_in_progress, 1);
+		monarch_cpu = -1;
+#endif
 	}
 	if (notify_die(DIE_MCA_MONARCH_LEAVE, "MCA", regs, (long)&nd, 0, recover)
 			== NOTIFY_STOP)

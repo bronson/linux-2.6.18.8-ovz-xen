@@ -15,11 +15,17 @@
  * 	- initrd (optional)
  * 	- command line string
  * 	- kernel code & data
+ * 	- crash dumping code reserved region
  * 	- Kernel memory map built from EFI memory map
+ *	- xen start info
  *
  * More could be added if necessary
  */
-#define IA64_MAX_RSVD_REGIONS 6
+#ifndef CONFIG_XEN
+#define IA64_MAX_RSVD_REGIONS 7
+#else
+#define IA64_MAX_RSVD_REGIONS 8
+#endif
 
 struct rsvd_region {
 	unsigned long start;	/* virtual address of beginning of element */

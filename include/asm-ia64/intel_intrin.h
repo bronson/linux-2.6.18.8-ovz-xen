@@ -16,8 +16,8 @@
 		 	 * intrinsic
 		 	 */
 
-#define ia64_getreg		__getReg
-#define ia64_setreg		__setReg
+#define __ia64_getreg		__getReg
+#define __ia64_setreg		__setReg
 
 #define ia64_hint		__hint
 #define ia64_hint_pause		__hint_pause
@@ -33,16 +33,16 @@
 #define ia64_getf_exp		__getf_exp
 #define ia64_shrp		_m64_shrp
 
-#define ia64_tpa		__tpa
+#define __ia64_tpa		__tpa
 #define ia64_invala		__invala
 #define ia64_invala_gr		__invala_gr
 #define ia64_invala_fr		__invala_fr
 #define ia64_nop		__nop
 #define ia64_sum		__sum
-#define ia64_ssm		__ssm
+#define __ia64_ssm		__ssm
 #define ia64_rum		__rum
-#define ia64_rsm		__rsm
-#define ia64_fc 		__fc
+#define __ia64_rsm		__rsm
+#define __ia64_fc 		__fc
 
 #define ia64_ldfs		__ldfs
 #define ia64_ldfd		__ldfd
@@ -80,24 +80,24 @@
 
 #define __ia64_set_dbr(index, val)	\
 		__setIndReg(_IA64_REG_INDR_DBR, index, val)
-#define ia64_set_ibr(index, val)	\
+#define __ia64_set_ibr(index, val)	\
 		__setIndReg(_IA64_REG_INDR_IBR, index, val)
-#define ia64_set_pkr(index, val)	\
+#define __ia64_set_pkr(index, val)	\
 		__setIndReg(_IA64_REG_INDR_PKR, index, val)
-#define ia64_set_pmc(index, val)	\
+#define __ia64_set_pmc(index, val)	\
 		__setIndReg(_IA64_REG_INDR_PMC, index, val)
-#define ia64_set_pmd(index, val)	\
+#define __ia64_set_pmd(index, val)	\
 		__setIndReg(_IA64_REG_INDR_PMD, index, val)
-#define ia64_set_rr(index, val)	\
+#define __ia64_set_rr(index, val)	\
 		__setIndReg(_IA64_REG_INDR_RR, index, val)
 
-#define ia64_get_cpuid(index) 	__getIndReg(_IA64_REG_INDR_CPUID, index)
+#define __ia64_get_cpuid(index) 	__getIndReg(_IA64_REG_INDR_CPUID, index)
 #define __ia64_get_dbr(index) 	__getIndReg(_IA64_REG_INDR_DBR, index)
-#define ia64_get_ibr(index) 	__getIndReg(_IA64_REG_INDR_IBR, index)
-#define ia64_get_pkr(index) 	__getIndReg(_IA64_REG_INDR_PKR, index)
-#define ia64_get_pmc(index) 	__getIndReg(_IA64_REG_INDR_PMC, index)
-#define ia64_get_pmd(index)  	__getIndReg(_IA64_REG_INDR_PMD, index)
-#define ia64_get_rr(index) 	__getIndReg(_IA64_REG_INDR_RR, index)
+#define __ia64_get_ibr(index) 	__getIndReg(_IA64_REG_INDR_IBR, index)
+#define __ia64_get_pkr(index) 	__getIndReg(_IA64_REG_INDR_PKR, index)
+#define __ia64_get_pmc(index) 	__getIndReg(_IA64_REG_INDR_PMC, index)
+#define __ia64_get_pmd(index)  	__getIndReg(_IA64_REG_INDR_PMD, index)
+#define __ia64_get_rr(index) 	__getIndReg(_IA64_REG_INDR_RR, index)
 
 #define ia64_srlz_d		__dsrlz
 #define ia64_srlz_i		__isrlz
@@ -116,18 +116,18 @@
 #define ia64_ld8_acq		__ld8_acq
 
 #define ia64_sync_i		__synci
-#define ia64_thash		__thash
-#define ia64_ttag		__ttag
-#define ia64_itcd		__itcd
-#define ia64_itci		__itci
-#define ia64_itrd		__itrd
-#define ia64_itri		__itri
-#define ia64_ptce		__ptce
-#define ia64_ptcl		__ptcl
-#define ia64_ptcg		__ptcg
-#define ia64_ptcga		__ptcga
-#define ia64_ptri		__ptri
-#define ia64_ptrd		__ptrd
+#define __ia64_thash		__thash
+#define __ia64_ttag		__ttag
+#define __ia64_itcd		__itcd
+#define __ia64_itci		__itci
+#define __ia64_itrd		__itrd
+#define __ia64_itri		__itri
+#define __ia64_ptce		__ptce
+#define __ia64_ptcl		__ptcl
+#define __ia64_ptcg		__ptcg
+#define __ia64_ptcga		__ptcga
+#define __ia64_ptri		__ptri
+#define __ia64_ptrd		__ptrd
 #define ia64_dep_mi		_m64_dep_mi
 
 /* Values for lfhint in __lfetch and __lfetch_fault */
@@ -142,15 +142,17 @@
 #define ia64_lfetch_fault	__lfetch_fault
 #define ia64_lfetch_fault_excl	__lfetch_fault_excl
 
-#define ia64_intrin_local_irq_restore(x)		\
+#define __ia64_intrin_local_irq_restore(x)		\
 do {							\
 	if ((x) != 0) {					\
-		ia64_ssm(IA64_PSR_I);			\
+		__ia64_ssm(IA64_PSR_I);			\
 		ia64_srlz_d();				\
 	} else {					\
-		ia64_rsm(IA64_PSR_I);			\
+		__ia64_rsm(IA64_PSR_I);			\
 	}						\
 } while (0)
+
+#define __ia64_get_psr_i()	(__ia64_getreg(_IA64_REG_PSR) & 0x4000UL)
 
 #define __builtin_trap()	__break(0);
 

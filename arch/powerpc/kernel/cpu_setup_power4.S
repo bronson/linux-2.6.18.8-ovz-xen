@@ -73,6 +73,13 @@ _GLOBAL(__970_cpu_preinit)
 	blr
 
 _GLOBAL(__setup_cpu_ppc970)
+	/*
+	 * Do nothing if not running in HV mode
+	 */
+	mfmsr	r0
+	rldicl.	r0,r0,4,63
+	beqlr
+
 	mfspr	r0,SPRN_HID0
 	li	r11,5			/* clear DOZE and SLEEP */
 	rldimi	r0,r11,52,8		/* set NAP and DPM */

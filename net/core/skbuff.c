@@ -240,6 +240,7 @@ struct sk_buff *alloc_skb_from_cache(kmem_cache_t *cp,
 	skb_shinfo(skb)->gso_size = 0;
 	skb_shinfo(skb)->gso_segs = 0;
 	skb_shinfo(skb)->gso_type = 0;
+	skb_shinfo(skb)->ip6_frag_id = 0;
 	skb_shinfo(skb)->frag_list = NULL;
 out:
 	return skb;
@@ -464,6 +465,10 @@ struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp_mask)
 	C(local_df);
 	n->cloned = 1;
 	n->nohdr = 0;
+#ifdef CONFIG_XEN
+	C(proto_data_valid);
+	C(proto_csum_blank);
+#endif
 	C(pkt_type);
 	C(ip_summed);
 	C(priority);
@@ -2071,7 +2076,6 @@ EXPORT_SYMBOL(pskb_copy);
 EXPORT_SYMBOL(pskb_expand_head);
 EXPORT_SYMBOL(skb_checksum);
 EXPORT_SYMBOL(skb_clone);
-EXPORT_SYMBOL(skb_clone_fraglist);
 EXPORT_SYMBOL(skb_copy);
 EXPORT_SYMBOL(skb_copy_and_csum_bits);
 EXPORT_SYMBOL(skb_copy_and_csum_dev);

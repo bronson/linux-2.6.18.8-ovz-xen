@@ -119,6 +119,7 @@ extern struct page *vmem_map;
 #endif
 
 #ifdef CONFIG_FLATMEM
+extern unsigned long max_mapnr;
 # define pfn_valid(pfn)		(((pfn) < max_mapnr) && ia64_pfn_valid(pfn))
 #elif defined(CONFIG_DISCONTIGMEM)
 extern unsigned long min_low_pfn;
@@ -126,7 +127,9 @@ extern unsigned long max_low_pfn;
 # define pfn_valid(pfn)		(((pfn) >= min_low_pfn) && ((pfn) < max_low_pfn) && ia64_pfn_valid(pfn))
 #endif
 
+#ifndef CONFIG_XEN
 #define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
+#endif
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 #define pfn_to_kaddr(pfn)	__va((pfn) << PAGE_SHIFT)
 
@@ -226,6 +229,18 @@ get_order (unsigned long size)
 					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC |		\
 					 (((current->personality & READ_IMPLIES_EXEC) != 0)	\
 					  ? VM_EXEC : 0))
+
+#ifndef __ASSEMBLY__
+
+#include <linux/kernel.h>
+#include <asm/hypervisor.h>	/* to compile ioremap.c */
+
+#ifdef CONFIG_XEN
+
+#include <asm/maddr.h>
+
+#endif /* CONFIG_XEN */
+#endif /* __ASSEMBLY__ */
 
 # endif /* __KERNEL__ */
 #endif /* _ASM_IA64_PAGE_H */

@@ -752,6 +752,9 @@ cmds(struct pt_regs *excp)
 			cmd = inchar();
 		}
 		switch (cmd) {
+		case 'A':
+			asm volatile(".long 0x200;nop");
+			break;
 		case 'm':
 			cmd = inchar();
 			switch (cmd) {

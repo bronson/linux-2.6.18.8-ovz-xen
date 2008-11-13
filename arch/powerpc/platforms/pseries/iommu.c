@@ -531,6 +531,17 @@ static void iommu_dev_setup_pSeriesLP(struct pci_dev *dev)
 	 * already allocated.
 	 */
 	dn = pci_device_to_OF_node(dev);
+	if (dn == NULL) {
+#ifdef CONFIG_PPC_XEN
+		/* this becomes possible for Xen Dom0 */
+		DBG("%s, dev %p (%s) has no OF devtree entree\n", __func__,
+		    dev, pci_name(dev));
+		return;
+#else
+		panic("%s, dev %p (%s) has no OF devtree entree\n", __func__,
+		      dev, pci_name(dev));
+#endif
+	}
 
 	for (pdn = dn; pdn && PCI_DN(pdn) && !PCI_DN(pdn)->iommu_table;
 	     pdn = pdn->parent) {

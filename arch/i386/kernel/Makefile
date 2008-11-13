@@ -43,6 +43,7 @@ obj-$(CONFIG_K8_NB)		+= k8.o
 EXTRA_AFLAGS   := -traditional
 
 obj-$(CONFIG_SCx200)		+= scx200.o
+obj-$(CONFIG_XEN)		+= fixup.o
 
 # vsyscall.o contains the vsyscall DSO images as __initdata.
 # We must build both images before we can assemble it.
@@ -80,5 +81,8 @@ $(obj)/vsyscall-syms.o: $(src)/vsyscall.lds \
 			$(obj)/vsyscall-sysenter.o $(obj)/vsyscall-note.o FORCE
 	$(call if_changed,syscall)
 
+early_printk-y            += ../../x86_64/kernel/early_printk.o
 k8-y                      += ../../x86_64/kernel/k8.o
 
+disabled-obj-$(CONFIG_XEN) := i8259.o reboot.o smpboot.o
+%/head.o %/head.s: $(if $(CONFIG_XEN),EXTRA_AFLAGS,dummy) :=

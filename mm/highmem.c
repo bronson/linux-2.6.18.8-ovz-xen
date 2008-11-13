@@ -142,6 +142,17 @@ start:
 	return vaddr;
 }
 
+#ifdef CONFIG_XEN
+void kmap_flush_unused(void)
+{
+	spin_lock(&kmap_lock);
+	flush_all_zero_pkmaps();
+	spin_unlock(&kmap_lock);
+}
+
+EXPORT_SYMBOL(kmap_flush_unused);
+#endif
+
 void fastcall *kmap_high(struct page *page)
 {
 	unsigned long vaddr;
@@ -455,6 +466,12 @@ static void __blk_queue_bounce(request_queue_t *q, struct bio **bio_orig,
 void blk_queue_bounce(request_queue_t *q, struct bio **bio_orig)
 {
 	mempool_t *pool;
+
+	/*
+	 * Data-less bio, nothing to bounce
+	 */
+	if (bio_empty_barrier(*bio_orig))
+		return;
 
 	/*
 	 * for non-isa bounce case, just check if the bounce pfn is equal

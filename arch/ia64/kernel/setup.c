@@ -43,6 +43,8 @@
 #include <linux/initrd.h>
 #include <linux/pm.h>
 #include <linux/cpufreq.h>
+#include <linux/kexec.h>
+#include <linux/crash_dump.h>
 
 #include <asm/ia32.h>
 #include <asm/machvec.h>
@@ -60,6 +62,12 @@
 #include <asm/system.h>
 #include <asm/unistd.h>
 #include <asm/system.h>
+#ifdef CONFIG_XEN
+#include <asm/hypervisor.h>
+#include <asm/xen/xencomm.h>
+#include <xen/xencons.h>
+#endif
+#include <linux/dma-mapping.h>
 
 #if defined(CONFIG_SMP) && (IA64_CPU_SIZE > PAGE_SIZE)
 # error "struct cpuinfo_ia64 too big!"
@@ -68,6 +76,34 @@
 #ifdef CONFIG_SMP
 unsigned long __per_cpu_offset[NR_CPUS];
 EXPORT_SYMBOL(__per_cpu_offset);
+#endif
+
+#ifdef CONFIG_XEN
+static void
+xen_panic_hypercall(struct unw_frame_info *info, void *arg)
+{
+	current->thread.ksp = (__u64)info->sw - 16;
+	HYPERVISOR_shutdown(SHUTDOWN_crash);
+	/* we're never actually going to get here... */
+}
+
+static int
+xen_panic_event(struct notifier_block *this, unsigned long event, void *ptr)
+{
+	unw_init_running(xen_panic_hypercall, NULL);
+	/* we're never actually going to get here... */
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block xen_panic_block = {
+	xen_panic_event, NULL, 0 /* try to go last */
+};
+
+void xen_pm_power_off(void)
+{
+	local_irq_disable();
+	HYPERVISOR_shutdown(SHUTDOWN_poweroff);
+}
 #endif
 
 extern void ia64_setup_printk_clock(void);
@@ -242,6 +278,14 @@ reserve_memory (void)
 	rsvd_region[n].end   = (unsigned long) ia64_imva(_end);
 	n++;
 
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		rsvd_region[n].start = (unsigned long)__va((HYPERVISOR_shared_info->arch.start_info_pfn << PAGE_SHIFT));
+		rsvd_region[n].end   = rsvd_region[n].start + PAGE_SIZE;
+		n++;
+ 	}
+#endif
+
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (ia64_boot_param->initrd_start) {
 		rsvd_region[n].start = (unsigned long)__va(ia64_boot_param->initrd_start);
@@ -253,6 +297,56 @@ reserve_memory (void)
 	efi_memmap_init(&rsvd_region[n].start, &rsvd_region[n].end);
 	n++;
 
+#ifdef CONFIG_KEXEC
+	/* crashkernel=size@offset specifies the size to reserve for a crash
+	 * kernel. If offset is 0, then it is determined automatically.
+	 * By reserving this memory we guarantee that linux never set's it
+	 * up as a DMA target.Useful for holding code to do something
+	 * appropriate after a kernel panic.
+	 */
+	{
+		char *from = strstr(saved_command_line, "crashkernel=");
+		unsigned long base, size;
+#ifdef CONFIG_XEN
+		if (is_initial_xendomain() && from)
+				printk("Ignoring crashkernel command line, "
+				       "parameter will be supplied by xen\n");
+		else {
+#endif
+		if (from) {
+			size = memparse(from + 12, &from);
+			if (*from == '@')
+				base = memparse(from+1, &from);
+			else
+				base = 0;
+			if (size) {
+				if (!base) {
+					sort_regions(rsvd_region, n);
+					base = kdump_find_rsvd_region(size,
+							      	rsvd_region, n);
+					}
+				if (base != ~0UL) {
+					rsvd_region[n].start =
+						(unsigned long)__va(base);
+					rsvd_region[n].end =
+						(unsigned long)__va(base + size);
+					n++;
+					crashk_res.start = base;
+					crashk_res.end = base + size - 1;
+				}
+			}
+		}
+		efi_memmap_res.start = ia64_boot_param->efi_memmap;
+                efi_memmap_res.end = efi_memmap_res.start +
+                        ia64_boot_param->efi_memmap_size;
+                boot_param_res.start = kexec_virt_to_phys(ia64_boot_param);
+                boot_param_res.end = boot_param_res.start +
+                        sizeof(*ia64_boot_param);
+#ifdef CONFIG_XEN
+		}
+#endif
+	}
+#endif
 	/* end of memory marker */
 	rsvd_region[n].start = ~0UL;
 	rsvd_region[n].end   = ~0UL;
@@ -263,6 +357,7 @@ reserve_memory (void)
 
 	sort_regions(rsvd_region, num_rsvd_regions);
 }
+
 
 /**
  * find_initrd - get initrd parameters from the boot parameter structure
@@ -397,10 +492,48 @@ static __init int setup_nomca(char *s)
 }
 early_param("nomca", setup_nomca);
 
+#ifdef CONFIG_PROC_VMCORE
+/* elfcorehdr= specifies the location of elf core header
+ * stored by the crashed kernel.
+ */
+static int __init parse_elfcorehdr(char *arg)
+{
+	if (!arg)
+		return -EINVAL;
+
+        elfcorehdr_addr = memparse(arg, &arg);
+	return 0;
+}
+early_param("elfcorehdr", parse_elfcorehdr);
+#endif /* CONFIG_PROC_VMCORE */
+
 void __init
 setup_arch (char **cmdline_p)
 {
+#ifdef CONFIG_XEN
+	shared_info_t *s = NULL;
+	if (is_running_on_xen()) {
+		s = HYPERVISOR_shared_info;
+		xen_start_info = __va(s->arch.start_info_pfn << PAGE_SHIFT);
+	}
+#endif
+
 	unw_init();
+
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		/* Must be done before any hypercall.  */
+		xencomm_initialize();
+
+		setup_xen_features();
+		/* Register a call for panic conditions. */
+		atomic_notifier_chain_register(&panic_notifier_list,
+		                               &xen_panic_block);
+		pm_power_off = xen_pm_power_off;
+
+		xen_ia64_enable_opt_feature();
+	}
+#endif
 
 	ia64_patch_vtop((u64) __start___vtop_patchlist, (u64) __end___vtop_patchlist);
 
@@ -462,6 +595,57 @@ setup_arch (char **cmdline_p)
 	acpi_boot_init();
 #endif
 
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		printk("Running on Xen! start_info_pfn=0x%lx nr_pages=%ld "
+		       "flags=0x%x\n", s->arch.start_info_pfn,
+		       xen_start_info->nr_pages, xen_start_info->flags);
+
+		/*
+		 * If a console= is NOT specified, we assume using the
+		 * xencons console is desired.  By default, this is xvc0
+		 * for both dom0 and domU.
+		 */
+		if (!strstr(*cmdline_p, "console=")) {
+			char *p, *q, name[5] = "xvc";
+			int offset = 0;
+
+#if defined(CONFIG_VGA_CONSOLE)
+			/*
+			 * conswitchp might be set intelligently from the
+			 * PCDP code.  If set to VGA console, use it.
+			 */
+			if (is_initial_xendomain() && conswitchp == &vga_con)
+				strncpy(name, "tty", 3);
+#endif
+
+			p = strstr(*cmdline_p, "xencons=");
+
+			if (p) {
+				p += 8;
+				if (!strncmp(p, "ttyS", 4)) {
+					strncpy(name, p, 4);
+					p += 4;
+					offset = simple_strtol(p, &q, 10);
+					if (p == q)
+						offset = 0;
+				} else if (!strncmp(p, "tty", 3) ||
+				           !strncmp(p, "xvc", 3)) {
+					strncpy(name, p, 3);
+					p += 3;
+					offset = simple_strtol(p, &q, 10);
+					if (p == q)
+						offset = 0;
+				} else if (!strncmp(p, "off", 3))
+					offset = -1;
+			}
+
+			if (offset >= 0)
+				add_preferred_console(name, offset, NULL);
+		}
+	}
+#endif
+
 #ifdef CONFIG_VT
 	if (!conswitchp) {
 # if defined(CONFIG_DUMMY_CONSOLE)
@@ -481,11 +665,28 @@ setup_arch (char **cmdline_p)
 #endif
 
 	/* enable IA-64 Machine Check Abort Handling unless disabled */
+#ifdef CONFIG_XEN
+	if (is_running_on_xen() && !is_initial_xendomain()) {
+		nomca = 1;
+#if !defined(CONFIG_VT) || !defined(CONFIG_DUMMY_CONSOLE)
+		conswitchp = NULL;
+#endif
+	}
+#endif
 	if (!nomca)
 		ia64_mca_init();
 
 	platform_setup(cmdline_p);
+#ifdef CONFIG_XEN
+	if (is_running_on_xen() && !ia64_platform_is("xen")) {
+		extern ia64_mv_setup_t xen_setup;
+		xen_setup(cmdline_p);
+	}
+#endif
 	paging_init();
+#ifdef CONFIG_XEN
+	xen_contiguous_bitmap_init(max_pfn);
+#endif
 }
 
 /*
@@ -870,6 +1071,13 @@ cpu_init (void)
 	/* size of physical stacked register partition plus 8 bytes: */
 	__get_cpu_var(ia64_phys_stacked_size_p8) = num_phys_stacked*8 + 8;
 	platform_cpu_init();
+#ifdef CONFIG_XEN
+	if (is_running_on_xen() && !ia64_platform_is("xen")) {
+		extern ia64_mv_cpu_init_t xen_cpu_init;
+		xen_cpu_init();
+	}
+#endif
+
 	pm_idle = default_idle;
 }
 

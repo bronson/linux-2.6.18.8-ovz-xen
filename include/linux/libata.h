@@ -162,6 +162,12 @@ enum {
 	ATA_FLAG_SKIP_D2H_BSY	= (1 << 12), /* can't wait for the first D2H
 					      * Register FIS clearing BSY */
 	ATA_FLAG_DEBUGMSG	= (1 << 13),
+	ATA_FLAG_IGN_SIMPLEX    = (1 << 15), /* ignore SIMPLEX */
+	ATA_FLAG_NO_IORDY       = (1 << 16), /* controller lacks iordy */
+	ATA_FLAG_ACPI_SATA      = (1 << 17), /* need native SATA ACPI layout */
+	ATA_FLAG_AN             = (1 << 18), /* controller supports AN */
+	ATA_FLAG_PMP            = (1 << 19), /* controller supports PMP */
+	ATA_FLAG_IPM            = (1 << 20), /* driver can handle IPM */
 
 	/* The following flag belongs to ap->pflags but is kept in
 	 * ap->flags because it's referenced in many LLDs and will be

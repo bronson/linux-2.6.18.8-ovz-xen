@@ -42,6 +42,11 @@
 #include <asm/system.h>		/* wmb() */
 
 #include <asm/acpi-ext.h>
+#include <asm/maddr.h>		/* range_straddles_page_boundary() */
+#ifdef CONFIG_XEN
+#include <xen/gnttab.h>
+#include <asm/gnttab_dma.h>
+#endif
 
 #define PFX "IOC: "
 
@@ -198,6 +203,9 @@ struct ioc {
 	void __iomem	*ioc_hpa;	/* I/O MMU base address */
 	char		*res_map;	/* resource map, bit == pdir entry */
 	u64		*pdir_base;	/* physical base address */
+#ifdef CONFIG_XEN
+	u64		*xen_virt_cache;
+#endif
 	unsigned long	ibase;		/* pdir IOV Space base */
 	unsigned long	imask;		/* pdir IOV Space mask */
 
@@ -762,14 +770,21 @@ sba_free_range(struct ioc *ioc, dma_addr_t iova, size_t size)
  * on the vba.
  */
 
-#if 1
-#define sba_io_pdir_entry(pdir_ptr, vba) *pdir_ptr = ((vba & ~0xE000000000000FFFULL)	\
-						      | 0x8000000000000000ULL)
+#ifndef CONFIG_XEN
+#define sba_io_pdir_entry(ioc, pdir_ptr, vba) *pdir_ptr =	\
+	((virt_to_bus((void *)vba) & ~0xFFFULL) | 0x8000000000000000ULL)
 #else
 void SBA_INLINE
-sba_io_pdir_entry(u64 *pdir_ptr, unsigned long vba)
+sba_io_pdir_entry(struct ioc *ioc, u64 *pdir_ptr, unsigned long vba)
 {
-	*pdir_ptr = ((vba & ~0xE000000000000FFFULL) | 0x80000000000000FFULL);
+	*pdir_ptr = ((virt_to_bus((void *)vba) & ~0xFFFULL) |
+		    0x80000000000000FFULL);
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		int pide = ((u64)pdir_ptr - (u64)ioc->pdir_base) >> 3;
+		ioc->xen_virt_cache[pide] = vba;
+	}
+#endif
 }
 #endif
 
@@ -783,6 +798,12 @@ static void
 mark_clean (void *addr, size_t size)
 {
 	unsigned long pg_addr, end;
+
+#ifdef CONFIG_XEN
+	/* XXX: Bad things happen starting domUs when this is enabled. */
+	if (is_running_on_xen())
+		return;
+#endif
 
 	pg_addr = PAGE_ALIGN((unsigned long) addr);
 	end = (unsigned long) addr + size;
@@ -850,6 +871,10 @@ sba_mark_invalid(struct ioc *ioc, dma_addr_t iova, size_t byte_cnt)
 		*/
 		ioc->pdir_base[off] = (0x80000000000000FFULL | prefetch_spill_page);
 #endif
+#ifdef CONFIG_XEN
+		if (is_running_on_xen())
+			ioc->xen_virt_cache[off] = 0UL;
+#endif
 	} else {
 		u32 t = get_iovp_order(byte_cnt) + iovp_shift;
 
@@ -864,6 +889,10 @@ sba_mark_invalid(struct ioc *ioc, dma_addr_t iova, size_t byte_cnt)
 			ioc->pdir_base[off] &= ~(0x80000000000000FFULL);
 #else
 			ioc->pdir_base[off] = (0x80000000000000FFULL | prefetch_spill_page);
+#endif
+#ifdef CONFIG_XEN
+			if (is_running_on_xen())
+				ioc->xen_virt_cache[off] = 0UL;
 #endif
 			off++;
 			byte_cnt -= iovp_size;
@@ -894,15 +923,29 @@ sba_map_single(struct device *dev, void *addr, size_t size, int dir)
 	unsigned long flags;
 #endif
 #ifdef ALLOW_IOV_BYPASS
-	unsigned long pci_addr = virt_to_phys(addr);
+	unsigned long pci_addr;
+#endif
+
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		void* tmp_addr = addr;
+		size_t tmp_size = size;
+		do {
+			gnttab_dma_use_page(virt_to_page(tmp_addr));
+			tmp_addr += PAGE_SIZE;
+			tmp_size -= min(tmp_size, PAGE_SIZE);
+		} while (tmp_size);
+	}
 #endif
 
 #ifdef ALLOW_IOV_BYPASS
+	pci_addr = virt_to_bus(addr);
 	ASSERT(to_pci_dev(dev)->dma_mask);
 	/*
  	** Check if the PCI device can DMA to ptr... if so, just return ptr
  	*/
-	if (likely((pci_addr & ~to_pci_dev(dev)->dma_mask) == 0)) {
+	if (likely((pci_addr & ~to_pci_dev(dev)->dma_mask) == 0 &&
+                   !range_straddles_page_boundary(__pa(addr), size))) {
 		/*
  		** Device is bit capable of DMA'ing to the buffer...
 		** just return the PCI address of ptr
@@ -944,7 +987,7 @@ sba_map_single(struct device *dev, void *addr, size_t size, int dir)
 
 	while (size > 0) {
 		ASSERT(((u8 *)pdir_start)[7] == 0); /* verify availability */
-		sba_io_pdir_entry(pdir_start, (unsigned long) addr);
+		sba_io_pdir_entry(ioc, pdir_start, (unsigned long) addr);
 
 		DBG_RUN("     pdir 0x%p %lx\n", pdir_start, *pdir_start);
 
@@ -973,14 +1016,58 @@ sba_mark_clean(struct ioc *ioc, dma_addr_t iova, size_t size)
 	void	*addr;
 
 	if (size <= iovp_size) {
-		addr = phys_to_virt(ioc->pdir_base[off] &
+#ifdef CONFIG_XEN
+		if (is_running_on_xen())
+			addr = (void *)ioc->xen_virt_cache[off];
+		else
+			addr = bus_to_virt(ioc->pdir_base[off] &
 		                    ~0xE000000000000FFFULL);
+#else
+		addr = bus_to_virt(ioc->pdir_base[off] &
+				   ~0xE000000000000FFFULL);
+#endif
 		mark_clean(addr, size);
 	} else {
 		do {
-			addr = phys_to_virt(ioc->pdir_base[off] &
+#ifdef CONFIG_XEN
+			if (is_running_on_xen())
+				addr = (void *)ioc->xen_virt_cache[off];
+			else
+				addr = bus_to_virt(ioc->pdir_base[off] &
 			                    ~0xE000000000000FFFULL);
+#else
+			addr = bus_to_virt(ioc->pdir_base[off] &
+					   ~0xE000000000000FFFULL);
+#endif
 			mark_clean(addr, min(size, iovp_size));
+			off++;
+			size -= iovp_size;
+		} while (size > 0);
+	}
+}
+#endif
+
+#ifdef CONFIG_XEN
+static void
+sba_gnttab_dma_unmap_page(struct ioc *ioc, dma_addr_t iova, size_t size)
+{
+	u32 iovp = (u32) SBA_IOVP(ioc,iova);
+	int off = PDIR_INDEX(iovp);
+	struct page *page;
+
+	if (size <= iovp_size) {
+		BUG_ON(!ioc->xen_virt_cache[off]);
+		page = virt_to_page(ioc->xen_virt_cache[off]);
+		__gnttab_dma_unmap_page(page);
+	} else {
+		struct page *last_page = (struct page *)~0UL;
+		do {
+			BUG_ON(!ioc->xen_virt_cache[off]);
+			page = virt_to_page(ioc->xen_virt_cache[off]);
+			if (page != last_page) {
+				__gnttab_dma_unmap_page(page);
+				last_page = page;
+			}
 			off++;
 			size -= iovp_size;
 		} while (size > 0);
@@ -1018,7 +1105,16 @@ void sba_unmap_single(struct device *dev, dma_addr_t iova, size_t size, int dir)
 
 #ifdef ENABLE_MARK_CLEAN
 		if (dir == DMA_FROM_DEVICE) {
-			mark_clean(phys_to_virt(iova), size);
+			mark_clean(bus_to_virt(iova), size);
+		}
+#endif
+#ifdef CONFIG_XEN
+		if (is_running_on_xen()) {
+			do {
+				gnttab_dma_unmap_page(iova);
+				iova += PAGE_SIZE;
+				size -= min(size,PAGE_SIZE);
+			} while (size);
 		}
 #endif
 		return;
@@ -1036,6 +1132,10 @@ void sba_unmap_single(struct device *dev, dma_addr_t iova, size_t size, int dir)
 #ifdef ENABLE_MARK_CLEAN
 	if (dir == DMA_FROM_DEVICE)
 		sba_mark_clean(ioc, iova, size);
+#endif
+#ifdef CONFIG_XEN
+	if (is_running_on_xen())
+		sba_gnttab_dma_unmap_page(ioc, iova, size);
 #endif
 
 #if DELAYED_RESOURCE_CNT > 0
@@ -1102,9 +1202,14 @@ sba_alloc_coherent (struct device *dev, size_t size, dma_addr_t *dma_handle, gfp
 		return NULL;
 
 	memset(addr, 0, size);
-	*dma_handle = virt_to_phys(addr);
 
 #ifdef ALLOW_IOV_BYPASS
+#ifdef CONFIG_XEN
+	if (xen_create_contiguous_region((unsigned long)addr, get_order(size),
+					 fls64(dev->coherent_dma_mask)))
+		goto iommu_map;
+#endif
+	*dma_handle = virt_to_bus(addr);
 	ASSERT(dev->coherent_dma_mask);
 	/*
  	** Check if the PCI device can DMA to ptr... if so, just return ptr
@@ -1115,6 +1220,9 @@ sba_alloc_coherent (struct device *dev, size_t size, dma_addr_t *dma_handle, gfp
 
 		return addr;
 	}
+#ifdef CONFIG_XEN
+iommu_map:
+#endif
 #endif
 
 	/*
@@ -1138,6 +1246,13 @@ sba_alloc_coherent (struct device *dev, size_t size, dma_addr_t *dma_handle, gfp
  */
 void sba_free_coherent (struct device *dev, size_t size, void *vaddr, dma_addr_t dma_handle)
 {
+#if defined(ALLOW_IOV_BYPASS) && defined(CONFIG_XEN)
+	struct ioc *ioc = GET_IOC(dev);
+
+	if (likely((dma_handle & ioc->imask) != ioc->ibase))
+		xen_destroy_contiguous_region((unsigned long)vaddr,
+					      get_order(size));
+#endif
 	sba_unmap_single(dev, dma_handle, size, 0);
 	free_pages((unsigned long) vaddr, get_order(size));
 }
@@ -1219,7 +1334,7 @@ sba_fill_pdir(
 			dma_offset=0;	/* only want offset on first chunk */
 			cnt = ROUNDUP(cnt, iovp_size);
 			do {
-				sba_io_pdir_entry(pdirp, vaddr);
+				sba_io_pdir_entry(ioc, pdirp, vaddr);
 				vaddr += iovp_size;
 				cnt -= iovp_size;
 				pdirp++;
@@ -1406,7 +1521,11 @@ int sba_map_sg(struct device *dev, struct scatterlist *sglist, int nents, int di
 	if (likely((ioc->dma_mask & ~to_pci_dev(dev)->dma_mask) == 0)) {
 		for (sg = sglist ; filled < nents ; filled++, sg++){
 			sg->dma_length = sg->length;
-			sg->dma_address = virt_to_phys(sba_sg_address(sg));
+#ifdef CONFIG_XEN
+			sg->dma_address = gnttab_dma_map_page(sg->page) + sg->offset;
+#else
+			sg->dma_address = virt_to_bus(sba_sg_address(sg));
+#endif
 		}
 		return filled;
 	}
@@ -1429,6 +1548,15 @@ int sba_map_sg(struct device *dev, struct scatterlist *sglist, int nents, int di
 #endif
 
 	prefetch(ioc->res_hint);
+
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		int i;
+
+		for (i = 0; i < nents; i++)
+			gnttab_dma_use_page(sglist[i].page);
+	}
+#endif
 
 	/*
 	** First coalesce the chunks and allocate I/O pdir space
@@ -1562,11 +1690,25 @@ ioc_iova_init(struct ioc *ioc)
 
 	memset(ioc->pdir_base, 0, ioc->pdir_size);
 
+#ifdef CONFIG_XEN
+	/* The page table needs to be pinned in Xen memory */
+	if (xen_create_contiguous_region((unsigned long)ioc->pdir_base,
+					 get_order(ioc->pdir_size), 0))
+		panic(PFX "Couldn't contiguously map I/O Page Table\n");
+
+	ioc->xen_virt_cache = (void *) __get_free_pages(
+					GFP_KERNEL, get_order(ioc->pdir_size));
+	if (!ioc->xen_virt_cache)
+		panic(PFX "Couldn't allocate Xen virtual address cache\n");
+
+	memset(ioc->xen_virt_cache, 0, ioc->pdir_size);
+#endif
+
 	DBG_INIT("%s() IOV page size %ldK pdir %p size %x\n", __FUNCTION__,
 		iovp_size >> 10, ioc->pdir_base, ioc->pdir_size);
 
 	ASSERT(ALIGN((unsigned long) ioc->pdir_base, 4*1024) == (unsigned long) ioc->pdir_base);
-	WRITE_REG(virt_to_phys(ioc->pdir_base), ioc->ioc_hpa + IOC_PDIR_BASE);
+	WRITE_REG(virt_to_bus(ioc->pdir_base), ioc->ioc_hpa + IOC_PDIR_BASE);
 
 	/*
 	** If an AGP device is present, only use half of the IOV space
@@ -1603,7 +1745,7 @@ ioc_iova_init(struct ioc *ioc)
 		for ( ; (u64) poison_addr < addr + iovp_size; poison_addr += poison_size)
 			memcpy(poison_addr, spill_poison, poison_size);
 
-		prefetch_spill_page = virt_to_phys(addr);
+		prefetch_spill_page = virt_to_bus(addr);
 
 		DBG_INIT("%s() prefetch spill addr: 0x%lx\n", __FUNCTION__, prefetch_spill_page);
 	}

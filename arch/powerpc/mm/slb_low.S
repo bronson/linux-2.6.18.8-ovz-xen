@@ -51,6 +51,23 @@ _GLOBAL(slb_allocate_realmode)
 	*/
 	bne	cr7,1f
 
+#ifdef CONFIG_PPC_XEN
+_GLOBAL(slb_miss_kernel_load_xen_nop)
+	b 3f
+	/* Need to check if it is in the part of our XEN Foreign Map */
+	rldicl	r9,r3,30,63		/* get Xen region */
+	cmpldi	cr7,r9,1		/* cmp this bit set to 1 */
+	bne	cr7,3f
+	/* Xen Linear mapping encoding bits, the "li" instruction below
+	 * could be patched below (like the other pages of the linear map)
+	 * if we ever wish to map anything other that 4K pages in 
+	 * this region, right now it is fine as zero.
+	 */
+_GLOBAL(slb_miss_kernel_load_xen_linear)
+	li	r11,0
+	b	slb_finish_load
+3:
+#endif
 	/* Linear mapping encoding bits, the "li" instruction below will
 	 * be patched by the kernel at boot
 	 */

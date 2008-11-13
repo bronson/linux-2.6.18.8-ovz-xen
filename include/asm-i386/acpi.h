@@ -31,6 +31,9 @@
 #include <acpi/pdc_intel.h>
 
 #include <asm/system.h>		/* defines cmpxchg */
+#ifdef CONFIG_XEN
+#include <xen/interface/platform.h>
+#endif
 
 #define COMPILER_DEPENDENT_INT64   long long
 #define COMPILER_DEPENDENT_UINT64  unsigned long long
@@ -156,6 +159,27 @@ static inline void acpi_disable_pci(void)
 }
 extern int acpi_irq_balance_set(char *str);
 
+#ifdef CONFIG_XEN
+static inline int acpi_notify_hypervisor_state(u8 sleep_state,
+					       u32 pm1a_cnt_val,
+					       u32 pm1b_cnt_val)
+{
+	struct xen_platform_op op = {
+		.cmd = XENPF_enter_acpi_sleep,
+		.interface_version = XENPF_INTERFACE_VERSION,
+		.u = {
+			.enter_acpi_sleep = {
+				.pm1a_cnt_val = pm1a_cnt_val,
+				.pm1b_cnt_val = pm1b_cnt_val,
+				.sleep_state = sleep_state,
+			},
+		},
+	};
+
+	return HYPERVISOR_platform_op(&op);
+}
+#endif /* CONFIG_XEN */
+
 #else	/* !CONFIG_ACPI */
 
 #define acpi_lapic 0
@@ -181,7 +205,9 @@ extern void acpi_reserve_bootmem(void);
 
 extern u8 x86_acpiid_to_apicid[];
 
+#ifndef CONFIG_XEN
 #define ARCH_HAS_POWER_INIT	1
+#endif
 
 #endif /*__KERNEL__*/
 

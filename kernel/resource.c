@@ -36,6 +36,16 @@ struct resource iomem_resource = {
 };
 EXPORT_SYMBOL(iomem_resource);
 
+#ifdef CONFIG_PROC_IOMEM_MACHINE
+struct resource iomem_machine_resource = {
+	.name	= "Machine PCI mem",
+	.start	= 0,
+	.end	= -1,
+	.flags	= IORESOURCE_MEM,
+};
+EXPORT_SYMBOL(iomem_machine_resource);
+#endif
+
 static DEFINE_RWLOCK(resource_lock);
 
 #ifdef CONFIG_PROC_FS
@@ -115,6 +125,18 @@ static int iomem_open(struct inode *inode, struct file *file)
 	return res;
 }
 
+#ifdef CONFIG_PROC_IOMEM_MACHINE
+static int iomem_machine_open(struct inode *inode, struct file *file)
+{
+	int res = seq_open(file, &resource_op);
+	if (!res) {
+		struct seq_file *m = file->private_data;
+		m->private = &iomem_machine_resource;
+	}
+	return res;
+}
+#endif
+
 static struct file_operations proc_ioports_operations = {
 	.open		= ioports_open,
 	.read		= seq_read,
@@ -129,6 +151,15 @@ static struct file_operations proc_iomem_operations = {
 	.release	= seq_release,
 };
 
+#ifdef CONFIG_PROC_IOMEM_MACHINE
+static struct file_operations proc_iomem_machine_operations = {
+	.open		= iomem_machine_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+#endif
+
 static int __init ioresources_init(void)
 {
 	struct proc_dir_entry *entry;
@@ -139,6 +170,13 @@ static int __init ioresources_init(void)
 	entry = create_proc_entry("iomem", 0, NULL);
 	if (entry)
 		entry->proc_fops = &proc_iomem_operations;
+#ifdef CONFIG_PROC_IOMEM_MACHINE
+	if (is_initial_xendomain()) {
+		entry = create_proc_entry("iomem_machine", 0, NULL);
+		if (entry)
+			entry->proc_fops = &proc_iomem_machine_operations;
+	}
+#endif
 	return 0;
 }
 __initcall(ioresources_init);

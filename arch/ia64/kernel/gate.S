@@ -32,102 +32,6 @@
 [1:](pr)brl.cond.sptk 0;				\
 	.xdata4 ".data.patch.brl_fsys_bubble_down", 1b-.
 
-GLOBAL_ENTRY(__kernel_syscall_via_break)
-	.prologue
-	.altrp b6
-	.body
-	/*
-	 * Note: for (fast) syscall restart to work, the break instruction must be
-	 *	 the first one in the bundle addressed by syscall_via_break.
-	 */
-{ .mib
-	break 0x100000
-	nop.i 0
-	br.ret.sptk.many b6
-}
-END(__kernel_syscall_via_break)
-
-/*
- * On entry:
- *	r11 = saved ar.pfs
- *	r15 = system call #
- *	b0  = saved return address
- *	b6  = return address
- * On exit:
- *	r11 = saved ar.pfs
- *	r15 = system call #
- *	b0  = saved return address
- *	all other "scratch" registers:	undefined
- *	all "preserved" registers:	same as on entry
- */
-
-GLOBAL_ENTRY(__kernel_syscall_via_epc)
-	.prologue
-	.altrp b6
-	.body
-{
-	/*
-	 * Note: the kernel cannot assume that the first two instructions in this
-	 * bundle get executed.  The remaining code must be safe even if
-	 * they do not get executed.
-	 */
-	adds r17=-1024,r15			// A
-	mov r10=0				// A    default to successful syscall execution
-	epc					// B	causes split-issue
-}
-	;;
-	rsm psr.be | psr.i			// M2 (5 cyc to srlz.d)
-	LOAD_FSYSCALL_TABLE(r14)		// X
-	;;
-	mov r16=IA64_KR(CURRENT)		// M2 (12 cyc)
-	shladd r18=r17,3,r14			// A
-	mov r19=NR_syscalls-1			// A
-	;;
-	lfetch [r18]				// M0|1
-	mov r29=psr				// M2 (12 cyc)
-	// If r17 is a NaT, p6 will be zero
-	cmp.geu p6,p7=r19,r17			// A    (sysnr > 0 && sysnr < 1024+NR_syscalls)?
-	;;
-	mov r21=ar.fpsr				// M2 (12 cyc)
-	tnat.nz p10,p9=r15			// I0
-	mov.i r26=ar.pfs			// I0 (would stall anyhow due to srlz.d...)
-	;;
-	srlz.d					// M0 (forces split-issue) ensure PSR.BE==0
-(p6)	ld8 r18=[r18]				// M0|1
-	nop.i 0
-	;;
-	nop.m 0
-(p6)	tbit.z.unc p8,p0=r18,0			// I0 (dual-issues with "mov b7=r18"!)
-	nop.i 0
-	;;
-(p8)	ssm psr.i
-(p6)	mov b7=r18				// I0
-(p8)	br.dptk.many b7				// B
-
-	mov r27=ar.rsc				// M2 (12 cyc)
-/*
- * brl.cond doesn't work as intended because the linker would convert this branch
- * into a branch to a PLT.  Perhaps there will be a way to avoid this with some
- * future version of the linker.  In the meantime, we just use an indirect branch
- * instead.
- */
-#ifdef CONFIG_ITANIUM
-(p6)	add r14=-8,r14				// r14 <- addr of fsys_bubble_down entry
-	;;
-(p6)	ld8 r14=[r14]				// r14 <- fsys_bubble_down
-	;;
-(p6)	mov b7=r14
-(p6)	br.sptk.many b7
-#else
-	BRL_COND_FSYS_BUBBLE_DOWN(p6)
-#endif
-	ssm psr.i
-	mov r10=-1
-(p10)	mov r8=EINVAL
-(p9)	mov r8=ENOSYS
-	FSYS_RETURN
-END(__kernel_syscall_via_epc)
-
 #	define ARG0_OFF		(16 + IA64_SIGFRAME_ARG0_OFFSET)
 #	define ARG1_OFF		(16 + IA64_SIGFRAME_ARG1_OFFSET)
 #	define ARG2_OFF		(16 + IA64_SIGFRAME_ARG2_OFFSET)
@@ -373,3 +277,154 @@ restore_rbs:
 	// invala not necessary as that will happen when returning to user-mode
 	br.cond.sptk back_from_restore_rbs
 END(__kernel_sigtramp)
+
+GLOBAL_ENTRY(__kernel_syscall_via_break)
+	.prologue
+	.altrp b6
+	.body
+	/*
+	 * Note: for (fast) syscall restart to work, the break instruction must be
+	 *	 the first one in the bundle addressed by syscall_via_break.
+	 */
+{ .mib
+	break 0x100000
+	nop.i 0
+	br.ret.sptk.many b6
+}
+END(__kernel_syscall_via_break)
+
+/*
+ * On entry:
+ *	r11 = saved ar.pfs
+ *	r15 = system call #
+ *	b0  = saved return address
+ *	b6  = return address
+ * On exit:
+ *	r11 = saved ar.pfs
+ *	r15 = system call #
+ *	b0  = saved return address
+ *	all other "scratch" registers:	undefined
+ *	all "preserved" registers:	same as on entry
+ */
+
+GLOBAL_ENTRY(__kernel_syscall_via_epc)
+	.prologue
+	.altrp b6
+	.body
+{
+	/*
+	 * Note: the kernel cannot assume that the first two instructions in this
+	 * bundle get executed.  The remaining code must be safe even if
+	 * they do not get executed.
+	 */
+	adds r17=-1024,r15			// A
+	mov r10=0				// A    default to successful syscall execution
+	epc					// B	causes split-issue
+}
+	;;
+#ifdef __XEN_IA64_VDSO_PARAVIRT
+	// r20 = 1
+	// r22 = &vcpu->vcpu_info->evtchn_upcall_mask
+	// r24 = &vcpu->vcpu_info->evtchn_upcall_pending
+	// r25 = tmp
+	// r31 = tmp
+	// p11 = tmp
+	// p14 = tmp
+	mov r20=1
+	movl r22=XSI_PSR_I_ADDR
+	;;
+	ld8 r22=[r22]
+	;;
+	st1 [r22]=r20
+	rum psr.be
+	adds r24=-1,r22
+#else
+	rsm psr.be | psr.i			// M2 (5 cyc to srlz.d)
+#endif
+	LOAD_FSYSCALL_TABLE(r14)		// X
+	;;
+	mov r16=IA64_KR(CURRENT)		// M2 (12 cyc)
+	shladd r18=r17,3,r14			// A
+	mov r19=NR_syscalls-1			// A
+#ifdef __XEN_IA64_VDSO_PARAVIRT
+	XEN_HYPER_GET_PSR
+	;;
+	lfetch [r18]				// M0|1
+	mov r29=r8
+#else
+	;;
+	lfetch [r18]				// M0|1
+	mov r29=psr				// M2 (12 cyc)
+#endif
+	// If r17 is a NaT, p6 will be zero
+	cmp.geu p6,p7=r19,r17			// A    (sysnr > 0 && sysnr < 1024+NR_syscalls)?
+	;;
+	mov r21=ar.fpsr				// M2 (12 cyc)
+	tnat.nz p10,p9=r15			// I0
+	mov.i r26=ar.pfs			// I0 (would stall anyhow due to srlz.d...)
+	;;
+	srlz.d					// M0 (forces split-issue) ensure PSR.BE==0
+(p6)	ld8 r18=[r18]				// M0|1
+	nop.i 0
+	;;
+	nop.m 0
+(p6)	tbit.z.unc p8,p0=r18,0			// I0 (dual-issues with "mov b7=r18"!)
+#ifdef __XEN_IA64_VDSO_PARAVIRT
+	
+#define XEN_SET_PSR_I(pred)		\
+(pred)	ld1 r31=[r22];			\
+	;; ;				\
+(pred)	st1 [r22]=r0;			\
+(pred)	cmp.ne.unc p14,p0=r0,r31;	\
+	;; ;				\
+(p14)	ld1 r25=[r24];			\
+	;; ;				\
+(p14)	cmp.ne.unc p11,p0=r0,r25;	\
+	;; ;				\
+(p11)	XEN_HYPER_SSM_I;
+
+	;; 
+	XEN_SET_PSR_I(p8)
+#else
+	nop.i 0
+	;;
+(p8)	ssm psr.i
+#endif
+(p6)	mov b7=r18				// I0
+(p8)	br.dptk.many b7				// B
+
+	mov r27=ar.rsc				// M2 (12 cyc)
+/*
+ * brl.cond doesn't work as intended because the linker would convert this branch
+ * into a branch to a PLT.  Perhaps there will be a way to avoid this with some
+ * future version of the linker.  In the meantime, we just use an indirect branch
+ * instead.
+ */
+#ifdef CONFIG_ITANIUM
+(p6)	add r14=-8,r14				// r14 <- addr of fsys_bubble_down entry
+	;;
+(p6)	ld8 r14=[r14]				// r14 <- fsys_bubble_down
+	;;
+(p6)	mov b7=r14
+(p6)	br.sptk.many b7
+#else
+	BRL_COND_FSYS_BUBBLE_DOWN(p6)
+#endif
+#ifdef __XEN_IA64_VDSO_PARAVIRT
+	XEN_SET_PSR_I(p0)
+#else
+	ssm psr.i
+#endif
+	mov r10=-1
+(p10)	mov r8=EINVAL
+(p9)	mov r8=ENOSYS
+	FSYS_RETURN
+#ifdef __KERNEL_SYSCALL_VIA_EPC_PADDING
+	/*
+	 * All values/sizes of __kernel_xxx symbol in gate.so and xengate.so
+	 * must be same to each other.
+	 * Adjust symbol size in gate.so to be same to the one in xengate.so.
+	 */
+.include "arch/ia64/kernel/gate-skip.s"
+#endif
+END(__kernel_syscall_via_epc)

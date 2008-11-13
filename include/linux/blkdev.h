@@ -506,6 +506,8 @@ enum {
 #define blk_barrier_rq(rq)	((rq)->flags & REQ_HARDBARRIER)
 #define blk_fua_rq(rq)		((rq)->flags & REQ_FUA)
 
+#define blk_empty_barrier(rq)   (blk_barrier_rq(rq) && blk_fs_request(rq) && !(rq)->hard_nr_sectors)
+
 #define list_entry_rq(ptr)	list_entry((ptr), struct request, queuelist)
 
 #define rq_data_dir(rq)		((rq)->flags & 1)
