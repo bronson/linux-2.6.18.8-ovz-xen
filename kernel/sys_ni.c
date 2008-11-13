@@ -134,3 +134,8 @@ cond_syscall(sys_madvise);
 cond_syscall(sys_mremap);
 cond_syscall(sys_remap_file_pages);
 cond_syscall(compat_sys_move_pages);
+
+cond_syscall(sys_getluid);
+cond_syscall(sys_setluid);
+cond_syscall(sys_setublimit);
+cond_syscall(sys_ubstat);

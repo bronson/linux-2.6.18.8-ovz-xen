@@ -290,13 +290,27 @@
 #define __NR_sync_file_range		1300
 #define __NR_tee			1301
 #define __NR_vmsplice			1302
+#define __NR_utimensat			1306
+#define __NR_fairsched_vcpus		1499
+#define __NR_fairsched_mknod		1500
+#define __NR_fairsched_rmnod		1501
+#define __NR_fairsched_chwt		1502
+#define __NR_fairsched_mvpr		1503
+#define __NR_fairsched_rate		1504
+#define __NR_getluid			1505
+#define __NR_setluid			1506
+#define __NR_setublimit			1507
+#define __NR_ubstat			1508
+#define __NR_lchmod			1509
+#define __NR_lutime			1510
 
 #ifdef __KERNEL__
 
 
-#define NR_syscalls			279 /* length of syscall table */
+#define NR_syscalls			487 /* length of syscall table */
 
 #define __ARCH_WANT_SYS_RT_SIGACTION
+#define __ARCH_WANT_SYS_RT_SIGSUSPEND
 
 #ifdef CONFIG_IA32_SUPPORT
 # define __ARCH_WANT_SYS_FADVISE64
@@ -307,6 +321,7 @@
 # define __ARCH_WANT_SYS_OLDUMOUNT
 # define __ARCH_WANT_SYS_SIGPENDING
 # define __ARCH_WANT_SYS_SIGPROCMASK
+# define __ARCH_WANT_COMPAT_SYS_RT_SIGSUSPEND
 # define __ARCH_WANT_COMPAT_SYS_TIME
 #endif
 

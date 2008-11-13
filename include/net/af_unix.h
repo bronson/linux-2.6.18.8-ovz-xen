@@ -9,6 +9,7 @@
 extern void unix_inflight(struct file *fp);
 extern void unix_notinflight(struct file *fp);
 extern void unix_gc(void);
+extern void unix_destruct_fds(struct sk_buff *skb);
 
 #define UNIX_HASH_SIZE	256
 
@@ -19,23 +20,37 @@ extern atomic_t unix_tot_inflight;
 
 static inline struct sock *first_unix_socket(int *i)
 {
+	struct sock *s;
+	struct ve_struct *ve;
+
+	ve = get_exec_env();
 	for (*i = 0; *i <= UNIX_HASH_SIZE; (*i)++) {
-		if (!hlist_empty(&unix_socket_table[*i]))
-			return __sk_head(&unix_socket_table[*i]);
+		for (s = sk_head(&unix_socket_table[*i]);
+		     s != NULL && !ve_accessible(s->owner_env, ve);
+		     s = sk_next(s));
+		if (s != NULL)
+			return s;
 	}
 	return NULL;
 }
 
 static inline struct sock *next_unix_socket(int *i, struct sock *s)
 {
-	struct sock *next = sk_next(s);
-	/* More in this chain? */
-	if (next)
-		return next;
+	struct ve_struct *ve;
+
+	ve = get_exec_env();
+	for (s = sk_next(s); s != NULL; s = sk_next(s)) {
+		if (!ve_accessible(s->owner_env, ve))
+			continue;
+		return s;
+	}
 	/* Look for next non-empty chain. */
 	for ((*i)++; *i <= UNIX_HASH_SIZE; (*i)++) {
-		if (!hlist_empty(&unix_socket_table[*i]))
-			return __sk_head(&unix_socket_table[*i]);
+		for (s = sk_head(&unix_socket_table[*i]);
+		     s != NULL && !ve_accessible(s->owner_env, ve);
+		     s = sk_next(s));
+		if (s != NULL)
+			return s;
 	}
 	return NULL;
 }

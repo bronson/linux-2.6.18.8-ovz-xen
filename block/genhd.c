@@ -17,6 +17,7 @@
 #include <linux/mutex.h>
 
 struct subsystem block_subsys;
+EXPORT_SYMBOL(block_subsys);
 static DEFINE_MUTEX(block_subsys_lock);
 
 /*

@@ -85,6 +85,9 @@ int sysfs_create_link(struct kobject * kobj, struct kobject * target, const char
 	struct dentry * dentry = kobj->dentry;
 	int error = -EEXIST;
 
+	if (!ve_sysfs_alowed())
+		return 0;
+
 	BUG_ON(!kobj || !kobj->dentry || !name);
 
 	mutex_lock(&dentry->d_inode->i_mutex);
@@ -103,6 +106,9 @@ int sysfs_create_link(struct kobject * kobj, struct kobject * target, const char
 
 void sysfs_remove_link(struct kobject * kobj, const char * name)
 {
+	if(!ve_sysfs_alowed())
+		return;
+
 	sysfs_hash_and_remove(kobj->dentry,name);
 }
 

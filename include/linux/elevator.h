@@ -8,6 +8,8 @@ typedef void (elevator_merge_req_fn) (request_queue_t *, struct request *, struc
 
 typedef void (elevator_merged_fn) (request_queue_t *, struct request *);
 
+typedef int (elevator_allow_merge_fn) (request_queue_t *, struct request *, struct bio *);
+
 typedef int (elevator_dispatch_fn) (request_queue_t *, int);
 
 typedef void (elevator_add_req_fn) (request_queue_t *, struct request *);
@@ -29,6 +31,7 @@ struct elevator_ops
 	elevator_merge_fn *elevator_merge_fn;
 	elevator_merged_fn *elevator_merged_fn;
 	elevator_merge_req_fn *elevator_merge_req_fn;
+	elevator_allow_merge_fn *elevator_allow_merge_fn;
 
 	elevator_dispatch_fn *elevator_dispatch_fn;
 	elevator_add_req_fn *elevator_add_req_fn;
@@ -49,6 +52,11 @@ struct elevator_ops
 	elevator_init_fn *elevator_init_fn;
 	elevator_exit_fn *elevator_exit_fn;
 	void (*trim)(struct io_context *);
+	/* In original cfq design task holds a cfqq refcount and puts it
+	 * on exit via io context. Now async cfqqs are hold by UB,
+	 * so we need somehow to put these queues. Use this function.
+	 */
+	void (*put_queue)(struct cfq_queue *);
 };
 
 #define ELV_NAME_MAX	(16)

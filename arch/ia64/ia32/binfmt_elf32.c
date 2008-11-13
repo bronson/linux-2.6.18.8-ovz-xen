@@ -17,6 +17,8 @@
 #include <asm/param.h>
 #include <asm/signal.h>
 
+#include <ub/ub_vmpages.h>
+
 #include "ia32priv.h"
 #include "elfcore32.h"
 
@@ -138,6 +140,12 @@ ia64_elf32_init (struct pt_regs *regs)
 		up_write(&current->mm->mmap_sem);
 	}
 
+	if (ub_memory_charge(current->mm, PAGE_ALIGN(IA32_LDT_ENTRIES *
+					IA32_LDT_ENTRY_SIZE),
+				VM_READ|VM_WRITE|VM_MAYREAD|VM_MAYWRITE,
+				NULL, UB_SOFT))
+		goto skip;
+
 	/*
 	 * Install LDT as anonymous memory.  This gives us all-zero segment descriptors
 	 * until a task modifies them via modify_ldt().
@@ -159,7 +167,12 @@ ia64_elf32_init (struct pt_regs *regs)
 			}
 		}
 		up_write(&current->mm->mmap_sem);
-	}
+	} else
+		ub_memory_uncharge(current->mm, PAGE_ALIGN(IA32_LDT_ENTRIES *
+					IA32_LDT_ENTRY_SIZE),
+				VM_READ|VM_WRITE|VM_MAYREAD|VM_MAYWRITE, NULL);
+
+skip:
 
 	ia64_psr(regs)->ac = 0;		/* turn off alignment checking */
 	regs->loadrs = 0;
@@ -214,9 +227,15 @@ ia32_setup_arg_pages (struct linux_binprm *bprm, int executable_stack)
 		bprm->loader += stack_base;
 	bprm->exec += stack_base;
 
+	ret = -ENOMEM;
+	if (ub_memory_charge(mm, IA32_STACK_TOP -
+				(PAGE_MASK & (unsigned long)bprm->p),
+				VM_STACK_FLAGS, NULL, UB_SOFT))
+		goto err_charge;
+
 	mpnt = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!mpnt)
-		return -ENOMEM;
+		goto err_alloc;
 
 	memset(mpnt, 0, sizeof(*mpnt));
 
@@ -233,11 +252,8 @@ ia32_setup_arg_pages (struct linux_binprm *bprm, int executable_stack)
 			mpnt->vm_flags = VM_STACK_FLAGS;
 		mpnt->vm_page_prot = (mpnt->vm_flags & VM_EXEC)?
 					PAGE_COPY_EXEC: PAGE_COPY;
-		if ((ret = insert_vm_struct(current->mm, mpnt))) {
-			up_write(&current->mm->mmap_sem);
-			kmem_cache_free(vm_area_cachep, mpnt);
-			return ret;
-		}
+		if ((ret = insert_vm_struct(current->mm, mpnt)))
+			goto err_insert;
 		current->mm->stack_vm = current->mm->total_vm = vma_pages(mpnt);
 	}
 
@@ -256,6 +272,16 @@ ia32_setup_arg_pages (struct linux_binprm *bprm, int executable_stack)
 	current->thread.ppl = ia32_init_pp_list();
 
 	return 0;
+
+err_insert:
+	up_write(&current->mm->mmap_sem);
+	kmem_cache_free(vm_area_cachep, mpnt);
+err_alloc:
+	ub_memory_uncharge(mm, IA32_STACK_TOP -
+			(PAGE_MASK & (unsigned long)bprm->p),
+			VM_STACK_FLAGS, NULL);
+err_charge:
+	return ret;
 }
 
 static void

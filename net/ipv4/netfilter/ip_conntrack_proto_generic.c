@@ -52,7 +52,7 @@ static int packet(struct ip_conntrack *conntrack,
 		  const struct sk_buff *skb,
 		  enum ip_conntrack_info ctinfo)
 {
-	ip_ct_refresh_acct(conntrack, ctinfo, skb, ip_ct_generic_timeout);
+	ip_ct_refresh_acct(conntrack, ctinfo, skb, ve_ip_ct_generic_timeout);
 	return NF_ACCEPT;
 }
 

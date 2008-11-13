@@ -51,7 +51,6 @@
 #include <net/addrconf.h>
 #include <net/tcp.h>
 #include <linux/rtnetlink.h>
-#include <net/dst.h>
 #include <net/xfrm.h>
 #include <net/netevent.h>
 
@@ -125,7 +124,6 @@ struct rt6_info ip6_null_entry = {
 		.dst = {
 			.__refcnt	= ATOMIC_INIT(1),
 			.__use		= 1,
-			.dev		= &loopback_dev,
 			.obsolete	= -1,
 			.error		= -ENETUNREACH,
 			.metrics	= { [RTAX_HOPLIMIT - 1] = 255, },
@@ -140,10 +138,18 @@ struct rt6_info ip6_null_entry = {
 	.rt6i_ref	= ATOMIC_INIT(1),
 };
 
-struct fib6_node ip6_routing_table = {
-	.leaf		= &ip6_null_entry,
-	.fn_flags	= RTN_ROOT | RTN_TL_ROOT | RTN_RTINFO,
+struct fib6_table global_fib6_table = {
+	.root = {
+		.leaf		= &ip6_null_entry,
+		.fn_flags	= RTN_ROOT | RTN_TL_ROOT | RTN_RTINFO,
+	}
 };
+
+#ifdef CONFIG_VE
+#define ip6_routing_table (get_exec_env()->_fib6_table->root)
+#else
+#define ip6_routing_table (global_ip6_routing_table.root)
+#endif
 
 /* Protects all the ip6 fib */
 
@@ -884,7 +890,7 @@ static int ipv6_get_mtu(struct net_device *dev)
 
 int ipv6_get_hoplimit(struct net_device *dev)
 {
-	int hoplimit = ipv6_devconf.hop_limit;
+	int hoplimit = ve_ipv6_devconf.hop_limit;
 	struct inet6_dev *idev;
 
 	idev = in6_dev_get(dev);
@@ -1579,10 +1585,12 @@ struct rt6_info *addrconf_dst_alloc(struct inet6_dev *idev,
 		rt->rt6i_flags |= RTF_ANYCAST;
 	else
 		rt->rt6i_flags |= RTF_LOCAL;
-	rt->rt6i_nexthop = ndisc_get_neigh(rt->rt6i_dev, &rt->rt6i_gateway);
-	if (rt->rt6i_nexthop == NULL) {
+	rt->rt6i_nexthop = __neigh_lookup_errno(&nd_tbl, &rt->rt6i_gateway, rt->rt6i_dev);
+	if (IS_ERR(rt->rt6i_nexthop)) {
+		void *err = rt->rt6i_nexthop;
+		rt->rt6i_nexthop = NULL;
 		dst_free((struct dst_entry *) rt);
-		return ERR_PTR(-ENOMEM);
+		return err;
 	}
 
 	ipv6_addr_copy(&rt->rt6i_dst.addr, addr);
@@ -1798,8 +1806,12 @@ static int rt6_fill_node(struct sk_buff *skb, struct rt6_info *rt,
 		goto rtattr_failure;
 	if (rt->u.dst.neighbour)
 		RTA_PUT(skb, RTA_GATEWAY, 16, &rt->u.dst.neighbour->primary_key);
-	if (rt->u.dst.dev)
-		RTA_PUT(skb, RTA_OIF, sizeof(int), &rt->rt6i_dev->ifindex);
+	if (rt->u.dst.dev) {
+		struct net_device *odev = rt->rt6i_dev;
+		if (rt == &ip6_null_entry)
+			odev = &loopback_dev;
+		RTA_PUT(skb, RTA_OIF, sizeof(int), &odev->ifindex);
+	}
 	RTA_PUT(skb, RTA_PRIORITY, 4, &rt->rt6i_metric);
 	ci.rta_lastuse = jiffies_to_clock_t(jiffies - rt->u.dst.lastuse);
 	if (rt->rt6i_expires)
@@ -2267,23 +2279,31 @@ void __init ip6_route_init(void)
 	if (!ip6_dst_ops.kmem_cachep)
 		panic("cannot create ip6_dst_cache");
 
+#ifdef CONFIG_VE
+	global_fib6_table.owner_env = get_ve0();
+	get_ve0()->_fib6_table = &global_fib6_table;
+#endif
+	list_add(&global_fib6_table.list, &fib6_table_list);
 	fib6_init();
 #ifdef 	CONFIG_PROC_FS
-	p = proc_net_create("ipv6_route", 0, rt6_proc_info);
-	if (p)
+	p = create_proc_glob_entry("net/ipv6_route", 0, NULL);
+	if (p) {
 		p->owner = THIS_MODULE;
+		p->get_info = rt6_proc_info;
+	}
 
 	proc_net_fops_create("rt6_stats", S_IRUGO, &rt6_stats_seq_fops);
 #endif
 #ifdef CONFIG_XFRM
 	xfrm6_init();
 #endif
+	ip6_null_entry.u.dst.dev = &loopback_dev;
 }
 
 void ip6_route_cleanup(void)
 {
 #ifdef CONFIG_PROC_FS
-	proc_net_remove("ipv6_route");
+	remove_proc_glob_entry("net/ipv6_route", NULL);
 	proc_net_remove("rt6_stats");
 #endif
 #ifdef CONFIG_XFRM
@@ -2293,3 +2313,37 @@ void ip6_route_cleanup(void)
 	fib6_gc_cleanup();
 	kmem_cache_destroy(ip6_dst_ops.kmem_cachep);
 }
+
+#ifdef CONFIG_VE
+int init_ve_route6(struct ve_struct *ve)
+{
+	struct ve_struct *old_env = set_exec_env(ve);
+	ve->_fib6_table = kzalloc(sizeof(struct fib6_table), GFP_KERNEL_UBC);
+	if (ve->_fib6_table) {
+		ve->_fib6_table->owner_env = ve;
+		ve->_fib6_table->root.leaf = &ip6_null_entry;
+		ve->_fib6_table->root.fn_flags = RTN_ROOT | RTN_TL_ROOT | RTN_RTINFO;
+		write_lock_bh(&rt6_lock);
+		list_add(&ve->_fib6_table->list, &fib6_table_list);
+		write_unlock_bh(&rt6_lock);
+	}
+	set_exec_env(old_env);
+	return ve->_fib6_table ? 0 : -ENOMEM;
+}
+EXPORT_SYMBOL(init_ve_route6);
+
+void fini_ve_route6(struct ve_struct *ve)
+{
+	struct ve_struct *old_env = set_exec_env(ve);
+
+	if (ve->_fib6_table) {
+		rt6_ifdown(NULL);
+		write_lock_bh(&rt6_lock);
+		list_del(&ve->_fib6_table->list);
+		write_unlock_bh(&rt6_lock);
+		kfree(ve->_fib6_table);
+	}
+	set_exec_env(old_env);
+}
+EXPORT_SYMBOL(fini_ve_route6);
+#endif

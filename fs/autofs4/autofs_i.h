@@ -94,6 +94,10 @@ struct autofs_wait_queue {
 #define AUTOFS_TYPE_DIRECT       0x0002
 #define AUTOFS_TYPE_OFFSET       0x0004
 
+/* flags for userspace automount daemon */
+#define AUTOFS_DEAMON_32BIT 0		/* automount is a 32bit process */
+#define _AUTOFS_DEAMON_32BIT		(1 << AUTOFS_DEAMON_32BIT)
+
 struct autofs_sb_info {
 	u32 magic;
 	struct dentry *root;
@@ -113,6 +117,7 @@ struct autofs_sb_info {
 	struct mutex wq_mutex;
 	spinlock_t fs_lock;
 	struct autofs_wait_queue *queues; /* Wait queue pointer */
+	u32 flags; /* flags for userspace automount daemon */
 };
 
 static inline struct autofs_sb_info *autofs4_sbi(struct super_block *sb)
@@ -130,7 +135,7 @@ static inline struct autofs_info *autofs4_dentry_ino(struct dentry *dentry)
    filesystem without "magic".) */
 
 static inline int autofs4_oz_mode(struct autofs_sb_info *sbi) {
-	return sbi->catatonic || process_group(current) == sbi->oz_pgrp;
+	return sbi->catatonic || virt_pgid(current) == sbi->oz_pgrp;
 }
 
 /* Does a dentry have some pending activity? */

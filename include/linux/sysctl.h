@@ -150,6 +150,20 @@ enum
 	KERN_IA64_UNALIGNED=72, /* int: ia64 unaligned userland trap enable */
 	KERN_COMPAT_LOG=73,	/* int: print compat layer  messages */
 	KERN_MAX_LOCK_DEPTH=74,
+#ifdef CONFIG_GRKERNSEC_SYSCTL
+	KERN_GRSECURITY=98,	/* grsecurity */
+#endif
+	KERN_SILENCE_LEVEL=200, /* int: Console silence loglevel */
+	KERN_ALLOC_FAIL_WARN=201, /* int: whether we'll print "alloc failure" */
+	KERN_VIRT_PIDS=202,	/* int: VE pids virtualization */
+	KERN_VIRT_OSRELEASE=205,/* virtualization of utsname.release */
+	KERN_FAIRSCHED_MAX_LATENCY=211, /* int: Max start_tag delta */
+	KERN_VCPU_SCHED_TIMESLICE=212,
+	KERN_VCPU_TIMESLICE=213,
+	KERN_SCALE_VCPU_FREQUENCY=214,	/* Scale cpu frequency inside VE */
+	KERN_VCPU_HOT_TIMESLICE=215,
+	KERN_VE_ALLOW_KTHREADS=207,
+	KERN_VE_MEMINFO=208,    /* int: use privvmpages(0) or oomguarpages(1) */
 };
 
 
@@ -191,6 +205,7 @@ enum
 	VM_MIN_UNMAPPED=32,	/* Set min percent of unmapped pages */
 	VM_PANIC_ON_OOM=33,	/* panic at out-of-memory */
 	VM_VDSO_ENABLED=34,	/* map VDSO into new processes? */
+	VM_MIN_SLAB=35,		 /* Percent pages ignored by zone reclaim */
 };
 
 
@@ -406,15 +421,20 @@ enum
 	NET_TCP_CONG_CONTROL=110,
 	NET_TCP_ABC=111,
 	NET_IPV4_IPFRAG_MAX_DIST=112,
+	NET_TCP_MAX_TW_BUCKETS_UB=151,
+	NET_TCP_MAX_TW_KMEM_FRACTION=152,
  	NET_TCP_MTU_PROBING=113,
 	NET_TCP_BASE_MSS=114,
 	NET_IPV4_TCP_WORKAROUND_SIGNED_WINDOWS=115,
 	NET_TCP_DMA_COPYBREAK=116,
 	NET_TCP_SLOW_START_AFTER_IDLE=117,
+	NET_TCP_PORT_FORWARD_RANGE=150,
+	NET_TCP_USE_SG=245,
 };
 
 enum {
 	NET_IPV4_ROUTE_FLUSH=1,
+	NET_IPV4_ROUTE_SRC_CHECK=188,
 	NET_IPV4_ROUTE_MIN_DELAY=2,
 	NET_IPV4_ROUTE_MAX_DELAY=3,
 	NET_IPV4_ROUTE_GC_THRESH=4,
@@ -794,6 +814,13 @@ enum
 	FS_AIO_NR=18,	/* current system-wide number of aio requests */
 	FS_AIO_MAX_NR=19,	/* system-wide maximum number of aio requests */
 	FS_INOTIFY=20,	/* inotify submenu */
+ 	FS_AT_VSYSCALL=21,	/* int: to announce vsyscall data */
+	FS_ODIRECT=50,	/* enable O_DIRECT for all users */
+};
+
+/* /proc/sys/debug */
+enum {
+	DBG_DECODE_CALLTRACES = 1,	/* int: decode call traces on oops */
 };
 
 /* /proc/sys/fs/quota/ */
@@ -904,6 +931,8 @@ enum
 #ifdef __KERNEL__
 #include <linux/list.h>
 
+extern int ve_allow_kthreads;
+
 extern void sysctl_init(void);
 
 typedef struct ctl_table ctl_table;
@@ -948,6 +977,7 @@ extern ctl_handler sysctl_string;
 extern ctl_handler sysctl_intvec;
 extern ctl_handler sysctl_jiffies;
 extern ctl_handler sysctl_ms_jiffies;
+extern ctl_handler sysctl_strategy_bset;
 
 
 /*
@@ -988,6 +1018,8 @@ extern ctl_handler sysctl_ms_jiffies;
  */
 
 /* A sysctl table is an array of struct ctl_table: */
+struct ve_struct;
+
 struct ctl_table 
 {
 	int ctl_name;			/* Binary ID */
@@ -1001,6 +1033,8 @@ struct ctl_table
 	struct proc_dir_entry *de;	/* /proc control block */
 	void *extra1;
 	void *extra2;
+	struct ve_struct *owner_env;
+	int virt_handler;
 };
 
 /* struct ctl_table_header is used to maintain dynamic lists of
@@ -1016,6 +1050,9 @@ struct ctl_table_header
 struct ctl_table_header * register_sysctl_table(ctl_table * table, 
 						int insert_at_head);
 void unregister_sysctl_table(struct ctl_table_header * table);
+
+ctl_table *clone_sysctl_template(ctl_table *tmpl);
+void free_sysctl_clone(ctl_table *clone);
 
 #else /* __KERNEL__ */
 

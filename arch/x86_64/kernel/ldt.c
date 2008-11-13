@@ -16,12 +16,15 @@
 #include <linux/smp_lock.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/ldt.h>
 #include <asm/desc.h>
 #include <asm/proto.h>
+
+#include <ub/ub_mem.h>
 
 #ifdef CONFIG_SMP /* avoids "defined but not used" warnig */
 static void flush_ldt(void *null)
@@ -42,9 +45,9 @@ static int alloc_ldt(mm_context_t *pc, unsigned mincount, int reload)
 	oldsize = pc->size;
 	mincount = (mincount+511)&(~511);
 	if (mincount*LDT_ENTRY_SIZE > PAGE_SIZE)
-		newldt = vmalloc(mincount*LDT_ENTRY_SIZE);
+		newldt = ub_vmalloc(mincount*LDT_ENTRY_SIZE);
 	else
-		newldt = kmalloc(mincount*LDT_ENTRY_SIZE, GFP_KERNEL);
+		newldt = ub_kmalloc(mincount*LDT_ENTRY_SIZE, GFP_KERNEL);
 
 	if (!newldt)
 		return -ENOMEM;
@@ -109,6 +112,7 @@ int init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 	}
 	return retval;
 }
+EXPORT_SYMBOL_GPL(init_new_context);
 
 /*
  * 

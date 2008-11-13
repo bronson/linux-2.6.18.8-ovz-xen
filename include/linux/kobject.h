@@ -46,6 +46,8 @@ enum kobject_action {
 	KOBJ_UMOUNT	= (__force kobject_action_t) 0x05,	/* umount event for block devices (broken) */
 	KOBJ_OFFLINE	= (__force kobject_action_t) 0x06,	/* device offline */
 	KOBJ_ONLINE	= (__force kobject_action_t) 0x07,	/* device online */
+	KOBJ_START	= (__force kobject_action_t) 0x08,	/* start subsystem */
+	KOBJ_STOP	= (__force kobject_action_t) 0x09,	/* stop subsystem */
 };
 
 struct kobject {
@@ -192,6 +194,9 @@ struct subsystem _varname##_subsys = { \
 extern struct subsystem kernel_subsys;
 /* The global /sys/hypervisor/ subsystem  */
 extern struct subsystem hypervisor_subsys;
+
+extern struct subsystem class_obj_subsys;
+extern struct subsystem class_subsys;
 
 /**
  * Helpers for setting the kset of registered objects.

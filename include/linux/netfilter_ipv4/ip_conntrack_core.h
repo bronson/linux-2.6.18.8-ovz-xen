@@ -3,7 +3,6 @@
 #include <linux/netfilter.h>
 
 #define MAX_IP_CT_PROTO 256
-extern struct ip_conntrack_protocol *ip_ct_protos[MAX_IP_CT_PROTO];
 
 /* This header is used to share core functionality between the
    standalone connection tracking module, and the compatibility layer's use
@@ -54,8 +53,29 @@ static inline int ip_conntrack_confirm(struct sk_buff **pskb)
 
 extern void ip_ct_unlink_expect(struct ip_conntrack_expect *exp);
 
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/sched.h>
+#define ve_ip_ct_initialized() \
+	(get_exec_env()->_ip_conntrack != NULL)
+#define ve_ip_ct_protos \
+	(get_exec_env()->_ip_conntrack->_ip_ct_protos)
+#define ve_ip_conntrack_hash	\
+	(get_exec_env()->_ip_conntrack->_ip_conntrack_hash)
+#define ve_ip_conntrack_expect_list \
+	(get_exec_env()->_ip_conntrack->_ip_conntrack_expect_list)
+#define ve_ip_conntrack_vmalloc \
+	(get_exec_env()->_ip_conntrack->_ip_conntrack_vmalloc)
+#else
+extern struct ip_conntrack_protocol *ip_ct_protos[MAX_IP_CT_PROTO];
 extern struct list_head *ip_conntrack_hash;
 extern struct list_head ip_conntrack_expect_list;
+#define ve_ip_ct_initialized()		1
+#define ve_ip_ct_protos			ip_ct_protos
+#define ve_ip_conntrack_hash		ip_conntrack_hash
+#define ve_ip_conntrack_expect_list	ip_conntrack_expect_list
+#define ve_ip_conntrack_vmalloc		ip_conntrack_vmalloc
+#endif /* CONFIG_VE_IPTABLES */
+
 extern rwlock_t ip_conntrack_lock;
 #endif /* _IP_CONNTRACK_CORE_H */
 

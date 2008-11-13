@@ -53,6 +53,7 @@
 #include <asm/kdebug.h>
 
 #include <linux/module.h>
+#include <linux/utsrelease.h>
 
 #include "mach_traps.h"
 
@@ -125,7 +126,8 @@ static inline void print_addr_and_symbol(unsigned long addr, char *log_lvl)
 {
 	printk(" [<%08lx>] ", addr);
 
-	print_symbol("%s\n", addr);
+	if (decode_call_traces)
+		print_symbol("%s\n", addr);
 }
 
 static inline unsigned long print_context_stack(struct thread_info *tinfo,
@@ -224,7 +226,10 @@ static void show_trace_log_lvl(struct task_struct *task, struct pt_regs *regs,
 		stack = (unsigned long*)context->previous_esp;
 		if (!stack)
 			break;
-		printk("%s =======================\n", log_lvl);
+		if (decode_call_traces)
+			printk("%s =======================\n", log_lvl);
+		else
+			printk("%s =<ctx>= ", log_lvl);
 	}
 }
 
@@ -254,8 +259,13 @@ static void show_stack_log_lvl(struct task_struct *task, struct pt_regs *regs,
 			printk("\n%s       ", log_lvl);
 		printk("%08lx ", *stack++);
 	}
-	printk("\n%sCall Trace:\n", log_lvl);
+	if (decode_call_traces)
+		printk("\n%s Call Trace:\n", log_lvl);
+	else
+		printk("\n%s Call Trace: ", log_lvl);
 	show_trace_log_lvl(task, regs, esp, log_lvl);
+	if (!decode_call_traces)
+		printk("\n");
 }
 
 void show_stack(struct task_struct *task, unsigned long *esp)
@@ -272,6 +282,8 @@ void dump_stack(void)
 	unsigned long stack;
 
 	show_trace(current, NULL, &stack);
+	if (!decode_call_traces)
+		printk("\n");
 }
 
 EXPORT_SYMBOL(dump_stack);
@@ -291,12 +303,13 @@ void show_registers(struct pt_regs *regs)
 		ss = regs->xss & 0xffff;
 	}
 	print_modules();
-	printk(KERN_EMERG "CPU:    %d\nEIP:    %04x:[<%08lx>]    %s VLI\n"
-			"EFLAGS: %08lx   (%s %.*s) \n",
-		smp_processor_id(), 0xffff & regs->xcs, regs->eip,
-		print_tainted(), regs->eflags, system_utsname.release,
-		(int)strcspn(system_utsname.version, " "),
-		system_utsname.version);
+	printk(KERN_EMERG "CPU:    %d, VCPU: %d.%d\nEIP:    %04x:[<%08lx>]    %s VLI\n"
+			"EFLAGS: %08lx   (%s %.*s %s) \n",
+		smp_processor_id(), task_vsched_id(current), task_cpu(current),
+		0xffff & regs->xcs, regs->eip,
+		print_tainted(), regs->eflags, init_utsname()->release,
+		(int)strcspn(init_utsname()->version, " "),
+		init_utsname()->version, VZVERSION);
 	print_symbol(KERN_EMERG "EIP is at %s\n", regs->eip);
 	printk(KERN_EMERG "eax: %08lx   ebx: %08lx   ecx: %08lx   edx: %08lx\n",
 		regs->eax, regs->ebx, regs->ecx, regs->edx);
@@ -304,8 +317,9 @@ void show_registers(struct pt_regs *regs)
 		regs->esi, regs->edi, regs->ebp, esp);
 	printk(KERN_EMERG "ds: %04x   es: %04x   ss: %04x\n",
 		regs->xds & 0xffff, regs->xes & 0xffff, ss);
-	printk(KERN_EMERG "Process %.*s (pid: %d, ti=%p task=%p task.ti=%p)",
+	printk(KERN_EMERG "Process %.*s (pid: %d, veid: %d, ti=%p task=%p task.ti=%p)",
 		TASK_COMM_LEN, current->comm, current->pid,
+		VEID(VE_TASK_INFO(current)->owner_env),
 		current_thread_info(), current, current->thread_info);
 	/*
 	 * When in-kernel, we also print out the stack and code at the
@@ -356,9 +370,9 @@ static void handle_BUG(struct pt_regs *regs)
 		char *file;
 		char c;
 
-		if (__get_user(line, (unsigned short __user *)(eip + 2)))
+		if (__get_user(line, (unsigned short __user *)(eip + 4)))
 			break;
-		if (__get_user(file, (char * __user *)(eip + 4)) ||
+		if (__get_user(file, (char * __user *)(eip + 7)) ||
 		    (unsigned long)file < PAGE_OFFSET || __get_user(c, file))
 			file = "<bad filename>";
 
@@ -367,6 +381,15 @@ static void handle_BUG(struct pt_regs *regs)
 	} while (0);
 #endif
 	printk(KERN_EMERG "Kernel BUG at [verbose debug info unavailable]\n");
+}
+
+int die_counter = 0;
+
+static void inline check_kernel_csum_bug(void)
+{
+	if (kernel_text_csum_broken)
+		printk("Kernel code checksum mismatch detected %d times\n",
+				kernel_text_csum_broken);
 }
 
 /* This is gone through when something in the kernel
@@ -383,7 +406,6 @@ void die(const char * str, struct pt_regs * regs, long err)
 		.lock_owner =		-1,
 		.lock_owner_depth =	0
 	};
-	static int die_counter;
 	unsigned long flags;
 
 	oops_enter();
@@ -443,6 +465,7 @@ void die(const char * str, struct pt_regs * regs, long err)
   	} else
 		printk(KERN_EMERG "Recursive die() failure, output suppressed\n");
 
+	check_kernel_csum_bug();
 	bust_spinlocks(0);
 	die.lock_owner = -1;
 	spin_unlock_irqrestore(&die.lock, flags);
@@ -672,12 +695,27 @@ static void unknown_nmi_error(unsigned char reason, struct pt_regs * regs)
 	printk("Do you have a strange power saving mode enabled?\n");
 }
 
-static DEFINE_SPINLOCK(nmi_print_lock);
+/*
+ * Voyager doesn't implement these
+ */
+void __attribute__((weak)) smp_show_regs(struct pt_regs *regs, void *info)
+{
+}
+
+#ifdef CONFIG_SMP
+int __attribute__((weak))
+smp_nmi_call_function(smp_nmi_function func, void *info, int wait)
+{
+	return 0;
+}
+#endif
 
 void die_nmi (struct pt_regs *regs, const char *msg)
 {
+	static DEFINE_SPINLOCK(nmi_print_lock);
+
 	if (notify_die(DIE_NMIWATCHDOG, msg, regs, 0, 2, SIGINT) ==
-	    NOTIFY_STOP)
+			NOTIFY_STOP)
 		return;
 
 	spin_lock(&nmi_print_lock);
@@ -690,7 +728,11 @@ void die_nmi (struct pt_regs *regs, const char *msg)
 	printk(" on CPU%d, eip %08lx, registers:\n",
 		smp_processor_id(), regs->eip);
 	show_registers(regs);
-	printk(KERN_EMERG "console shuts up ...\n");
+	smp_nmi_call_function(smp_show_regs, NULL, 1);
+	bust_spinlocks(1);
+	/* current CPU messages should go bottom */
+	if (!decode_call_traces)
+		smp_show_regs(regs, NULL);
 	console_silent();
 	spin_unlock(&nmi_print_lock);
 	bust_spinlocks(0);
@@ -705,6 +747,14 @@ void die_nmi (struct pt_regs *regs, const char *msg)
 
 	do_exit(SIGSEGV);
 }
+
+static int dummy_nmi_callback(struct pt_regs * regs, int cpu)
+{
+	return 0;
+}
+
+static nmi_callback_t nmi_callback = dummy_nmi_callback;
+static nmi_callback_t nmi_ipi_callback = dummy_nmi_callback;
 
 static void default_do_nmi(struct pt_regs * regs)
 {
@@ -728,6 +778,9 @@ static void default_do_nmi(struct pt_regs * regs)
 			return;
 		}
 #endif
+		if (nmi_ipi_callback != dummy_nmi_callback)
+			return;
+
 		unknown_nmi_error(reason, regs);
 		return;
 	}
@@ -744,13 +797,6 @@ static void default_do_nmi(struct pt_regs * regs)
 	reassert_nmi();
 }
 
-static int dummy_nmi_callback(struct pt_regs * regs, int cpu)
-{
-	return 0;
-}
- 
-static nmi_callback_t nmi_callback = dummy_nmi_callback;
- 
 fastcall void do_nmi(struct pt_regs * regs, long error_code)
 {
 	int cpu;
@@ -764,7 +810,18 @@ fastcall void do_nmi(struct pt_regs * regs, long error_code)
 	if (!rcu_dereference(nmi_callback)(regs, cpu))
 		default_do_nmi(regs);
 
+	nmi_ipi_callback(regs, cpu);
 	nmi_exit();
+}
+
+void set_nmi_ipi_callback(nmi_callback_t callback)
+{
+	nmi_ipi_callback = callback;
+}
+
+void unset_nmi_ipi_callback(void)
+{
+	nmi_ipi_callback = dummy_nmi_callback;
 }
 
 void set_nmi_callback(nmi_callback_t callback)

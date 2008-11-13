@@ -114,7 +114,8 @@ struct sock *__raw_v4_lookup(struct sock *sk, unsigned short num,
 		if (inet->num == num 					&&
 		    !(inet->daddr && inet->daddr != raddr) 		&&
 		    !(inet->rcv_saddr && inet->rcv_saddr != laddr)	&&
-		    !(sk->sk_bound_dev_if && sk->sk_bound_dev_if != dif))
+		    !(sk->sk_bound_dev_if && sk->sk_bound_dev_if != dif) &&
+		    ve_accessible_strict(sk->owner_env, get_exec_env()))
 			goto found; /* gotcha */
 	}
 	sk = NULL;
@@ -541,6 +542,14 @@ static void raw_close(struct sock *sk, long timeout)
 	sk_common_release(sk);
 }
 
+static int raw_destroy(struct sock *sk)
+{
+	lock_sock(sk);
+	ip_flush_pending_frames(sk);
+	release_sock(sk);
+	return 0;
+}
+
 /* This gets rid of all the nasties in af_inet. -DaveM */
 static int raw_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
@@ -753,6 +762,7 @@ struct proto raw_prot = {
 	.name		   = "RAW",
 	.owner		   = THIS_MODULE,
 	.close		   = raw_close,
+	.destroy	   = raw_destroy,
 	.connect	   = ip4_datagram_connect,
 	.disconnect	   = udp_disconnect,
 	.ioctl		   = raw_ioctl,
@@ -788,8 +798,12 @@ static struct sock *raw_get_first(struct seq_file *seq)
 		struct hlist_node *node;
 
 		sk_for_each(sk, node, &raw_v4_htable[state->bucket])
-			if (sk->sk_family == PF_INET)
+			if (sk->sk_family == PF_INET) {
+				if (!ve_accessible(sk->owner_env,
+							get_exec_env()))
+					continue;
 				goto found;
+			}
 	}
 	sk = NULL;
 found:
@@ -803,8 +817,13 @@ static struct sock *raw_get_next(struct seq_file *seq, struct sock *sk)
 	do {
 		sk = sk_next(sk);
 try_again:
-		;
-	} while (sk && sk->sk_family != PF_INET);
+		if (!sk)
+			break;
+		if (sk->sk_family != PF_INET)
+			continue;
+		if (ve_accessible(sk->owner_env, get_exec_env()))
+			break;
+	} while (1);
 
 	if (!sk && ++state->bucket < RAWV4_HTABLE_SIZE) {
 		sk = sk_head(&raw_v4_htable[state->bucket]);
@@ -921,13 +940,13 @@ static struct file_operations raw_seq_fops = {
 
 int __init raw_proc_init(void)
 {
-	if (!proc_net_fops_create("raw", S_IRUGO, &raw_seq_fops))
+	if (!proc_glob_fops_create("net/raw", S_IRUGO, &raw_seq_fops))
 		return -ENOMEM;
 	return 0;
 }
 
 void __init raw_proc_exit(void)
 {
-	proc_net_remove("raw");
+	remove_proc_glob_entry("net/raw", NULL);
 }
 #endif /* CONFIG_PROC_FS */

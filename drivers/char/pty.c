@@ -30,16 +30,30 @@
 #include <linux/bitops.h>
 #include <linux/devpts_fs.h>
 
+#include <ub/ub_misc.h>
+
 /* These are global because they are accessed in tty_io.c */
 #ifdef CONFIG_UNIX98_PTYS
 struct tty_driver *ptm_driver;
-static struct tty_driver *pts_driver;
+struct tty_driver *pts_driver;
+EXPORT_SYMBOL(ptm_driver);
+EXPORT_SYMBOL(pts_driver);
+
+void prepare_pty(void)
+{
+#ifdef CONFIG_VE
+	get_ve0()->ptm_driver = ptm_driver;
+	/* don't clean ptm_driver and co. here, they are used in vecalls.c */
+#endif
+}
 #endif
 
 static void pty_close(struct tty_struct * tty, struct file * filp)
 {
 	if (!tty)
 		return;
+
+	ub_pty_uncharge(tty);
 	if (tty->driver->subtype == PTY_TYPE_MASTER) {
 		if (tty->count > 1)
 			printk("master pty_close: count = %d!!\n", tty->count);
@@ -59,8 +73,12 @@ static void pty_close(struct tty_struct * tty, struct file * filp)
 	if (tty->driver->subtype == PTY_TYPE_MASTER) {
 		set_bit(TTY_OTHER_CLOSED, &tty->flags);
 #ifdef CONFIG_UNIX98_PTYS
-		if (tty->driver == ptm_driver)
+		if (tty->driver->flags & TTY_DRIVER_DEVPTS_MEM) {
+			struct ve_struct *old_env;
+			old_env = set_exec_env(tty->owner_env);
 			devpts_pty_kill(tty->index);
+			(void)set_exec_env(old_env);
+		}
 #endif
 		tty_vhangup(tty->link);
 	}
@@ -210,6 +228,10 @@ static int pty_open(struct tty_struct *tty, struct file * filp)
 	if (tty->link->count != 1)
 		goto out;
 
+	retval = -ENOMEM;
+	if (ub_pty_charge(tty))
+		goto out;
+
 	clear_bit(TTY_OTHER_CLOSED, &tty->link->flags);
 	set_bit(TTY_THROTTLED, &tty->flags);
 	set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
@@ -237,7 +259,9 @@ static struct tty_operations pty_ops = {
 
 /* Traditional BSD devices */
 #ifdef CONFIG_LEGACY_PTYS
-static struct tty_driver *pty_driver, *pty_slave_driver;
+struct tty_driver *pty_driver, *pty_slave_driver;
+EXPORT_SYMBOL(pty_driver);
+EXPORT_SYMBOL(pty_slave_driver);
 
 static int pty_bsd_ioctl(struct tty_struct *tty, struct file *file,
 			 unsigned int cmd, unsigned long arg)
@@ -392,6 +416,7 @@ static void __init unix98_pty_init(void)
 		panic("Couldn't register Unix98 pts driver");
 
 	pty_table[1].data = &ptm_driver->refcount;
+	prepare_pty();
 }
 #else
 static inline void unix98_pty_init(void) { }

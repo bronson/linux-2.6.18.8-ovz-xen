@@ -36,6 +36,9 @@
 #include <linux/delay.h>
 #include <linux/kthread.h>
 
+#include <ub/ub_oom.h>
+#include <ub/io_acct.h>
+
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 
@@ -175,6 +178,9 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 	if (scanned == 0)
 		scanned = SWAP_CLUSTER_MAX;
 
+	if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+		return 1;
+
 	if (!down_read_trylock(&shrinker_rwsem))
 		return 1;	/* Assume we'll be able to shrink next time */
 
@@ -209,6 +215,9 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 			int shrink_ret;
 			int nr_before;
 
+			if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+				goto done;
+
 			nr_before = (*shrinker->shrinker)(0, gfp_mask);
 			shrink_ret = (*shrinker->shrinker)(this_scan, gfp_mask);
 			if (shrink_ret == -1)
@@ -223,6 +232,7 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 
 		shrinker->nr += total_scan;
 	}
+done:
 	up_read(&shrinker_rwsem);
 	return ret;
 }
@@ -333,6 +343,7 @@ static pageout_t pageout(struct page *page, struct address_space *mapping)
 		 */
 		if (PagePrivate(page)) {
 			if (try_to_free_buffers(page)) {
+				ub_io_release_context(page, 0);
 				ClearPageDirty(page);
 				printk("%s: orphaned page\n", __FUNCTION__);
 				return PAGE_CLEAN;
@@ -696,6 +707,20 @@ done:
 }
 
 /*
+ * We are about to scan this zone at a certain priority level.  If that priority
+ * level is smaller (ie: more urgent) than the previous priority, then note
+ * that priority level within the zone.  This is done so that when the next
+ * process comes in to scan this zone, it will immediately start out at this
+ * priority level rather than having to build up its own scanning priority.
+ * Here, this priority affects only the reclaim-mapped threshold.
+ */
+static inline void note_zone_scanning_priority(struct zone *zone, int priority)
+{
+	if (priority < zone->prev_priority)
+		zone->prev_priority = priority;
+}
+
+/*
  * This moves pages from the active list to the inactive list.
  *
  * We move them the other way if the page is referenced by one or more
@@ -713,7 +738,7 @@ done:
  * But we had to alter page->flags anyway.
  */
 static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
-				struct scan_control *sc)
+				struct scan_control *sc, int priority)
 {
 	unsigned long pgmoved;
 	int pgdeactivate = 0;
@@ -734,7 +759,7 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 		 * `distress' is a measure of how much trouble we're having
 		 * reclaiming pages.  0 -> no problems.  100 -> great trouble.
 		 */
-		distress = 100 >> zone->prev_priority;
+		distress = 100 >> min(zone->prev_priority, priority);
 
 		/*
 		 * The point of this algorithm is to decide when to start
@@ -768,6 +793,7 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 			reclaim_mapped = 1;
 	}
 
+	{KSTAT_PERF_ENTER(refill_inact)
 	lru_add_drain();
 	spin_lock_irq(&zone->lru_lock);
 	pgmoved = isolate_lru_pages(nr_pages, &zone->active_list,
@@ -847,6 +873,7 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 	spin_unlock_irq(&zone->lru_lock);
 
 	pagevec_release(&pvec);
+	KSTAT_PERF_LEAVE(refill_inact)}
 }
 
 /*
@@ -885,13 +912,17 @@ static unsigned long shrink_zone(int priority, struct zone *zone,
 			nr_to_scan = min(nr_active,
 					(unsigned long)sc->swap_cluster_max);
 			nr_active -= nr_to_scan;
-			shrink_active_list(nr_to_scan, zone, sc);
+			if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+				goto done;
+			shrink_active_list(nr_to_scan, zone, sc, priority);
 		}
 
 		if (nr_inactive) {
 			nr_to_scan = min(nr_inactive,
 					(unsigned long)sc->swap_cluster_max);
 			nr_inactive -= nr_to_scan;
+			if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+				goto done;
 			nr_reclaimed += shrink_inactive_list(nr_to_scan, zone,
 								sc);
 		}
@@ -899,6 +930,7 @@ static unsigned long shrink_zone(int priority, struct zone *zone,
 
 	throttle_vm_writeout();
 
+done:
 	atomic_dec(&zone->reclaim_in_progress);
 	return nr_reclaimed;
 }
@@ -934,14 +966,15 @@ static unsigned long shrink_zones(int priority, struct zone **zones,
 		if (!cpuset_zone_allowed(zone, __GFP_HARDWALL))
 			continue;
 
-		zone->temp_priority = priority;
-		if (zone->prev_priority > priority)
-			zone->prev_priority = priority;
+		note_zone_scanning_priority(zone, priority);
 
 		if (zone->all_unreclaimable && priority != DEF_PRIORITY)
 			continue;	/* Let kswapd poll it */
 
 		nr_reclaimed += shrink_zone(priority, zone, sc);
+
+		if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+			break;
 	}
 	return nr_reclaimed;
 }
@@ -976,15 +1009,16 @@ unsigned long try_to_free_pages(struct zone **zones, gfp_t gfp_mask)
 		.swappiness = vm_swappiness,
 	};
 
+	KSTAT_PERF_ENTER(ttfp);
 	count_vm_event(ALLOCSTALL);
 
+	ub_oom_start();
 	for (i = 0; zones[i] != NULL; i++) {
 		struct zone *zone = zones[i];
 
 		if (!cpuset_zone_allowed(zone, __GFP_HARDWALL))
 			continue;
 
-		zone->temp_priority = DEF_PRIORITY;
 		lru_pages += zone->nr_active + zone->nr_inactive;
 	}
 
@@ -1017,19 +1051,34 @@ unsigned long try_to_free_pages(struct zone **zones, gfp_t gfp_mask)
 			sc.may_writepage = 1;
 		}
 
+		if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE))) {
+			ret = 1;
+			goto out;
+		}
+
 		/* Take a nap, wait for some writeback to complete */
 		if (sc.nr_scanned && priority < DEF_PRIORITY - 2)
 			blk_congestion_wait(WRITE, HZ/10);
 	}
 out:
+	/*
+	 * Now that we've scanned all the zones at this priority level, note
+	 * that level within the zone so that the next thread which performs
+	 * scanning of this zone will immediately start out at this priority
+	 * level.  This affects only the decision whether or not to bring
+	 * mapped pages onto the inactive list.
+	 */
+	if (priority < 0)
+		priority = 0;
 	for (i = 0; zones[i] != 0; i++) {
 		struct zone *zone = zones[i];
 
 		if (!cpuset_zone_allowed(zone, __GFP_HARDWALL))
 			continue;
 
-		zone->prev_priority = zone->temp_priority;
+		zone->prev_priority = priority;
 	}
+	KSTAT_PERF_LEAVE(ttfp);
 	return ret;
 }
 
@@ -1068,6 +1117,11 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order)
 		.swap_cluster_max = SWAP_CLUSTER_MAX,
 		.swappiness = vm_swappiness,
 	};
+	/*
+	 * temp_priority is used to remember the scanning priority at which
+	 * this zone was successfully refilled to free_pages == pages_high.
+	 */
+	int temp_priority[MAX_NR_ZONES];
 
 loop_again:
 	total_scanned = 0;
@@ -1075,11 +1129,8 @@ loop_again:
 	sc.may_writepage = !laptop_mode;
 	count_vm_event(PAGEOUTRUN);
 
-	for (i = 0; i < pgdat->nr_zones; i++) {
-		struct zone *zone = pgdat->node_zones + i;
-
-		zone->temp_priority = DEF_PRIORITY;
-	}
+	for (i = 0; i < pgdat->nr_zones; i++)
+		temp_priority[i] = DEF_PRIORITY;
 
 	for (priority = DEF_PRIORITY; priority >= 0; priority--) {
 		int end_zone = 0;	/* Inclusive.  0 = ZONE_DMA */
@@ -1140,10 +1191,9 @@ scan:
 			if (!zone_watermark_ok(zone, order, zone->pages_high,
 					       end_zone, 0))
 				all_zones_ok = 0;
-			zone->temp_priority = priority;
-			if (zone->prev_priority > priority)
-				zone->prev_priority = priority;
+			temp_priority[i] = priority;
 			sc.nr_scanned = 0;
+			note_zone_scanning_priority(zone, priority);
 			nr_reclaimed += shrink_zone(priority, zone, &sc);
 			reclaim_state->reclaimed_slab = 0;
 			nr_slab = shrink_slab(sc.nr_scanned, GFP_KERNEL,
@@ -1183,10 +1233,15 @@ scan:
 			break;
 	}
 out:
+	/*
+	 * Note within each zone the priority level at which this zone was
+	 * brought into a happy state.  So that the next thread which scans this
+	 * zone will start out at that priority level.
+	 */
 	for (i = 0; i < pgdat->nr_zones; i++) {
 		struct zone *zone = pgdat->node_zones + i;
 
-		zone->prev_priority = zone->temp_priority;
+		zone->prev_priority = temp_priority[i];
 	}
 	if (!all_zones_ok) {
 		cond_resched();
@@ -1315,7 +1370,7 @@ static unsigned long shrink_all_zones(unsigned long nr_pages, int pass,
 			if (zone->nr_scan_active >= nr_pages || pass > 3) {
 				zone->nr_scan_active = 0;
 				nr_to_scan = min(nr_pages, zone->nr_active);
-				shrink_active_list(nr_to_scan, zone, sc);
+				shrink_active_list(nr_to_scan, zone, sc, prio);
 			}
 		}
 
@@ -1510,7 +1565,6 @@ int zone_reclaim_mode __read_mostly;
 #define RECLAIM_ZONE (1<<0)	/* Run shrink_cache on the zone */
 #define RECLAIM_WRITE (1<<1)	/* Writeout pages during reclaim */
 #define RECLAIM_SWAP (1<<2)	/* Swap pages out during reclaim */
-#define RECLAIM_SLAB (1<<3)	/* Do a global slab shrink if the zone is out of memory */
 
 /*
  * Priority for ZONE_RECLAIM. This determines the fraction of pages
@@ -1524,6 +1578,12 @@ int zone_reclaim_mode __read_mostly;
  * occur.
  */
 int sysctl_min_unmapped_ratio = 1;
+
+/*
+ * If the number of slab pages in a zone grows beyond this percentage then
+ * slab reclaim needs to occur.
+ */
+int sysctl_min_slab_ratio = 5;
 
 /*
  * Try to free up some pages from this zone through reclaim.
@@ -1556,29 +1616,38 @@ static int __zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 	reclaim_state.reclaimed_slab = 0;
 	p->reclaim_state = &reclaim_state;
 
-	/*
-	 * Free memory by calling shrink zone with increasing priorities
-	 * until we have enough memory freed.
-	 */
-	priority = ZONE_RECLAIM_PRIORITY;
-	do {
-		nr_reclaimed += shrink_zone(priority, zone, &sc);
-		priority--;
-	} while (priority >= 0 && nr_reclaimed < nr_pages);
+	if (zone_page_state(zone, NR_FILE_PAGES) -
+		zone_page_state(zone, NR_FILE_MAPPED) >
+		zone->min_unmapped_ratio) {
+		/*
+		 * Free memory by calling shrink zone with increasing
+		 * priorities until we have enough memory freed.
+		 */
+		priority = ZONE_RECLAIM_PRIORITY;
+		do {
+			note_zone_scanning_priority(zone, priority);
+			nr_reclaimed += shrink_zone(priority, zone, &sc);
+			priority--;
+		} while (priority >= 0 && nr_reclaimed < nr_pages);
+	}
 
-	if (nr_reclaimed < nr_pages && (zone_reclaim_mode & RECLAIM_SLAB)) {
+	if (zone_page_state(zone, NR_SLAB) > zone->min_slab_pages) {
 		/*
 		 * shrink_slab() does not currently allow us to determine how
-		 * many pages were freed in this zone. So we just shake the slab
-		 * a bit and then go off node for this particular allocation
-		 * despite possibly having freed enough memory to allocate in
-		 * this zone.  If we freed local memory then the next
-		 * allocations will be local again.
+		 * many pages were freed in this zone. So we take the current
+		 * number of slab pages and shake the slab until it is reduced
+		 * by the same nr_pages that we used for reclaiming unmapped
+		 * pages.
 		 *
-		 * shrink_slab will free memory on all zones and may take
-		 * a long time.
+		 * Note that shrink_slab will free memory on all zones and may
+		 * take a long time.
 		 */
-		shrink_slab(sc.nr_scanned, gfp_mask, order);
+		unsigned long limit = zone_page_state(zone,
+				NR_SLAB) - nr_pages;
+
+		while (shrink_slab(sc.nr_scanned, gfp_mask, order) &&
+			zone_page_state(zone, NR_SLAB) > limit)
+			;
 	}
 
 	p->reclaim_state = NULL;
@@ -1592,7 +1661,8 @@ int zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 	int node_id;
 
 	/*
-	 * Zone reclaim reclaims unmapped file backed pages.
+	 * Zone reclaim reclaims unmapped file backed pages and
+	 * slab pages if we are over the defined limits.
 	 *
 	 * A small portion of unmapped file backed pages is needed for
 	 * file I/O otherwise pages read by file I/O will be immediately
@@ -1601,7 +1671,9 @@ int zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 	 * unmapped file backed pages.
 	 */
 	if (zone_page_state(zone, NR_FILE_PAGES) -
-	    zone_page_state(zone, NR_FILE_MAPPED) <= zone->min_unmapped_ratio)
+	    zone_page_state(zone, NR_FILE_MAPPED) <= zone->min_unmapped_ratio
+	    && zone_page_state(zone, NR_SLAB)
+			<= zone->min_slab_pages)
 		return 0;
 
 	/*

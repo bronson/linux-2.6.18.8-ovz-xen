@@ -22,18 +22,21 @@
 #include <linux/syscalls.h>
 #include <linux/ptrace.h>
 #include <linux/signal.h>
+#include <linux/kmem_cache.h>
 #include <linux/capability.h>
 #include <asm/param.h>
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/siginfo.h>
+#include <ub/ub_misc.h>
 #include "audit.h"	/* audit_signal_info() */
 
 /*
  * SLAB caches for signal bits.
  */
 
-static kmem_cache_t *sigqueue_cachep;
+kmem_cache_t *sigqueue_cachep;
+EXPORT_SYMBOL_GPL(sigqueue_cachep);
 
 /*
  * In POSIX a signal is sent either to a specific thread (Linux task)
@@ -155,6 +158,23 @@ static kmem_cache_t *sigqueue_cachep;
 	(!T(signr, SIG_KERNEL_IGNORE_MASK|SIG_KERNEL_STOP_MASK) && \
 	 (t)->sighand->action[(signr)-1].sa.sa_handler == SIG_DFL)
 
+static int sig_ve_ignored(int sig, struct siginfo *info, struct task_struct *t)
+{
+	struct ve_struct *ve;
+
+	/* always allow signals from the kernel */
+	if (info == SEND_SIG_FORCED ||
+		       (!is_si_special(info) && SI_FROMKERNEL(info)))
+		return 0;
+
+	ve = current->ve_task_info.owner_env;
+	if (ve->init_entry != t)
+		return 0;
+	if (ve_is_super(get_exec_env()))
+		return 0;
+	return !sig_user_defined(t, sig) || sig_kernel_only(sig);
+}
+
 static int sig_ignored(struct task_struct *t, int sig)
 {
 	void __user * handler;
@@ -221,6 +241,7 @@ fastcall void recalc_sigpending_tsk(struct task_struct *t)
 	else
 		clear_tsk_thread_flag(t, TIF_SIGPENDING);
 }
+EXPORT_SYMBOL_GPL(recalc_sigpending_tsk);
 
 void recalc_sigpending(void)
 {
@@ -271,8 +292,13 @@ static struct sigqueue *__sigqueue_alloc(struct task_struct *t, gfp_t flags,
 	atomic_inc(&t->user->sigpending);
 	if (override_rlimit ||
 	    atomic_read(&t->user->sigpending) <=
-			t->signal->rlim[RLIMIT_SIGPENDING].rlim_cur)
+			t->signal->rlim[RLIMIT_SIGPENDING].rlim_cur) {
 		q = kmem_cache_alloc(sigqueue_cachep, flags);
+		if (q && ub_siginfo_charge(q, get_task_ub(t))) {
+			kmem_cache_free(sigqueue_cachep, q);
+			q = NULL;
+		}
+	}
 	if (unlikely(q == NULL)) {
 		atomic_dec(&t->user->sigpending);
 	} else {
@@ -289,6 +315,7 @@ static void __sigqueue_free(struct sigqueue *q)
 		return;
 	atomic_dec(&q->user->sigpending);
 	free_uid(q->user);
+	ub_siginfo_uncharge(q);
 	kmem_cache_free(sigqueue_cachep, q);
 }
 
@@ -419,7 +446,16 @@ static int __dequeue_signal(struct sigpending *pending, sigset_t *mask,
 {
 	int sig = 0;
 
-	sig = next_signal(pending, mask);
+	/* SIGKILL must have priority, otherwise it is quite easy
+	 * to create an unkillable process, sending sig < SIGKILL
+	 * to self */
+	if (unlikely(sigismember(&pending->signal, SIGKILL))) {
+		if (!sigismember(mask, SIGKILL))
+			sig = SIGKILL;
+	}
+
+	if (likely(!sig))
+		sig = next_signal(pending, mask);
 	if (sig) {
 		if (current->notifier) {
 			if (sigismember(current->notifier_mask, sig)) {
@@ -513,6 +549,7 @@ void signal_wake_up(struct task_struct *t, int resume)
 	if (!wake_up_state(t, mask))
 		kick_process(t);
 }
+EXPORT_SYMBOL_GPL(signal_wake_up);
 
 /*
  * Remove signals in mask from the pending set and queue.
@@ -731,7 +768,7 @@ static int send_signal(int sig, struct siginfo *info, struct task_struct *t,
 			q->info.si_signo = sig;
 			q->info.si_errno = 0;
 			q->info.si_code = SI_USER;
-			q->info.si_pid = current->pid;
+			q->info.si_pid = virt_pid(current);
 			q->info.si_uid = current->uid;
 			break;
 		case (unsigned long) SEND_SIG_PRIV:
@@ -1048,7 +1085,8 @@ int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	if (!ret && sig) {
 		ret = -ESRCH;
 		if (lock_task_sighand(p, &flags)) {
-			ret = __group_send_sig_info(sig, info, p);
+			ret = sig_ve_ignored(sig, info, p) ? 0 :
+				__group_send_sig_info(sig, info, p);
 			unlock_task_sighand(p, &flags);
 		}
 	}
@@ -1069,13 +1107,18 @@ int __kill_pg_info(int sig, struct siginfo *info, pid_t pgrp)
 	if (pgrp <= 0)
 		return -EINVAL;
 
+	/* Use __vpid_to_pid(). This function is used under write_lock
+	 * tasklist_lock. */
+	if (is_virtual_pid(pgrp))
+		pgrp = __vpid_to_pid(pgrp);
+
 	success = 0;
 	retval = -ESRCH;
-	do_each_task_pid(pgrp, PIDTYPE_PGID, p) {
+	do_each_task_pid_ve(pgrp, PIDTYPE_PGID, p) {
 		int err = group_send_sig_info(sig, info, p);
 		success |= !err;
 		retval = err;
-	} while_each_task_pid(pgrp, PIDTYPE_PGID, p);
+	} while_each_task_pid_ve(pgrp, PIDTYPE_PGID, p);
 	return success ? 0 : retval;
 }
 
@@ -1103,7 +1146,7 @@ kill_proc_info(int sig, struct siginfo *info, pid_t pid)
 		read_lock(&tasklist_lock);
 		acquired_tasklist_lock = 1;
 	}
-	p = find_task_by_pid(pid);
+	p = find_task_by_pid_ve(pid);
 	error = -ESRCH;
 	if (p)
 		error = group_send_sig_info(sig, info, p);
@@ -1124,7 +1167,7 @@ int kill_proc_info_as_uid(int sig, struct siginfo *info, pid_t pid,
 		return ret;
 
 	read_lock(&tasklist_lock);
-	p = find_task_by_pid(pid);
+	p = find_task_by_pid_ve(pid);
 	if (!p) {
 		ret = -ESRCH;
 		goto out_unlock;
@@ -1166,8 +1209,8 @@ static int kill_something_info(int sig, struct siginfo *info, int pid)
 		struct task_struct * p;
 
 		read_lock(&tasklist_lock);
-		for_each_process(p) {
-			if (p->pid > 1 && p->tgid != current->tgid) {
+		for_each_process_ve(p) {
+			if (virt_pid(p) > 1 && p->tgid != current->tgid) {
 				int err = group_send_sig_info(sig, info, p);
 				++count;
 				if (err != -EPERM)
@@ -1300,20 +1343,19 @@ struct sigqueue *sigqueue_alloc(void)
 void sigqueue_free(struct sigqueue *q)
 {
 	unsigned long flags;
+	spinlock_t *lock = &current->sighand->siglock;
+
 	BUG_ON(!(q->flags & SIGQUEUE_PREALLOC));
 	/*
 	 * If the signal is still pending remove it from the
-	 * pending queue.
+	 * pending queue. We must hold ->siglock while testing
+	 * q->list to serialize with collect_signal().
 	 */
-	if (unlikely(!list_empty(&q->list))) {
-		spinlock_t *lock = &current->sighand->siglock;
-		read_lock(&tasklist_lock);
-		spin_lock_irqsave(lock, flags);
-		if (!list_empty(&q->list))
-			list_del_init(&q->list);
-		spin_unlock_irqrestore(lock, flags);
-		read_unlock(&tasklist_lock);
-	}
+	spin_lock_irqsave(lock, flags);
+	if (!list_empty(&q->list))
+		list_del_init(&q->list);
+	spin_unlock_irqrestore(lock, flags);
+
 	q->flags &= ~SIGQUEUE_PREALLOC;
 	__sigqueue_free(q);
 }
@@ -1441,9 +1483,17 @@ void do_notify_parent(struct task_struct *tsk, int sig)
 	BUG_ON(!tsk->ptrace &&
 	       (tsk->group_leader != tsk || !thread_group_empty(tsk)));
 
+#ifdef CONFIG_VE
+	/* Allow to send only SIGCHLD from VE */
+	if (sig != SIGCHLD &&
+			tsk->ve_task_info.owner_env != 
+			tsk->parent->ve_task_info.owner_env)
+		sig = SIGCHLD;
+#endif
+
 	info.si_signo = sig;
 	info.si_errno = 0;
-	info.si_pid = tsk->pid;
+	info.si_pid = get_task_pid_ve(tsk, tsk->parent->ve_task_info.owner_env);
 	info.si_uid = tsk->uid;
 
 	/* FIXME: find out whether or not this is supposed to be c*time. */
@@ -1508,7 +1558,7 @@ static void do_notify_parent_cldstop(struct task_struct *tsk, int why)
 
 	info.si_signo = SIGCHLD;
 	info.si_errno = 0;
-	info.si_pid = tsk->pid;
+	info.si_pid = get_task_pid_ve(tsk, VE_TASK_INFO(parent)->owner_env);
 	info.si_uid = tsk->uid;
 
 	/* FIXME: find out whether or not this is supposed to be c*time. */
@@ -1595,9 +1645,9 @@ static void ptrace_stop(int exit_code, int nostop_code, siginfo_t *info)
 	current->exit_code = exit_code;
 
 	/* Let the debugger run.  */
+	set_pn_state(current, PN_STOP_SIGNAL);
 	set_current_state(TASK_TRACED);
 	spin_unlock_irq(&current->sighand->siglock);
-	try_to_freeze();
 	read_lock(&tasklist_lock);
 	if (may_ptrace_stop()) {
 		do_notify_parent_cldstop(current, CLD_TRAPPED);
@@ -1613,6 +1663,7 @@ static void ptrace_stop(int exit_code, int nostop_code, siginfo_t *info)
 		current->exit_code = nostop_code;
 	}
 
+	clear_pn_state(current);
 	/*
 	 * We are back.  Now reacquire the siglock before touching
 	 * last_siginfo, so that we are sure to have synchronized with
@@ -1660,7 +1711,9 @@ finish_stop(int stop_count)
 		read_unlock(&tasklist_lock);
 	}
 
+	set_stop_state(current);
 	schedule();
+	clear_stop_state(current);
 	/*
 	 * Now we don't run again until continued.
 	 */
@@ -1762,13 +1815,45 @@ static int handle_group_stop(void)
 	return 1;
 }
 
+atomic_t global_suspend = ATOMIC_INIT(0);
+
+/* Refrigerator is place where frozen processes are stored :-). */
+void refrigerator(void)
+{
+	/* Hmm, should we be allowed to suspend when there are realtime
+	   processes around? */
+	long save;
+	save = current->state;
+	current->state = TASK_UNINTERRUPTIBLE;
+	/* printk("="); */
+
+	spin_lock_irq(&current->sighand->siglock);
+	if (test_and_clear_thread_flag(TIF_FREEZE)) {
+		recalc_sigpending(); /* We sent fake signal, clean it up */
+		if (atomic_read(&global_suspend) ||
+		    atomic_read(&get_exec_env()->suspend)) {
+			current->flags |= PF_FROZEN;
+		} else {
+			current->state = save;
+		}
+	} else {
+		/* Freeze request could be canceled before we entered
+		 * refrigerator(). In this case we do nothing. */
+		current->state = save;
+	}
+	spin_unlock_irq(&current->sighand->siglock);
+
+	while (current->flags & PF_FROZEN)
+		schedule();
+	current->state = save;
+}
+EXPORT_SYMBOL(refrigerator);
+
 int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka,
 			  struct pt_regs *regs, void *cookie)
 {
 	sigset_t *mask = &current->blocked;
 	int signr = 0;
-
-	try_to_freeze();
 
 relock:
 	spin_lock_irq(&current->sighand->siglock);
@@ -1805,7 +1890,7 @@ relock:
 				info->si_signo = signr;
 				info->si_errno = 0;
 				info->si_code = SI_USER;
-				info->si_pid = current->parent->pid;
+				info->si_pid = virt_pid(current->parent);
 				info->si_uid = current->parent->uid;
 			}
 
@@ -2187,7 +2272,7 @@ sys_kill(int pid, int sig)
 	info.si_signo = sig;
 	info.si_errno = 0;
 	info.si_code = SI_USER;
-	info.si_pid = current->tgid;
+	info.si_pid = virt_tgid(current);
 	info.si_uid = current->uid;
 
 	return kill_something_info(sig, &info, pid);
@@ -2203,12 +2288,12 @@ static int do_tkill(int tgid, int pid, int sig)
 	info.si_signo = sig;
 	info.si_errno = 0;
 	info.si_code = SI_TKILL;
-	info.si_pid = current->tgid;
+	info.si_pid = virt_tgid(current);
 	info.si_uid = current->uid;
 
 	read_lock(&tasklist_lock);
-	p = find_task_by_pid(pid);
-	if (p && (tgid <= 0 || p->tgid == tgid)) {
+	p = find_task_by_pid_ve(pid);
+	if (p && (tgid <= 0 || virt_tgid(p) == tgid)) {
 		error = check_kill_permission(sig, &info, p);
 		/*
 		 * The null signal is a permissions and process existence
@@ -2216,8 +2301,10 @@ static int do_tkill(int tgid, int pid, int sig)
 		 */
 		if (!error && sig && p->sighand) {
 			spin_lock_irq(&p->sighand->siglock);
-			handle_stop_signal(sig, p);
-			error = specific_send_sig_info(sig, &info, p);
+			if (!sig_ve_ignored(sig, &info, p)) {
+				handle_stop_signal(sig, p);
+				error = specific_send_sig_info(sig, &info, p);
+			}
 			spin_unlock_irq(&p->sighand->siglock);
 		}
 	}
@@ -2583,5 +2670,5 @@ void __init signals_init(void)
 		kmem_cache_create("sigqueue",
 				  sizeof(struct sigqueue),
 				  __alignof__(struct sigqueue),
-				  SLAB_PANIC, NULL, NULL);
+				  SLAB_PANIC|SLAB_UBC, NULL, NULL);
 }

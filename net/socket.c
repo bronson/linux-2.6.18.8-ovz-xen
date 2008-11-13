@@ -85,6 +85,8 @@
 #include <linux/kmod.h>
 #include <linux/audit.h>
 #include <linux/wireless.h>
+#include <linux/in.h>
+#include <linux/in6.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -205,15 +207,6 @@ static DEFINE_PER_CPU(int, sockets_in_use) = 0;
  *	divide and look after the messy bits.
  */
 
-#define MAX_SOCK_ADDR	128		/* 108 for Unix domain - 
-					   16 for IP, 16 for IPX,
-					   24 for IPv6,
-					   about 80 for AX.25 
-					   must be at least one bigger than
-					   the AF_UNIX size (see net/unix/af_unix.c
-					   :unix_mkname()).  
-					 */
-					 
 /**
  *	move_addr_to_kernel	-	copy a socket address into kernel space
  *	@uaddr: Address in user space
@@ -558,6 +551,9 @@ const struct file_operations bad_sock_fops = {
  
 void sock_release(struct socket *sock)
 {
+	if (sock->sk)
+		ub_sock_sndqueuedel(sock->sk);
+
 	if (sock->ops) {
 		struct module *owner = sock->ops->owner;
 
@@ -1121,6 +1117,48 @@ int sock_wake_async(struct socket *sock, int how, int band)
 	return 0;
 }
 
+int vz_security_family_check(int family)
+{
+#ifdef CONFIG_VE
+	if (ve_is_super(get_exec_env()))
+		return 0;
+
+	switch (family) {
+	case PF_UNSPEC:
+	case PF_PACKET:
+	case PF_NETLINK:
+	case PF_UNIX:
+	case PF_INET:
+	case PF_INET6:
+		break;
+	default:
+		return -EAFNOSUPPORT;
+        }
+#endif
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vz_security_family_check);
+
+int vz_security_protocol_check(int protocol)
+{
+#ifdef CONFIG_VE
+	if (ve_is_super(get_exec_env()))
+		return 0;
+
+	switch (protocol) {
+	case  IPPROTO_IP:
+	case  IPPROTO_TCP:
+	case  IPPROTO_UDP:
+	case  IPPROTO_RAW:
+		break;
+	default:
+		return -EAFNOSUPPORT;
+	}
+#endif
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vz_security_protocol_check);
+
 static int __sock_create(int family, int type, int protocol, struct socket **res, int kern)
 {
 	int err;
@@ -1147,6 +1185,11 @@ static int __sock_create(int family, int type, int protocol, struct socket **res
 		}
 		family = PF_PACKET;
 	}
+
+	/* VZ compatibility layer */
+	err = vz_security_family_check(family);
+	if (err < 0)
+		return err;
 
 	err = security_socket_create(family, type, protocol, kern);
 	if (err)
@@ -1424,7 +1467,7 @@ asmlinkage long sys_accept(int fd, struct sockaddr __user *upeer_sockaddr, int _
 
 	err = sock_attach_fd(newsock, newfile);
 	if (err < 0)
-		goto out_fd;
+		goto out_fd_simple;
 
 	err = security_socket_accept(sock, newsock);
 	if (err)
@@ -1455,6 +1498,11 @@ out_put:
 	fput_light(sock->file, fput_needed);
 out:
 	return err;
+out_fd_simple:
+	sock_release(newsock);
+	put_filp(newfile);
+	put_unused_fd(newfd);
+	goto out_put;
 out_fd:
 	fput(newfile);
 	put_unused_fd(newfd);

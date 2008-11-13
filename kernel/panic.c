@@ -27,6 +27,8 @@ static int pause_on_oops_flag;
 static DEFINE_SPINLOCK(pause_on_oops_lock);
 
 int panic_timeout;
+int kernel_text_csum_broken;
+EXPORT_SYMBOL(kernel_text_csum_broken);
 
 ATOMIC_NOTIFIER_HEAD(panic_notifier_list);
 
@@ -158,7 +160,8 @@ const char *print_tainted(void)
 {
 	static char buf[20];
 	if (tainted) {
-		snprintf(buf, sizeof(buf), "Tainted: %c%c%c%c%c%c",
+		snprintf(buf, sizeof(buf), "Tainted: %c%c%c%c%c%c%c",
+			kernel_text_csum_broken ? 'B' : ' ',
 			tainted & TAINT_PROPRIETARY_MODULE ? 'P' : 'G',
 			tainted & TAINT_FORCED_MODULE ? 'F' : ' ',
 			tainted & TAINT_UNSAFE_SMP ? 'S' : ' ',

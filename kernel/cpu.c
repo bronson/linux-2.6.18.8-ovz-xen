@@ -23,6 +23,10 @@ static __cpuinitdata BLOCKING_NOTIFIER_HEAD(cpu_chain);
 
 #ifdef CONFIG_HOTPLUG_CPU
 
+#ifdef CONFIG_SCHED_VCPU
+#error "CONFIG_HOTPLUG_CPU isn't supported with CONFIG_SCHED_VCPU"
+#endif
+
 /* Crappy recursive lock-takers in cpufreq! Complain loudly about idiots */
 static struct task_struct *recursive;
 static int recursive_depth;
@@ -81,8 +85,8 @@ static inline void check_for_tasks(int cpu)
 	struct task_struct *p;
 
 	write_lock_irq(&tasklist_lock);
-	for_each_process(p) {
-		if (task_cpu(p) == cpu &&
+	for_each_process_all(p) {
+		if (task_pcpu(p) == cpu &&
 		    (!cputime_eq(p->utime, cputime_zero) ||
 		     !cputime_eq(p->stime, cputime_zero)))
 			printk(KERN_WARNING "Task %s (pid = %d) is on cpu %d\
@@ -92,6 +96,13 @@ static inline void check_for_tasks(int cpu)
 	write_unlock_irq(&tasklist_lock);
 }
 
+#ifdef CONFIG_SCHED_VCPU
+#error VCPU vs. HOTPLUG: fix hotplug code below
+/*
+ * What should be fixed:
+ * - check for if (idle_cpu()) yield()
+ */
+#endif
 /* Take this CPU down. */
 static int take_cpu_down(void *unused)
 {

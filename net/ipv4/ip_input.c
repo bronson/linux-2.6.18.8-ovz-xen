@@ -200,6 +200,9 @@ static inline int ip_local_deliver_finish(struct sk_buff *skb)
 {
 	int ihl = skb->nh.iph->ihl*4;
 
+	if (skb->destructor)
+		skb_orphan(skb);
+
 	__skb_pull(skb, ihl);
 
         /* Point into the IP datagram, just past the header. */

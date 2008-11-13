@@ -106,24 +106,35 @@ static int show_tty_driver(struct seq_file *m, void *v)
 /* iterator */
 static void *t_start(struct seq_file *m, loff_t *pos)
 {
-	struct list_head *p;
+	struct tty_driver *drv;
+
 	loff_t l = *pos;
-	list_for_each(p, &tty_drivers)
+	read_lock(&tty_driver_guard);
+	list_for_each_entry(drv, &tty_drivers, tty_drivers) {
+		if (!ve_accessible_strict(drv->owner_env, get_exec_env()))
+			continue;
 		if (!l--)
-			return list_entry(p, struct tty_driver, tty_drivers);
+			return drv;
+	}
 	return NULL;
 }
 
 static void *t_next(struct seq_file *m, void *v, loff_t *pos)
 {
-	struct list_head *p = ((struct tty_driver *)v)->tty_drivers.next;
+	struct tty_driver *drv;
+
 	(*pos)++;
-	return p==&tty_drivers ? NULL :
-			list_entry(p, struct tty_driver, tty_drivers);
+	drv = (struct tty_driver *)v;
+	list_for_each_entry_continue(drv, &tty_drivers, tty_drivers) {
+		if (ve_accessible_strict(drv->owner_env, get_exec_env()))
+			return drv;
+	}
+	return NULL;
 }
 
 static void t_stop(struct seq_file *m, void *v)
 {
+	read_unlock(&tty_driver_guard);
 }
 
 static struct seq_operations tty_drivers_op = {

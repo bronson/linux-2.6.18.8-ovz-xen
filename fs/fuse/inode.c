@@ -17,13 +17,16 @@
 #include <linux/parser.h>
 #include <linux/statfs.h>
 #include <linux/random.h>
+#include <linux/ve_proto.h>
 
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Filesystem in Userspace");
 MODULE_LICENSE("GPL");
 
 static kmem_cache_t *fuse_inode_cachep;
+#ifndef CONFIG_VE
 struct list_head fuse_conn_list;
+#endif
 DEFINE_MUTEX(fuse_mutex);
 
 #define FUSE_SUPER_MAGIC 0x65735546
@@ -109,6 +112,7 @@ static int fuse_remount_fs(struct super_block *sb, int *flags, char *data)
 
 void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr)
 {
+	struct fuse_conn *fc = get_fuse_conn(inode);
 	if (S_ISREG(inode->i_mode) && i_size_read(inode) != attr->size)
 		invalidate_inode_pages(inode->i_mapping);
 
@@ -117,7 +121,9 @@ void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr)
 	inode->i_nlink   = attr->nlink;
 	inode->i_uid     = attr->uid;
 	inode->i_gid     = attr->gid;
+	spin_lock(&fc->lock);
 	i_size_write(inode, attr->size);
+	spin_unlock(&fc->lock);
 	inode->i_blksize = PAGE_CACHE_SIZE;
 	inode->i_blocks  = attr->blocks;
 	inode->i_atime.tv_sec   = attr->atime;
@@ -131,7 +137,7 @@ void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr)
 static void fuse_init_inode(struct inode *inode, struct fuse_attr *attr)
 {
 	inode->i_mode = attr->mode & S_IFMT;
-	i_size_write(inode, attr->size);
+	inode->i_size = attr->size;
 	if (S_ISREG(inode->i_mode)) {
 		fuse_init_common(inode);
 		fuse_init_file_inode(inode);
@@ -661,6 +667,41 @@ static void fuse_sysfs_cleanup(void)
 	subsystem_unregister(&fuse_subsys);
 }
 
+#ifdef CONFIG_VE
+static int fuse_start(void *data)
+{
+	struct ve_struct *ve;
+
+	ve = (struct ve_struct *)data;
+	if (ve->fuse_fs_type != NULL)
+		return -EBUSY;
+
+	INIT_LIST_HEAD(&ve->_fuse_conn_list);
+	return register_ve_fs_type(ve, &fuse_fs_type, &ve->fuse_fs_type, NULL);
+}
+
+static void fuse_stop(void *data)
+{
+	struct ve_struct *ve;
+
+	ve = (struct ve_struct *)data;
+	if (ve->fuse_fs_type == NULL)
+		return;
+
+	unregister_ve_fs_type(ve->fuse_fs_type, NULL);
+	kfree(ve->fuse_fs_type);
+	ve->fuse_fs_type = NULL;
+	BUG_ON(!list_empty(&ve->_fuse_conn_list));
+}
+
+static struct ve_hook fuse_ve_hook = {
+	.init		= fuse_start,
+	.fini		= fuse_stop,
+	.owner		= THIS_MODULE,
+	.priority	= HOOK_PRIO_FS,
+};
+#endif
+
 static int __init fuse_init(void)
 {
 	int res;
@@ -685,6 +726,7 @@ static int __init fuse_init(void)
 	if (res)
 		goto err_sysfs_cleanup;
 
+	ve_hook_register(VE_SS_CHAIN, &fuse_ve_hook);
 	return 0;
 
  err_sysfs_cleanup:
@@ -701,6 +743,7 @@ static void __exit fuse_exit(void)
 {
 	printk(KERN_DEBUG "fuse exit\n");
 
+	ve_hook_unregister(&fuse_ve_hook);
 	fuse_ctl_cleanup();
 	fuse_sysfs_cleanup();
 	fuse_fs_cleanup();

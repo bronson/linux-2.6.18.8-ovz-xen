@@ -317,3 +317,27 @@ ENTRY(sys_call_table)
 	.long sys_tee			/* 315 */
 	.long sys_vmsplice
 	.long sys_move_pages
+	.long sys_ni_syscall
+	.long sys_ni_syscall        
+	.long sys_utimensat		/* 320 */
+	.rept 500-(.-sys_call_table)/4
+		.long sys_ni_syscall
+	.endr
+	.long sys_fairsched_mknod	/* 500 */
+	.long sys_fairsched_rmnod
+	.long sys_fairsched_chwt
+	.long sys_fairsched_mvpr
+	.long sys_fairsched_rate
+	.long sys_fairsched_vcpus	/* 505 */
+	.long sys_ni_syscall
+	.long sys_ni_syscall
+	.long sys_ni_syscall
+	.long sys_ni_syscall
+	.long sys_getluid		/* 510 */
+	.long sys_setluid
+	.long sys_setublimit
+	.long sys_ubstat
+	.long sys_ni_syscall
+	.long sys_ni_syscall
+	.long sys_lchmod		/* 516 */
+	.long sys_lutime

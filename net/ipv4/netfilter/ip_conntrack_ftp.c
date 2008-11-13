@@ -14,6 +14,7 @@
 #include <linux/ctype.h>
 #include <net/checksum.h>
 #include <net/tcp.h>
+#include <linux/nfcalls.h>
 
 #include <linux/netfilter_ipv4/ip_conntrack_helper.h>
 #include <linux/netfilter_ipv4/ip_conntrack_ftp.h>
@@ -433,8 +434,8 @@ static int help(struct sk_buff **pskb,
 
 	/* Now, NAT might want to mangle the packet, and register the
 	 * (possibly changed) expectation itself. */
-	if (ip_nat_ftp_hook)
-		ret = ip_nat_ftp_hook(pskb, ctinfo, search[dir][i].ftptype,
+	if (ve_ip_nat_ftp_hook)
+		ret = ve_ip_nat_ftp_hook(pskb, ctinfo, search[dir][i].ftptype,
 				      matchoff, matchlen, exp, &seq);
 	else {
 		/* Can't expect this?  Best to drop packet now. */
@@ -461,15 +462,40 @@ static struct ip_conntrack_helper ftp[MAX_PORTS];
 static char ftp_names[MAX_PORTS][sizeof("ftp-65535")];
 
 /* Not __exit: called from init() */
-static void ip_conntrack_ftp_fini(void)
+void fini_ip_ct_ftp(void)
 {
 	int i;
 	for (i = 0; i < ports_c; i++) {
 		DEBUGP("ip_ct_ftp: unregistering helper for port %d\n",
 				ports[i]);
-		ip_conntrack_helper_unregister(&ftp[i]);
+		virt_ip_conntrack_helper_unregister(&ftp[i]);
 	}
 
+}
+
+int init_ip_ct_ftp(void)
+{
+	int i, ret;
+
+	for (i = 0; i < ports_c; i++) {
+		DEBUGP("ip_ct_ftp: registering helper for port %d\n",
+				ports[i]);
+		ret = virt_ip_conntrack_helper_register(&ftp[i]);
+		if (ret) {
+			fini_ip_ct_ftp();
+			return ret;
+		}
+	}
+	return 0;
+}
+
+/* Not __exit: called from init() */
+static void ip_conntrack_ftp_fini(void)
+{
+	KSYMMODUNRESOLVE(ip_conntrack_ftp);
+	KSYMUNRESOLVE(init_ip_ct_ftp);
+	KSYMUNRESOLVE(fini_ip_ct_ftp);
+	fini_ip_ct_ftp();
 	kfree(ftp_buffer);
 }
 
@@ -504,13 +530,17 @@ static int __init ip_conntrack_ftp_init(void)
 
 		DEBUGP("ip_ct_ftp: registering helper for port %d\n", 
 				ports[i]);
-		ret = ip_conntrack_helper_register(&ftp[i]);
+		ret = virt_ip_conntrack_helper_register(&ftp[i]);
 
 		if (ret) {
 			ip_conntrack_ftp_fini();
 			return ret;
 		}
 	}
+
+	KSYMRESOLVE(init_ip_ct_ftp);
+	KSYMRESOLVE(fini_ip_ct_ftp);
+	KSYMMODRESOLVE(ip_conntrack_ftp);
 	return 0;
 }
 

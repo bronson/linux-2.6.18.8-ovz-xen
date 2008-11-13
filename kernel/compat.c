@@ -22,6 +22,8 @@
 #include <linux/security.h>
 #include <linux/timex.h>
 #include <linux/migrate.h>
+#include <linux/hrtimer.h>
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 
@@ -39,61 +41,75 @@ int put_compat_timespec(const struct timespec *ts, struct compat_timespec __user
 			__put_user(ts->tv_nsec, &cts->tv_nsec)) ? -EFAULT : 0;
 }
 
-static long compat_nanosleep_restart(struct restart_block *restart)
+long compat_nanosleep_restart(struct restart_block *restart)
 {
-	unsigned long expire = restart->arg0, now = jiffies;
 	struct compat_timespec __user *rmtp;
+	struct timespec tu;
+	void *rfn_save = restart->fn;
+	struct hrtimer_sleeper sleeper;
+	ktime_t rem;
 
-	/* Did it expire while we handled signals? */
-	if (!time_after(expire, now))
+	restart->fn = do_no_restart_syscall;
+
+	hrtimer_init(&sleeper.timer, (clockid_t) restart->arg3, HRTIMER_ABS);
+
+	sleeper.timer.expires.tv64 = ((u64)restart->arg1 << 32) | (u64) restart->arg0;
+	hrtimer_init_sleeper(&sleeper, current);
+
+	set_current_state(TASK_INTERRUPTIBLE);
+	rem = schedule_hrtimer(&sleeper.timer, HRTIMER_ABS);
+
+	if (rem.tv64 <= 0)
 		return 0;
 
-	expire = schedule_timeout_interruptible(expire - now);
-	if (expire == 0)
-		return 0;
+	rmtp = (struct compat_timespec __user *) restart->arg2;
+	tu = ktime_to_timespec(rem);
+	if (rmtp && put_compat_timespec(&tu, rmtp))
+		return -EFAULT;
 
-	rmtp = (struct compat_timespec __user *)restart->arg1;
-	if (rmtp) {
-		struct compat_timespec ct;
-		struct timespec t;
+	restart->fn = rfn_save;
 
-		jiffies_to_timespec(expire, &t);
-		ct.tv_sec = t.tv_sec;
-		ct.tv_nsec = t.tv_nsec;
-		if (copy_to_user(rmtp, &ct, sizeof(ct)))
-			return -EFAULT;
-	}
-	/* The 'restart' block is already filled in */
+	/* The other values in restart are already filled in */
 	return -ERESTART_RESTARTBLOCK;
 }
+EXPORT_SYMBOL_GPL(compat_nanosleep_restart);
 
 asmlinkage long compat_sys_nanosleep(struct compat_timespec __user *rqtp,
 		struct compat_timespec __user *rmtp)
 {
 	struct timespec t;
 	struct restart_block *restart;
-	unsigned long expire;
+	struct hrtimer_sleeper sleeper;
+	ktime_t rem;
 
 	if (get_compat_timespec(&t, rqtp))
 		return -EFAULT;
 
-	if ((t.tv_nsec >= 1000000000L) || (t.tv_nsec < 0) || (t.tv_sec < 0))
+	if (!timespec_valid(&t))
 		return -EINVAL;
 
-	expire = timespec_to_jiffies(&t) + (t.tv_sec || t.tv_nsec);
-	expire = schedule_timeout_interruptible(expire);
-	if (expire == 0)
+	hrtimer_init(&sleeper.timer, CLOCK_MONOTONIC, HRTIMER_REL);
+
+	sleeper.timer.expires = timespec_to_ktime(t);
+	hrtimer_init_sleeper(&sleeper, current);
+
+	set_current_state(TASK_INTERRUPTIBLE);
+	rem = schedule_hrtimer(&sleeper.timer, HRTIMER_REL);
+	if (rem.tv64 <= 0)
 		return 0;
 
-	if (rmtp) {
-		jiffies_to_timespec(expire, &t);
-		if (put_compat_timespec(&t, rmtp))
-			return -EFAULT;
-	}
+	t = ktime_to_timespec(rem);
+
+	if (rmtp && put_compat_timespec(&t, rmtp))
+		return -EFAULT;
+
 	restart = &current_thread_info()->restart_block;
 	restart->fn = compat_nanosleep_restart;
-	restart->arg0 = jiffies + expire;
-	restart->arg1 = (unsigned long) rmtp;
+	restart->arg0 = sleeper.timer.expires.tv64 & 0xFFFFFFFF;
+	restart->arg1 = sleeper.timer.expires.tv64 >> 32;
+	restart->arg2 = (unsigned long) rmtp;
+	restart->arg3 = (unsigned long) sleeper.timer.base->index;
+
 	return -ERESTART_RESTARTBLOCK;
 }
 

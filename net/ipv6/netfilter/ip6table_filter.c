@@ -11,11 +11,19 @@
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/nfcalls.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
 MODULE_DESCRIPTION("ip6tables filter table");
+
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/sched.h>
+#define ve_packet_filter	(get_exec_env()->_ve_ip6t_filter_pf)
+#else
+#define	ve_packet_filter	&packet_filter
+#endif
 
 #define FILTER_VALID_HOOKS ((1 << NF_IP6_LOCAL_IN) | (1 << NF_IP6_FORWARD) | (1 << NF_IP6_LOCAL_OUT))
 
@@ -43,7 +51,7 @@ static struct
 	struct ip6t_replace repl;
 	struct ip6t_standard entries[3];
 	struct ip6t_error term;
-} initial_table __initdata
+} initial_table
 = { { "filter", FILTER_VALID_HOOKS, 4,
       sizeof(struct ip6t_standard) * 3 + sizeof(struct ip6t_error),
       { [NF_IP6_LOCAL_IN] = 0,
@@ -108,7 +116,7 @@ ip6t_hook(unsigned int hook,
 	 const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	return ip6t_do_table(pskb, hook, in, out, &packet_filter, NULL);
+	return ip6t_do_table(pskb, hook, in, out, ve_packet_filter, NULL);
 }
 
 static unsigned int
@@ -128,7 +136,7 @@ ip6t_local_out_hook(unsigned int hook,
 	}
 #endif
 
-	return ip6t_do_table(pskb, hook, in, out, &packet_filter, NULL);
+	return ip6t_do_table(pskb, hook, in, out, ve_packet_filter, NULL);
 }
 
 static struct nf_hook_ops ip6t_ops[] = {
@@ -159,22 +167,19 @@ static struct nf_hook_ops ip6t_ops[] = {
 static int forward = NF_ACCEPT;
 module_param(forward, bool, 0000);
 
-static int __init ip6table_filter_init(void)
+int init_ip6table_filter(void)
 {
 	int ret;
-
-	if (forward < 0 || forward > NF_MAX_VERDICT) {
-		printk("iptables forward must be 0 or 1\n");
-		return -EINVAL;
-	}
-
-	/* Entry 1 is the FORWARD hook */
-	initial_table.entries[1].target.verdict = -forward - 1;
+	struct ip6t_table *tmp_filter;
 
 	/* Register table */
-	ret = ip6t_register_table(&packet_filter, &initial_table.repl);
-	if (ret < 0)
-		return ret;
+	tmp_filter = ip6t_register_table(&packet_filter,
+			&initial_table.repl);
+	if (IS_ERR(tmp_filter))
+		return PTR_ERR(tmp_filter);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_filter = tmp_filter;
+#endif
 
 	/* Register hooks */
 	ret = nf_register_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
@@ -184,14 +189,50 @@ static int __init ip6table_filter_init(void)
 	return ret;
 
  cleanup_table:
-	ip6t_unregister_table(&packet_filter);
+	ip6t_unregister_table(ve_packet_filter);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_filter = NULL;
+#endif
 	return ret;
+}
+
+void fini_ip6table_filter(void)
+{
+	nf_unregister_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
+	ip6t_unregister_table(ve_packet_filter);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_filter = NULL;
+#endif
+}
+
+static int __init ip6table_filter_init(void)
+{
+	int err;
+
+	if (forward < 0 || forward > NF_MAX_VERDICT) {
+		printk("iptables forward must be 0 or 1\n");
+		return -EINVAL;
+	}
+
+	/* Entry 1 is the FORWARD hook */
+	initial_table.entries[1].target.verdict = -forward - 1;
+
+	err = init_ip6table_filter();
+	if (err < 0)
+		return err;
+
+	KSYMRESOLVE(init_ip6table_filter);
+	KSYMRESOLVE(fini_ip6table_filter);
+	KSYMMODRESOLVE(ip6table_filter);
+	return 0;
 }
 
 static void __exit ip6table_filter_fini(void)
 {
-	nf_unregister_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
-	ip6t_unregister_table(&packet_filter);
+	KSYMMODUNRESOLVE(ip6table_filter);
+	KSYMUNRESOLVE(init_ip6table_filter);
+	KSYMUNRESOLVE(fini_ip6table_filter);
+	fini_ip6table_filter();
 }
 
 module_init(ip6table_filter_init);

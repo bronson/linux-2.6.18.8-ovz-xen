@@ -227,6 +227,7 @@ struct tty_struct {
 	spinlock_t read_lock;
 	/* If the tty has a pending do_SAK, queue it here - akpm */
 	struct work_struct SAK_work;
+	struct ve_struct *owner_env;
 };
 
 /* tty magic number */
@@ -254,6 +255,7 @@ struct tty_struct {
 #define TTY_PTY_LOCK 		16	/* pty private */
 #define TTY_NO_WRITE_SPLIT 	17	/* Preserve write boundaries to driver */
 #define TTY_HUPPED 		18	/* Post driver->hangup() */
+#define TTY_CHARGED		19	/* Charged as ub resource */
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 

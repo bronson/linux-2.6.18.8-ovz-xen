@@ -106,9 +106,9 @@ void mconsole_version(struct mc_request *req)
 {
 	char version[256];
 
-	sprintf(version, "%s %s %s %s %s", system_utsname.sysname,
-		system_utsname.nodename, system_utsname.release,
-		system_utsname.version, system_utsname.machine);
+	sprintf(version, "%s %s %s %s %s", utsname()->sysname,
+		utsname()->nodename, utsname()->release,
+		utsname()->version, utsname()->machine);
 	mconsole_reply(req, version, 0, 0);
 }
 
@@ -734,7 +734,7 @@ static void do_stack_trace(struct mc_request *req)
 
 	from = current;
 
-	to = find_task_by_pid(pid_requested);
+	to = find_task_by_pid_all(pid_requested);
 	if((to == NULL) || (pid_requested == 0)) {
 		mconsole_reply(req, "Couldn't find that pid", 1, 0);
 		return;

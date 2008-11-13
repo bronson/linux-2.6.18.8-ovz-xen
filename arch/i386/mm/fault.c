@@ -65,32 +65,6 @@ static inline int notify_page_fault(enum die_val val, const char *str,
 
 
 /*
- * Unlock any spinlocks which will prevent us from getting the
- * message out 
- */
-void bust_spinlocks(int yes)
-{
-	int loglevel_save = console_loglevel;
-
-	if (yes) {
-		oops_in_progress = 1;
-		return;
-	}
-#ifdef CONFIG_VT
-	unblank_screen();
-#endif
-	oops_in_progress = 0;
-	/*
-	 * OK, the message is on the console.  Now we call printk()
-	 * without oops_in_progress set so that printk will give klogd
-	 * a poke.  Hold onto your hats...
-	 */
-	console_loglevel = 15;		/* NMI oopser may have shut the console up */
-	printk(" ");
-	console_loglevel = loglevel_save;
-}
-
-/*
  * Return EIP plus the CS segment base.  The segment limit is also
  * adjusted, clamped to the kernel/user address space (whichever is
  * appropriate), and returned in *eip_limit.
@@ -453,7 +427,6 @@ good_area:
 				goto bad_area;
 	}
 
- survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
@@ -598,14 +571,14 @@ no_context:
  */
 out_of_memory:
 	up_read(&mm->mmap_sem);
-	if (tsk->pid == 1) {
-		yield();
-		down_read(&mm->mmap_sem);
-		goto survive;
+	if (error_code & 4) {
+		/* 
+		 * 0-order allocation always success if something really 
+		 * fatal not happen: beancounter overdraft or OOM.
+		 */
+		force_sig(SIGKILL, tsk);
+		return;
 	}
-	printk("VM: killing process %s\n", tsk->comm);
-	if (error_code & 4)
-		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:

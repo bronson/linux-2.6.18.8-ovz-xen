@@ -18,6 +18,10 @@
 #ifndef __IF_TUN_H
 #define __IF_TUN_H
 
+#include <linux/skbuff.h>
+#include <linux/if_ether.h>
+#include <linux/netdevice.h>
+
 /* Uncomment to enable debugging */
 /* #define TUN_DEBUG 1 */
 
@@ -35,6 +39,7 @@ struct tun_struct {
 	struct list_head        list;
 	unsigned long 		flags;
 	int			attached;
+	void			*bind_file;
 	uid_t			owner;
 
 	wait_queue_head_t	read_wait;
@@ -90,5 +95,11 @@ struct tun_pi {
 	unsigned short proto;
 };
 #define TUN_PKT_STRIP	0x0001
+
+extern int tun_net_open(struct net_device *dev);
+extern int tun_chr_open(struct inode *inode, struct file * file);
+extern void tun_net_init(struct net_device *dev);
+extern void tun_setup(struct net_device *dev);
+extern struct list_head tun_dev_list;
 
 #endif /* __IF_TUN_H */

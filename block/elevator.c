@@ -39,6 +39,24 @@
 static DEFINE_SPINLOCK(elv_list_lock);
 static LIST_HEAD(elv_list);
 
+kmem_cache_t *cfq_pool;
+EXPORT_SYMBOL_GPL(cfq_pool);
+
+/*
+ * Query io scheduler to see if the current process issuing bio may be
+ * merged with rq.
+ */
+static int elv_iosched_allow_merge(struct request *rq, struct bio *bio)
+{
+	request_queue_t *q = rq->q;
+	elevator_t *e = q->elevator;
+
+	if (e->ops->elevator_allow_merge_fn)
+		return e->ops->elevator_allow_merge_fn(q, rq, bio);
+
+	return 1;
+}
+
 /*
  * can we safely merge with this request?
  */
@@ -54,13 +72,16 @@ inline int elv_rq_merge_ok(struct request *rq, struct bio *bio)
 		return 0;
 
 	/*
-	 * same device and no special stuff set, merge is ok
+	 *  must be same device and not a special request
 	 */
-	if (rq->rq_disk == bio->bi_bdev->bd_disk &&
-	    !rq->waiting && !rq->special)
-		return 1;
+	if (rq->rq_disk != bio->bi_bdev->bd_disk || 
+	    rq->waiting || rq->special)
+		return 0;
 
-	return 0;
+	if (!elv_iosched_allow_merge(rq, bio))
+		return 0;
+
+	return 1;
 }
 EXPORT_SYMBOL(elv_rq_merge_ok);
 
@@ -763,12 +784,12 @@ void elv_unregister(struct elevator_type *e)
 	 */
 	if (e->ops.trim) {
 		read_lock(&tasklist_lock);
-		do_each_thread(g, p) {
+		do_each_thread_all(g, p) {
 			task_lock(p);
 			if (p->io_context)
 				e->ops.trim(p->io_context);
 			task_unlock(p);
-		} while_each_thread(g, p);
+		} while_each_thread_all(g, p);
 		read_unlock(&tasklist_lock);
 	}
 
@@ -892,7 +913,7 @@ ssize_t elv_iosched_show(request_queue_t *q, char *name)
 	struct list_head *entry;
 	int len = 0;
 
-	spin_lock_irq(q->queue_lock);
+	spin_lock_irq(&elv_list_lock);
 	list_for_each(entry, &elv_list) {
 		struct elevator_type *__e;
 
@@ -902,7 +923,7 @@ ssize_t elv_iosched_show(request_queue_t *q, char *name)
 		else
 			len += sprintf(name+len, "%s ", __e->elevator_name);
 	}
-	spin_unlock_irq(q->queue_lock);
+	spin_unlock_irq(&elv_list_lock);
 
 	len += sprintf(len+name, "\n");
 	return len;

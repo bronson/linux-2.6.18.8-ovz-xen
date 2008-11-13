@@ -241,6 +241,28 @@ static struct class_device_attribute net_class_attributes[] = {
 	{}
 };
 
+#ifdef CONFIG_VE
+struct class_device_attribute ve_net_class_attributes[] = {
+	__ATTR(addr_len, S_IRUGO, show_addr_len, NULL),
+	__ATTR(iflink, S_IRUGO, show_iflink, NULL),
+	__ATTR(ifindex, S_IRUGO, show_ifindex, NULL),
+	__ATTR(features, S_IRUGO, show_features, NULL),
+	__ATTR(type, S_IRUGO, show_type, NULL),
+	__ATTR(link_mode, S_IRUGO, show_link_mode, NULL),
+	__ATTR(address, S_IRUGO, show_address, NULL),
+	__ATTR(broadcast, S_IRUGO, show_broadcast, NULL),
+	__ATTR(carrier, S_IRUGO, show_carrier, NULL),
+	__ATTR(dormant, S_IRUGO, show_dormant, NULL),
+	__ATTR(operstate, S_IRUGO, show_operstate, NULL),
+	__ATTR(mtu, S_IRUGO, show_mtu, NULL),
+	__ATTR(flags, S_IRUGO, show_flags, NULL),
+	__ATTR(tx_queue_len, S_IRUGO, show_tx_queue_len, NULL),
+	__ATTR(weight, S_IRUGO, show_weight, NULL),
+	{}
+};
+EXPORT_SYMBOL(ve_net_class_attributes);
+#endif
+
 /* Show a given an attribute in the statistics group */
 static ssize_t netstat_show(const struct class_device *cd, char *buf, 
 			    unsigned long offset)
@@ -433,7 +455,7 @@ static void netdev_release(struct class_device *cd)
 	kfree((char *)dev - dev->padded);
 }
 
-static struct class net_class = {
+struct class net_class = {
 	.name = "net",
 	.release = netdev_release,
 	.class_dev_attrs = net_class_attributes,
@@ -441,11 +463,19 @@ static struct class net_class = {
 	.uevent = netdev_uevent,
 #endif
 };
+EXPORT_SYMBOL(net_class);
+
+#ifndef CONFIG_VE
+#define visible_net_class net_class
+#else
+#define visible_net_class (*get_exec_env()->net_class)
+#endif
 
 void netdev_unregister_sysfs(struct net_device * net)
 {
 	class_device_del(&(net->class_dev));
 }
+EXPORT_SYMBOL(netdev_unregister_sysfs);
 
 /* Create sysfs entries for network device. */
 int netdev_register_sysfs(struct net_device *net)
@@ -454,7 +484,7 @@ int netdev_register_sysfs(struct net_device *net)
 	struct attribute_group **groups = net->sysfs_groups;
 
 	class_device_initialize(class_dev);
-	class_dev->class = &net_class;
+	class_dev->class = &visible_net_class;
 	class_dev->class_data = net;
 	class_dev->groups = groups;
 
@@ -472,8 +502,17 @@ int netdev_register_sysfs(struct net_device *net)
 
 	return class_device_add(class_dev);
 }
+EXPORT_SYMBOL(netdev_register_sysfs);
+
+void prepare_sysfs_netdev(void)
+{
+#ifdef CONFIG_VE
+	get_ve0()->net_class = &net_class;
+#endif
+}
 
 int netdev_sysfs_init(void)
 {
+	prepare_sysfs_netdev();
 	return class_register(&net_class);
 }

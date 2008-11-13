@@ -123,7 +123,7 @@ static struct neigh_ops ndisc_direct_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-struct neigh_table nd_tbl = {
+struct neigh_table global_nd_tbl = {
 	.family =	AF_INET6,
 	.entry_size =	sizeof(struct neighbour) + sizeof(struct in6_addr),
 	.key_len =	sizeof(struct in6_addr),
@@ -134,7 +134,7 @@ struct neigh_table nd_tbl = {
 	.proxy_redo =	pndisc_redo,
 	.id =		"ndisc_cache",
 	.parms = {
-		.tbl =			&nd_tbl,
+		.tbl =			&global_nd_tbl,
 		.base_reachable_time =	30 * HZ,
 		.retrans_time =	 1 * HZ,
 		.gc_staletime =	60 * HZ,
@@ -467,7 +467,9 @@ static void ndisc_send_na(struct net_device *dev, struct neighbour *neigh,
 			inc_opt = 0;
 	}
 
-	skb = sock_alloc_send_skb(sk, MAX_HEADER + len + LL_RESERVED_SPACE(dev),
+	skb = sock_alloc_send_skb(sk,
+				  (MAX_HEADER + sizeof(struct ipv6hdr) +
+				   len + LL_RESERVED_SPACE(dev)),
 				  1, &err);
 
 	if (skb == NULL) {
@@ -555,7 +557,9 @@ void ndisc_send_ns(struct net_device *dev, struct neighbour *neigh,
 	if (send_llinfo)
 		len += ndisc_opt_addr_space(dev);
 
-	skb = sock_alloc_send_skb(sk, MAX_HEADER + len + LL_RESERVED_SPACE(dev),
+	skb = sock_alloc_send_skb(sk,
+				  (MAX_HEADER + sizeof(struct ipv6hdr) +
+				   len + LL_RESERVED_SPACE(dev)),
 				  1, &err);
 	if (skb == NULL) {
 		ND_PRINTK0(KERN_ERR
@@ -629,7 +633,9 @@ void ndisc_send_rs(struct net_device *dev, struct in6_addr *saddr,
 	if (dev->addr_len)
 		len += ndisc_opt_addr_space(dev);
 
-        skb = sock_alloc_send_skb(sk, MAX_HEADER + len + LL_RESERVED_SPACE(dev),
+        skb = sock_alloc_send_skb(sk,
+				  (MAX_HEADER + sizeof(struct ipv6hdr) +
+				   len + LL_RESERVED_SPACE(dev)),
 				  1, &err);
 	if (skb == NULL) {
 		ND_PRINTK0(KERN_ERR
@@ -1419,7 +1425,9 @@ void ndisc_send_redirect(struct sk_buff *skb, struct neighbour *neigh,
 	rd_len &= ~0x7;
 	len += rd_len;
 
-	buff = sock_alloc_send_skb(sk, MAX_HEADER + len + LL_RESERVED_SPACE(dev),
+	buff = sock_alloc_send_skb(sk,
+				   (MAX_HEADER + sizeof(struct ipv6hdr) +
+				    len + LL_RESERVED_SPACE(dev)),
 				   1, &err);
 	if (buff == NULL) {
 		ND_PRINTK0(KERN_ERR
@@ -1700,7 +1708,9 @@ int __init ndisc_init(struct net_proto_family *ops)
          * Initialize the neighbour table
          */
 	
-	neigh_table_init(&nd_tbl);
+	get_ve0()->ve_nd_tbl = &global_nd_tbl;
+	if (neigh_table_init(&nd_tbl))
+		panic("cannot initialize IPv6 NDISC tables\n");
 
 #ifdef CONFIG_SYSCTL
 	neigh_sysctl_register(NULL, &nd_tbl.parms, NET_IPV6, NET_IPV6_NEIGH, 
@@ -1722,3 +1732,52 @@ void ndisc_cleanup(void)
 	sock_release(ndisc_socket);
 	ndisc_socket = NULL; /* For safety. */
 }
+
+#ifdef CONFIG_VE
+int ve_ndisc_init(struct ve_struct *ve)
+{
+	struct ve_struct *old_env;
+	int err;
+
+	ve->ve_nd_tbl = kmalloc(sizeof(struct neigh_table), GFP_KERNEL);
+	if (ve->ve_nd_tbl == NULL)
+		return -ENOMEM;
+
+	*(ve->ve_nd_tbl) = global_nd_tbl;
+	ve->ve_nd_tbl->parms.tbl = ve->ve_nd_tbl;
+	old_env = set_exec_env(ve);
+	err = neigh_table_init(ve->ve_nd_tbl);
+	if (err)
+		goto out_free;
+#ifdef CONFIG_SYSCTL
+	neigh_sysctl_register(NULL, &nd_tbl.parms, NET_IPV6, NET_IPV6_NEIGH, 
+			      "ipv6",
+			      &ndisc_ifinfo_sysctl_change,
+			      &ndisc_ifinfo_sysctl_strategy);
+#endif
+	err = 0;
+
+out:
+	set_exec_env(old_env);
+	return err;
+
+out_free:
+	kfree(ve->ve_nd_tbl);
+	ve->ve_nd_tbl = NULL;
+	goto out;
+}
+EXPORT_SYMBOL(ve_ndisc_init);
+
+void ve_ndisc_fini(struct ve_struct *ve)
+{
+	if (ve->ve_nd_tbl) {
+#ifdef CONFIG_SYSCTL
+		neigh_sysctl_unregister(&ve->ve_nd_tbl->parms);
+#endif
+		neigh_table_clear(ve->ve_nd_tbl);
+		kfree(ve->ve_nd_tbl);
+		ve->ve_nd_tbl = NULL;
+	}
+}
+EXPORT_SYMBOL(ve_ndisc_fini);
+#endif /* CONFIG_VE */

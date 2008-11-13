@@ -68,7 +68,9 @@ static int udp_v6_get_port(struct sock *sk, unsigned short snum)
 {
 	struct sock *sk2;
 	struct hlist_node *node;
+	struct ve_struct *env;
 
+	env = sk->owner_env;
 	write_lock_bh(&udp_hash_lock);
 	if (snum == 0) {
 		int best_size_so_far, best, result, i;
@@ -82,7 +84,7 @@ static int udp_v6_get_port(struct sock *sk, unsigned short snum)
 			int size;
 			struct hlist_head *list;
 
-			list = &udp_hash[result & (UDP_HTABLE_SIZE - 1)];
+			list = &udp_hash[udp_hashfn(result, VEID(env))];
 			if (hlist_empty(list)) {
 				if (result > sysctl_local_port_range[1])
 					result = sysctl_local_port_range[0] +
@@ -104,7 +106,7 @@ static int udp_v6_get_port(struct sock *sk, unsigned short snum)
 				result = sysctl_local_port_range[0]
 					+ ((result - sysctl_local_port_range[0]) &
 					   (UDP_HTABLE_SIZE - 1));
-			if (!udp_lport_inuse(result))
+			if (!udp_lport_inuse(result, env))
 				break;
 		}
 		if (i >= (1 << 16) / UDP_HTABLE_SIZE)
@@ -113,13 +115,15 @@ gotit:
 		udp_port_rover = snum = result;
 	} else {
 		sk_for_each(sk2, node,
-			    &udp_hash[snum & (UDP_HTABLE_SIZE - 1)]) {
+			    &udp_hash[udp_hashfn(snum, VEID(env))]) {
 			if (inet_sk(sk2)->num == snum &&
 			    sk2 != sk &&
+			    ve_accessible_strict(sk2->owner_env, env) &&
 			    (!sk2->sk_bound_dev_if ||
 			     !sk->sk_bound_dev_if ||
 			     sk2->sk_bound_dev_if == sk->sk_bound_dev_if) &&
-			    (!sk2->sk_reuse || !sk->sk_reuse) &&
+			    (sk->sk_reuse != 2 &&
+			     (!sk2->sk_reuse || !sk->sk_reuse)) &&
 			    ipv6_rcv_saddr_equal(sk, sk2))
 				goto fail;
 		}
@@ -127,7 +131,7 @@ gotit:
 
 	inet_sk(sk)->num = snum;
 	if (sk_unhashed(sk)) {
-		sk_add_node(sk, &udp_hash[snum & (UDP_HTABLE_SIZE - 1)]);
+		sk_add_node(sk, &udp_hash[udp_hashfn(snum, VEID(env))]);
 		sock_prot_inc_use(sk->sk_prot);
 	}
 	write_unlock_bh(&udp_hash_lock);
@@ -160,12 +164,15 @@ static struct sock *udp_v6_lookup(struct in6_addr *saddr, u16 sport,
 	struct hlist_node *node;
 	unsigned short hnum = ntohs(dport);
 	int badness = -1;
+	struct ve_struct *env;
 
  	read_lock(&udp_hash_lock);
-	sk_for_each(sk, node, &udp_hash[hnum & (UDP_HTABLE_SIZE - 1)]) {
+	env = get_exec_env();
+	sk_for_each(sk, node, &udp_hash[udp_hashfn(hnum, VEID(env))]) {
 		struct inet_sock *inet = inet_sk(sk);
 
-		if (inet->num == hnum && sk->sk_family == PF_INET6) {
+		if (inet->num == hnum && sk->sk_family == PF_INET6 &&
+				ve_accessible_strict(sk->owner_env, env)) {
 			struct ipv6_pinfo *np = inet6_sk(sk);
 			int score = 0;
 			if (inet->dport) {
@@ -314,14 +321,13 @@ static void udpv6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 {
 	struct ipv6_pinfo *np;
 	struct ipv6hdr *hdr = (struct ipv6hdr*)skb->data;
-	struct net_device *dev = skb->dev;
 	struct in6_addr *saddr = &hdr->saddr;
 	struct in6_addr *daddr = &hdr->daddr;
 	struct udphdr *uh = (struct udphdr*)(skb->data+offset);
 	struct sock *sk;
 	int err;
 
-	sk = udp_v6_lookup(daddr, uh->dest, saddr, uh->source, dev->ifindex);
+	sk = udp_v6_lookup(daddr, uh->dest, saddr, uh->source, inet6_iif(skb));
    
 	if (sk == NULL)
 		return;
@@ -414,8 +420,9 @@ static void udpv6_mcast_deliver(struct udphdr *uh,
 	int dif;
 
 	read_lock(&udp_hash_lock);
-	sk = sk_head(&udp_hash[ntohs(uh->dest) & (UDP_HTABLE_SIZE - 1)]);
-	dif = skb->dev->ifindex;
+	sk = sk_head(&udp_hash[udp_hashfn(ntohs(uh->dest),
+				VEID(skb->owner_env))]);
+	dif = inet6_iif(skb);
 	sk = udp_v6_mcast_next(sk, uh->dest, daddr, uh->source, saddr, dif);
 	if (!sk) {
 		kfree_skb(skb);
@@ -496,7 +503,7 @@ static int udpv6_rcv(struct sk_buff **pskb)
 	 * check socket cache ... must talk to Alan about his plans
 	 * for sock caches... i'll skip this for now.
 	 */
-	sk = udp_v6_lookup(saddr, uh->source, daddr, uh->dest, dev->ifindex);
+	sk = udp_v6_lookup(saddr, uh->source, daddr, uh->dest, inet6_iif(skb));
 
 	if (sk == NULL) {
 		if (!xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb))
@@ -1049,7 +1056,7 @@ static int udp6_seq_show(struct seq_file *seq, void *v)
 static struct file_operations udp6_seq_fops;
 static struct udp_seq_afinfo udp6_seq_afinfo = {
 	.owner		= THIS_MODULE,
-	.name		= "udp6",
+	.name		= "net/udp6",
 	.family		= AF_INET6,
 	.seq_show	= udp6_seq_show,
 	.seq_fops	= &udp6_seq_fops,

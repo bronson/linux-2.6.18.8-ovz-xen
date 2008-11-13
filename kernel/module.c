@@ -1054,6 +1054,12 @@ static int mod_sysfs_setup(struct module *mod,
 {
 	int err;
 
+	if (!module_subsys.kset.subsys) {
+		printk(KERN_ERR "%s: module_subsys not initialized\n",
+		       mod->name);
+		err = -EINVAL;
+		goto out;
+	}
 	memset(&mod->mkobj.kobj, 0, sizeof(mod->mkobj.kobj));
 	err = kobject_set_name(&mod->mkobj.kobj, "%s", mod->name);
 	if (err)
@@ -2080,6 +2086,8 @@ static void *m_start(struct seq_file *m, loff_t *pos)
 	loff_t n = 0;
 
 	mutex_lock(&module_mutex);
+	if (!ve_is_super(get_exec_env()))
+		return NULL;
 	list_for_each(i, &modules) {
 		if (n++ == *pos)
 			break;

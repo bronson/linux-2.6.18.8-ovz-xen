@@ -7,11 +7,26 @@
 #include <linux/kallsyms.h>
 #include <linux/sched.h>
 
+#ifdef CONFIG_VCPU
+/* We can not guarantee pcpu affinity if use VCPU extention */
+static inline int run_on_single_cpu(int cpu) { return 0; }
+#else
+static inline int run_on_single_cpu(int cpu)
+{
+	cpumask_t this_mask;
+
+	this_mask = cpumask_of_cpu(cpu);
+	if (cpus_equal(current->cpus_allowed, this_mask))
+		return 1;
+
+	return 0;
+}
+#endif
+
 unsigned int debug_smp_processor_id(void)
 {
 	unsigned long preempt_count = preempt_count();
 	int this_cpu = raw_smp_processor_id();
-	cpumask_t this_mask;
 
 	if (likely(preempt_count))
 		goto out;
@@ -23,9 +38,7 @@ unsigned int debug_smp_processor_id(void)
 	 * Kernel threads bound to a single CPU can safely use
 	 * smp_processor_id():
 	 */
-	this_mask = cpumask_of_cpu(this_cpu);
-
-	if (cpus_equal(current->cpus_allowed, this_mask))
+	if (run_on_single_cpu(this_cpu))
 		goto out;
 
 	/*

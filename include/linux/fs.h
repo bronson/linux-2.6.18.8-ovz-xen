@@ -48,6 +48,7 @@ struct inodes_stat_t {
 extern struct inodes_stat_t inodes_stat;
 
 extern int leases_enable, lease_break_time;
+extern int odirect_enable;
 
 #ifdef CONFIG_DNOTIFY
 extern int dir_notify_enable;
@@ -67,6 +68,7 @@ extern int dir_notify_enable;
 #define FMODE_LSEEK	4
 #define FMODE_PREAD	8
 #define FMODE_PWRITE	FMODE_PREAD	/* These go hand in hand */
+#define FMODE_QUOTACTL	4
 
 /* File is being opened for execution. Primary users of this flag are
    distributed filesystems that can use it to achieve correct ETXTBUSY
@@ -91,6 +93,8 @@ extern int dir_notify_enable;
 /* public flags for file_system_type */
 #define FS_REQUIRES_DEV 1 
 #define FS_BINARY_MOUNTDATA 2
+#define FS_VIRTUALIZED	64	/* Can mount this fstype inside ve */
+#define FS_MANGLE_PROC	128	/* hide some /proc/mounts info inside VE */
 #define FS_REVAL_DOT	16384	/* Check the paths ".", ".." for staleness */
 #define FS_ODD_RENAME	32768	/* Temporary stuff; will go away as soon
 				  * as nfs_rename() will be cleaned up
@@ -312,6 +316,9 @@ struct iattr {
  * Includes for diskquotas.
  */
 #include <linux/quota.h>
+#if defined(CONFIG_VZ_QUOTA) || defined(CONFIG_VZ_QUOTA_MODULE)
+#include <linux/vzquota_qlnk.h>
+#endif
 
 /** 
  * enum positive_aop_returns - aop return codes with specific semantics
@@ -382,6 +389,7 @@ struct address_space_operations {
 	/* migrate the contents of a page to the specified target */
 	int (*migratepage) (struct address_space *,
 			struct page *, struct page *);
+	int (*launder_page) (struct page *);
 };
 
 struct backing_dev_info;
@@ -527,6 +535,9 @@ struct inode {
 #ifdef CONFIG_QUOTA
 	struct dquot		*i_dquot[MAXQUOTAS];
 #endif
+#if defined(CONFIG_VZ_QUOTA) || defined(CONFIG_VZ_QUOTA_MODULE)
+	struct vz_quota_ilink	i_qlnk;
+#endif
 	/* These three should probably be a union */
 	struct list_head	i_devices;
 	struct pipe_inode_info	*i_pipe;
@@ -580,6 +591,8 @@ enum inode_i_mutex_lock_class
 	I_MUTEX_XATTR,
 	I_MUTEX_QUOTA
 };
+
+extern kmem_cache_t *inode_cachep;
 
 /*
  * NOTE: in a 32bit arch with a preemptable kernel and
@@ -687,6 +700,7 @@ struct file {
 	struct fown_struct	f_owner;
 	unsigned int		f_uid, f_gid;
 	struct file_ra_state	f_ra;
+	struct user_beancounter	*f_ub;
 
 	unsigned long		f_version;
 	void			*f_security;
@@ -700,7 +714,9 @@ struct file {
 	spinlock_t		f_ep_lock;
 #endif /* #ifdef CONFIG_EPOLL */
 	struct address_space	*f_mapping;
+	struct ve_struct	*owner_env;
 };
+
 extern spinlock_t files_lock;
 #define file_list_lock() spin_lock(&files_lock);
 #define file_list_unlock() spin_unlock(&files_lock);
@@ -765,6 +781,9 @@ struct file_lock {
 	struct file *fl_file;
 	unsigned char fl_flags;
 	unsigned char fl_type;
+#ifdef CONFIG_USER_RESOURCE
+	unsigned char fl_charged;
+#endif
 	loff_t fl_start;
 	loff_t fl_end;
 
@@ -1147,6 +1166,8 @@ struct super_operations {
 
 	ssize_t (*quota_read)(struct super_block *, int, char *, size_t, loff_t);
 	ssize_t (*quota_write)(struct super_block *, int, const char *, size_t, loff_t);
+
+	struct inode *(*get_quota_root)(struct super_block *);
 };
 
 /* Inode state bits.  Protected by inode_lock. */
@@ -1318,7 +1339,12 @@ struct file_system_type {
 	struct list_head fs_supers;
 	struct lock_class_key s_lock_key;
 	struct lock_class_key s_umount_key;
+	struct file_system_type *proto;
+	struct ve_struct *owner_env;
 };
+
+void get_filesystem(struct file_system_type *fs);
+void put_filesystem(struct file_system_type *fs);
 
 extern int get_sb_bdev(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data,
@@ -1358,10 +1384,15 @@ void unnamed_dev_init(void);
 
 extern int register_filesystem(struct file_system_type *);
 extern int unregister_filesystem(struct file_system_type *);
+extern int register_ve_fs_type(struct ve_struct *, struct file_system_type *,
+		struct file_system_type **, struct vfsmount **);
+extern void unregister_ve_fs_type(struct file_system_type *, struct vfsmount *);
+extern void umount_ve_fs_type(struct file_system_type *local_fs_type);
 extern struct vfsmount *kern_mount(struct file_system_type *);
 extern int may_umount_tree(struct vfsmount *);
 extern int may_umount(struct vfsmount *);
 extern void umount_tree(struct vfsmount *, int, struct list_head *);
+#define kern_umount mntput
 extern void release_mounts(struct list_head *);
 extern long do_mount(char *, char *, char *, unsigned long, void *);
 extern struct vfsmount *copy_tree(struct vfsmount *, struct dentry *, int);
@@ -1369,6 +1400,7 @@ extern void mnt_set_mountpoint(struct vfsmount *, struct dentry *,
 				  struct vfsmount *);
 
 extern int vfs_statfs(struct dentry *, struct kstatfs *);
+extern int faudit_statfs(struct super_block *, struct kstatfs *);
 
 /* /sys/fs */
 extern struct subsystem fs_subsys;
@@ -1484,7 +1516,7 @@ extern void chrdev_show(struct seq_file *,off_t);
 #define BDEVNAME_SIZE	32	/* Largest string for a blockdev identifier */
 extern const char *__bdevname(dev_t, char *buffer);
 extern const char *bdevname(struct block_device *bdev, char *buffer);
-extern struct block_device *lookup_bdev(const char *);
+extern struct block_device *lookup_bdev(const char *, int mode);
 extern struct block_device *open_bdev_excl(const char *, int, void *);
 extern void close_bdev_excl(struct block_device *);
 extern void blkdev_show(struct seq_file *,off_t);
@@ -1512,7 +1544,7 @@ extern int fs_may_remount_ro(struct super_block *);
 #define bio_data_dir(bio)	((bio)->bi_rw & 1)
 
 extern int check_disk_change(struct block_device *);
-extern int invalidate_inodes(struct super_block *);
+extern int invalidate_inodes(struct super_block *, int);
 extern int __invalidate_device(struct block_device *);
 extern int invalidate_partition(struct gendisk *, int);
 unsigned long invalidate_mapping_pages(struct address_space *mapping,

@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/mount.h>
 #include <linux/pagemap.h>
+#include <linux/module.h>
 #include <linux/init.h>
 
 #include "sysfs.h"
@@ -14,8 +15,11 @@
 /* Random magic number */
 #define SYSFS_MAGIC 0x62656572
 
+#ifndef CONFIG_VE
 struct vfsmount *sysfs_mount;
 struct super_block * sysfs_sb = NULL;
+#endif
+
 kmem_cache_t *sysfs_dir_cachep;
 
 static struct super_operations sysfs_ops = {
@@ -29,7 +33,17 @@ static struct sysfs_dirent sysfs_root = {
 	.s_element	= NULL,
 	.s_type		= SYSFS_ROOT,
 	.s_iattr	= NULL,
+	.s_ino		= 1,
 };
+
+#ifdef CONFIG_VE
+static void init_ve0_sysfs_root(void)
+{
+	get_ve0()->sysfs_root = &sysfs_root;
+}
+
+#define sysfs_root (*(get_exec_env()->sysfs_root))
+#endif
 
 static int sysfs_fill_super(struct super_block *sb, void *data, int silent)
 {
@@ -72,16 +86,21 @@ static int sysfs_get_sb(struct file_system_type *fs_type,
 	return get_sb_single(fs_type, flags, data, sysfs_fill_super, mnt);
 }
 
-static struct file_system_type sysfs_fs_type = {
+struct file_system_type sysfs_fs_type = {
 	.name		= "sysfs",
 	.get_sb		= sysfs_get_sb,
 	.kill_sb	= kill_litter_super,
 };
 
+EXPORT_SYMBOL(sysfs_fs_type);
+
 int __init sysfs_init(void)
 {
 	int err = -ENOMEM;
 
+#ifdef CONFIG_VE
+	init_ve0_sysfs_root();
+#endif
 	sysfs_dir_cachep = kmem_cache_create("sysfs_dir_cache",
 					      sizeof(struct sysfs_dirent),
 					      0, 0, NULL, NULL);

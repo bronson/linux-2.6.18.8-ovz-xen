@@ -540,6 +540,7 @@ cifs_demultiplex_thread(struct TCP_Server_Info *server)
                                               allowing socket to clear and app 
 					      threads to set tcpStatus
 					      CifsNeedReconnect if server hung*/
+				length = 0;
 				continue;
 			} else if (length <= 0) {
 				cERROR(1,("Received no data, expecting %d",
@@ -771,12 +772,12 @@ cifs_parse_mount_options(char *options, const char *devname,struct smb_vol *vol)
 	separator[1] = 0; 
 
 	memset(vol->source_rfc1001_name,0x20,15);
-	for(i=0;i < strnlen(system_utsname.nodename,15);i++) {
+	for(i = 0; i < strnlen(utsname()->nodename, 15); i++) {
 		/* does not have to be a perfect mapping since the field is
 		informational, only used for servers that do not support
 		port 445 and it can be overridden at mount time */
 		vol->source_rfc1001_name[i] = 
-			toupper(system_utsname.nodename[i]);
+			toupper(utsname()->nodename[i]);
 	}
 	vol->source_rfc1001_name[15] = 0;
 	/* null target name indicates to use *SMBSERVR default called name
@@ -2111,7 +2112,7 @@ CIFSSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 				  32, nls_codepage);
 		bcc_ptr += 2 * bytes_returned;
 		bytes_returned =
-		    cifs_strtoUCS((__le16 *) bcc_ptr, system_utsname.release,
+		    cifs_strtoUCS((__le16 *) bcc_ptr, utsname()->release,
 				  32, nls_codepage);
 		bcc_ptr += 2 * bytes_returned;
 		bcc_ptr += 2;
@@ -2138,8 +2139,8 @@ CIFSSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 		}
 		strcpy(bcc_ptr, "Linux version ");
 		bcc_ptr += strlen("Linux version ");
-		strcpy(bcc_ptr, system_utsname.release);
-		bcc_ptr += strlen(system_utsname.release) + 1;
+		strcpy(bcc_ptr, utsname()->release);
+		bcc_ptr += strlen(utsname()->release) + 1;
 		strcpy(bcc_ptr, CIFS_NETWORK_OPSYS);
 		bcc_ptr += strlen(CIFS_NETWORK_OPSYS) + 1;
 	}
@@ -2148,7 +2149,7 @@ CIFSSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 	pSMB->req_no_secext.ByteCount = cpu_to_le16(count);
 
 	rc = SendReceive(xid, ses, smb_buffer, smb_buffer_response,
-			 &bytes_returned, 1);
+			 &bytes_returned, CIFS_LONG_OP);
 	if (rc) {
 /* rc = map_smb_to_linux_error(smb_buffer_response); now done in SendReceive */
 	} else if ((smb_buffer_response->WordCount == 3)
@@ -2403,7 +2404,7 @@ CIFSNTLMSSPNegotiateSessSetup(unsigned int xid,
 				  32, nls_codepage);
 		bcc_ptr += 2 * bytes_returned;
 		bytes_returned =
-		    cifs_strtoUCS((__le16 *) bcc_ptr, system_utsname.release, 32,
+		    cifs_strtoUCS((__le16 *) bcc_ptr, utsname()->release, 32,
 				  nls_codepage);
 		bcc_ptr += 2 * bytes_returned;
 		bcc_ptr += 2;	/* null terminate Linux version */
@@ -2420,8 +2421,8 @@ CIFSNTLMSSPNegotiateSessSetup(unsigned int xid,
 	} else {		/* ASCII */
 		strcpy(bcc_ptr, "Linux version ");
 		bcc_ptr += strlen("Linux version ");
-		strcpy(bcc_ptr, system_utsname.release);
-		bcc_ptr += strlen(system_utsname.release) + 1;
+		strcpy(bcc_ptr, utsname()->release);
+		bcc_ptr += strlen(utsname()->release) + 1;
 		strcpy(bcc_ptr, CIFS_NETWORK_OPSYS);
 		bcc_ptr += strlen(CIFS_NETWORK_OPSYS) + 1;
 		bcc_ptr++;	/* empty domain field */
@@ -2434,7 +2435,7 @@ CIFSNTLMSSPNegotiateSessSetup(unsigned int xid,
 	pSMB->req.ByteCount = cpu_to_le16(count);
 
 	rc = SendReceive(xid, ses, smb_buffer, smb_buffer_response,
-			 &bytes_returned, 1);
+			 &bytes_returned, CIFS_LONG_OP);
 
 	if (smb_buffer_response->Status.CifsError ==
 	    cpu_to_le32(NT_STATUS_MORE_PROCESSING_REQUIRED))
@@ -2794,7 +2795,7 @@ CIFSNTLMSSPAuthSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 				  32, nls_codepage);
 		bcc_ptr += 2 * bytes_returned;
 		bytes_returned =
-		    cifs_strtoUCS((__le16 *) bcc_ptr, system_utsname.release, 32,
+		    cifs_strtoUCS((__le16 *) bcc_ptr, utsname()->release, 32,
 				  nls_codepage);
 		bcc_ptr += 2 * bytes_returned;
 		bcc_ptr += 2;	/* null term version string */
@@ -2846,8 +2847,8 @@ CIFSNTLMSSPAuthSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 
 		strcpy(bcc_ptr, "Linux version ");
 		bcc_ptr += strlen("Linux version ");
-		strcpy(bcc_ptr, system_utsname.release);
-		bcc_ptr += strlen(system_utsname.release) + 1;
+		strcpy(bcc_ptr, utsname()->release);
+		bcc_ptr += strlen(utsname()->release) + 1;
 		strcpy(bcc_ptr, CIFS_NETWORK_OPSYS);
 		bcc_ptr += strlen(CIFS_NETWORK_OPSYS) + 1;
 		bcc_ptr++;	/* null domain */
@@ -2860,7 +2861,7 @@ CIFSNTLMSSPAuthSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 	pSMB->req.ByteCount = cpu_to_le16(count);
 
 	rc = SendReceive(xid, ses, smb_buffer, smb_buffer_response,
-			 &bytes_returned, 1);
+			 &bytes_returned, CIFS_LONG_OP);
 	if (rc) {
 /*    rc = map_smb_to_linux_error(smb_buffer_response);  *//* done in SendReceive now */
 	} else if ((smb_buffer_response->WordCount == 3)
@@ -3131,7 +3132,8 @@ CIFSTCon(unsigned int xid, struct cifsSesInfo *ses,
 	pSMB->hdr.smb_buf_length += count;
 	pSMB->ByteCount = cpu_to_le16(count);
 
-	rc = SendReceive(xid, ses, smb_buffer, smb_buffer_response, &length, 0);
+	rc = SendReceive(xid, ses, smb_buffer, smb_buffer_response, &length,
+			CIFS_STD_OP);
 
 	/* if (rc) rc = map_smb_to_linux_error(smb_buffer_response); */
 	/* above now done in SendReceive */

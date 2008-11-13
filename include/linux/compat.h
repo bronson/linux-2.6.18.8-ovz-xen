@@ -227,6 +227,10 @@ static inline int compat_timespec_compare(struct compat_timespec *lhs,
 asmlinkage long compat_sys_adjtimex(struct compat_timex __user *utp);
 
 extern int compat_printk(const char *fmt, ...);
+extern int ve_compat_printk(int dst, const char *fmt, ...);
+
+extern long compat_nanosleep_restart(struct restart_block *restart);
+asmlinkage long compat_sys_utimensat(unsigned int dfd, char __user *filename,struct compat_timespec __user *t, int flags);
 
 #endif /* CONFIG_COMPAT */
 #endif /* _LINUX_COMPAT_H */

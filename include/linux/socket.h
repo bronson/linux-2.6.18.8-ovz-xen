@@ -286,6 +286,16 @@ struct ucred {
 #define IPX_TYPE	1
 
 #ifdef __KERNEL__
+
+#define MAX_SOCK_ADDR	128		/* 108 for Unix domain -
+					   16 for IP, 16 for IPX,
+					   24 for IPv6,
+					   about 80 for AX.25
+					   must be at least one bigger than
+					   the AF_UNIX size (see net/unix/af_unix.c
+					   :unix_mkname()).
+					 */
+
 extern int memcpy_fromiovec(unsigned char *kdata, struct iovec *iov, int len);
 extern int memcpy_fromiovecend(unsigned char *kdata, struct iovec *iov, 
 				int offset, int len);
@@ -299,6 +309,8 @@ extern int memcpy_toiovec(struct iovec *v, unsigned char *kdata, int len);
 extern int move_addr_to_user(void *kaddr, int klen, void __user *uaddr, int __user *ulen);
 extern int move_addr_to_kernel(void __user *uaddr, int ulen, void *kaddr);
 extern int put_cmsg(struct msghdr*, int level, int type, int len, void *data);
+extern int vz_security_family_check(int family);
+extern int vz_security_protocol_check(int protocol);
 
 #endif
 #endif /* not kernel and not glibc */

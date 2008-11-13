@@ -126,7 +126,9 @@ static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 	struct hlist_node *node;
 	struct sock *sk2;
 	struct inet_sock *inet = inet_sk(sk);
+	struct ve_struct *env;
 
+	env = sk->owner_env;
 	write_lock_bh(&udp_hash_lock);
 	if (snum == 0) {
 		int best_size_so_far, best, result, i;
@@ -140,7 +142,7 @@ static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 			struct hlist_head *list;
 			int size;
 
-			list = &udp_hash[result & (UDP_HTABLE_SIZE - 1)];
+			list = &udp_hash[udp_hashfn(result, VEID(env))];
 			if (hlist_empty(list)) {
 				if (result > sysctl_local_port_range[1])
 					result = sysctl_local_port_range[0] +
@@ -162,7 +164,7 @@ static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 				result = sysctl_local_port_range[0]
 					+ ((result - sysctl_local_port_range[0]) &
 					   (UDP_HTABLE_SIZE - 1));
-			if (!udp_lport_inuse(result))
+			if (!udp_lport_inuse(result, env))
 				break;
 		}
 		if (i >= (1 << 16) / UDP_HTABLE_SIZE)
@@ -171,11 +173,12 @@ gotit:
 		udp_port_rover = snum = result;
 	} else {
 		sk_for_each(sk2, node,
-			    &udp_hash[snum & (UDP_HTABLE_SIZE - 1)]) {
+			    &udp_hash[udp_hashfn(snum, VEID(env))]) {
 			struct inet_sock *inet2 = inet_sk(sk2);
 
 			if (inet2->num == snum &&
 			    sk2 != sk &&
+			    ve_accessible_strict(sk2->owner_env, env) &&
 			    !ipv6_only_sock(sk2) &&
 			    (!sk2->sk_bound_dev_if ||
 			     !sk->sk_bound_dev_if ||
@@ -183,13 +186,14 @@ gotit:
 			    (!inet2->rcv_saddr ||
 			     !inet->rcv_saddr ||
 			     inet2->rcv_saddr == inet->rcv_saddr) &&
-			    (!sk2->sk_reuse || !sk->sk_reuse))
+			    (sk->sk_reuse != 2 &&
+			     (!sk2->sk_reuse || !sk->sk_reuse)))
 				goto fail;
 		}
 	}
 	inet->num = snum;
 	if (sk_unhashed(sk)) {
-		struct hlist_head *h = &udp_hash[snum & (UDP_HTABLE_SIZE - 1)];
+		struct hlist_head *h = &udp_hash[udp_hashfn(snum, VEID(env))];
 
 		sk_add_node(sk, h);
 		sock_prot_inc_use(sk->sk_prot);
@@ -227,11 +231,15 @@ static struct sock *udp_v4_lookup_longway(u32 saddr, u16 sport,
 	struct hlist_node *node;
 	unsigned short hnum = ntohs(dport);
 	int badness = -1;
+	struct ve_struct *env;
 
-	sk_for_each(sk, node, &udp_hash[hnum & (UDP_HTABLE_SIZE - 1)]) {
+	env = get_exec_env();
+	sk_for_each(sk, node, &udp_hash[udp_hashfn(hnum, VEID(env))]) {
 		struct inet_sock *inet = inet_sk(sk);
 
-		if (inet->num == hnum && !ipv6_only_sock(sk)) {
+		if (inet->num == hnum &&
+		    ve_accessible_strict(sk->owner_env, env) &&
+		    !ipv6_only_sock(sk)) {
 			int score = (sk->sk_family == PF_INET ? 1 : 0);
 			if (inet->rcv_saddr) {
 				if (inet->rcv_saddr != daddr)
@@ -892,23 +900,32 @@ static int udp_encap_rcv(struct sock * sk, struct sk_buff *skb)
 	return 1; 
 #else
 	struct udp_sock *up = udp_sk(sk);
-  	struct udphdr *uh = skb->h.uh;
+  	struct udphdr *uh;
 	struct iphdr *iph;
 	int iphlen, len;
   
-	__u8 *udpdata = (__u8 *)uh + sizeof(struct udphdr);
-	__u32 *udpdata32 = (__u32 *)udpdata;
+	__u8 *udpdata;
+	__u32 *udpdata32;
 	__u16 encap_type = up->encap_type;
 
 	/* if we're overly short, let UDP handle it */
-	if (udpdata > skb->tail)
+	len = skb->len - sizeof(struct udphdr);
+	if (len <= 0)
 		return 1;
 
 	/* if this is not encapsulated socket, then just return now */
 	if (!encap_type)
 		return 1;
 
-	len = skb->tail - udpdata;
+	/* If this is a paged skb, make sure we pull up
+	 * whatever data we need to look at. */
+	if (!pskb_may_pull(skb, sizeof(struct udphdr) + min(len, 8)))
+		return 1;
+
+	/* Now we can get the pointers */
+	uh = skb->h.uh;
+	udpdata = (__u8 *)uh + sizeof(struct udphdr);
+	udpdata32 = (__u32 *)udpdata;
 
 	switch (encap_type) {
 	default:
@@ -1048,7 +1065,8 @@ static int udp_v4_mcast_deliver(struct sk_buff *skb, struct udphdr *uh,
 	int dif;
 
 	read_lock(&udp_hash_lock);
-	sk = sk_head(&udp_hash[ntohs(uh->dest) & (UDP_HTABLE_SIZE - 1)]);
+	sk = sk_head(&udp_hash[udp_hashfn(ntohs(uh->dest),
+				VEID(skb->owner_env))]);
 	dif = skb->dev->ifindex;
 	sk = udp_v4_mcast_next(sk, uh->dest, daddr, uh->source, saddr, dif);
 	if (sk) {
@@ -1399,10 +1417,14 @@ static struct sock *udp_get_first(struct seq_file *seq)
 {
 	struct sock *sk;
 	struct udp_iter_state *state = seq->private;
+	struct ve_struct *env;
 
+	env = get_exec_env();
 	for (state->bucket = 0; state->bucket < UDP_HTABLE_SIZE; ++state->bucket) {
 		struct hlist_node *node;
 		sk_for_each(sk, node, &udp_hash[state->bucket]) {
+			if (!ve_accessible(sk->owner_env, env))
+				continue;
 			if (sk->sk_family == state->family)
 				goto found;
 		}
@@ -1419,8 +1441,13 @@ static struct sock *udp_get_next(struct seq_file *seq, struct sock *sk)
 	do {
 		sk = sk_next(sk);
 try_again:
-		;
-	} while (sk && sk->sk_family != state->family);
+		if (!sk)
+			break;
+		if (sk->sk_family != state->family)
+			continue;
+		if (ve_accessible(sk->owner_env, get_exec_env()))
+			break;
+	} while (1);
 
 	if (!sk && ++state->bucket < UDP_HTABLE_SIZE) {
 		sk = sk_head(&udp_hash[state->bucket]);
@@ -1505,7 +1532,7 @@ int udp_proc_register(struct udp_seq_afinfo *afinfo)
 	afinfo->seq_fops->llseek	= seq_lseek;
 	afinfo->seq_fops->release	= seq_release_private;
 
-	p = proc_net_fops_create(afinfo->name, S_IRUGO, afinfo->seq_fops);
+	p = proc_glob_fops_create(afinfo->name, S_IRUGO, afinfo->seq_fops);
 	if (p)
 		p->data = afinfo;
 	else
@@ -1517,7 +1544,8 @@ void udp_proc_unregister(struct udp_seq_afinfo *afinfo)
 {
 	if (!afinfo)
 		return;
-	proc_net_remove(afinfo->name);
+
+	remove_proc_glob_entry(afinfo->name, NULL);
 	memset(afinfo->seq_fops, 0, sizeof(*afinfo->seq_fops));
 }
 
@@ -1560,7 +1588,7 @@ static int udp4_seq_show(struct seq_file *seq, void *v)
 static struct file_operations udp4_seq_fops;
 static struct udp_seq_afinfo udp4_seq_afinfo = {
 	.owner		= THIS_MODULE,
-	.name		= "udp",
+	.name		= "net/udp",
 	.family		= AF_INET,
 	.seq_show	= udp4_seq_show,
 	.seq_fops	= &udp4_seq_fops,

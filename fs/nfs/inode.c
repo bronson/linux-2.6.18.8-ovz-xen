@@ -1144,6 +1144,10 @@ static int __init init_nfs_fs(void)
 {
 	int err;
 
+	err = rpciod_up();
+	if (err)
+		goto out5;
+
 	err = nfs_init_nfspagecache();
 	if (err)
 		goto out4;
@@ -1184,11 +1188,15 @@ out2:
 out3:
 	nfs_destroy_nfspagecache();
 out4:
+	rpciod_down();
+out5:
 	return err;
 }
 
 static void __exit exit_nfs_fs(void)
 {
+	rpciod_down();
+
 	nfs_destroy_directcache();
 	nfs_destroy_writepagecache();
 	nfs_destroy_readpagecache();

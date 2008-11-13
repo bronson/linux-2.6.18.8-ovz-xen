@@ -213,13 +213,28 @@ struct tty_driver {
 			unsigned int set, unsigned int clear);
 
 	struct list_head tty_drivers;
+	struct ve_struct *owner_env;
 };
 
+#ifdef CONFIG_UNIX98_PTYS
+extern struct tty_driver *ptm_driver;	/* Unix98 pty masters; for /dev/ptmx */
+extern struct tty_driver *pts_driver;	/* Unix98 pty slaves;  for /dev/ptmx */
+#endif
+
+#ifdef CONFIG_LEGACY_PTYS
+extern struct tty_driver *pty_driver;
+extern struct tty_driver *pty_slave_driver;
+#endif
+
 extern struct list_head tty_drivers;
+extern rwlock_t tty_driver_guard;
 
 struct tty_driver *alloc_tty_driver(int lines);
 void put_tty_driver(struct tty_driver *driver);
 void tty_set_operations(struct tty_driver *driver, struct tty_operations *op);
+
+struct class *init_ve_tty_class(void);
+void fini_ve_tty_class(struct class *ve_tty_class);
 
 /* tty driver magic number */
 #define TTY_DRIVER_MAGIC		0x5402

@@ -4,6 +4,7 @@
 #include <linux/cpu.h>
 #include <linux/err.h>
 #include <linux/syscalls.h>
+#include <linux/delay.h>
 #include <asm/atomic.h>
 #include <asm/semaphore.h>
 #include <asm/uaccess.h>
@@ -56,7 +57,7 @@ static int stopmachine(void *cpu)
 		/* Yield in first stage: migration threads need to
 		 * help our sisters onto their CPUs. */
 		if (!prepared && !irqs_disabled)
-			yield();
+			msleep(10);
 		else
 			cpu_relax();
 	}
@@ -96,7 +97,7 @@ static int stop_machine(void)
 	stopmachine_state = STOPMACHINE_WAIT;
 
 	for_each_online_cpu(i) {
-		if (i == raw_smp_processor_id())
+		if (i == task_cpu(current))
 			continue;
 		ret = kernel_thread(stopmachine, (void *)(long)i,CLONE_KERNEL);
 		if (ret < 0)
@@ -106,7 +107,7 @@ static int stop_machine(void)
 
 	/* Wait for them all to come to life. */
 	while (atomic_read(&stopmachine_thread_ack) != stopmachine_num_threads)
-		yield();
+		msleep(10);
 
 	/* If some failed, kill them all. */
 	if (ret < 0) {
@@ -177,7 +178,7 @@ struct task_struct *__stop_machine_run(int (*fn)(void *), void *data,
 
 	/* If they don't care which CPU fn runs on, bind to any online one. */
 	if (cpu == NR_CPUS)
-		cpu = raw_smp_processor_id();
+		cpu = task_cpu(current);
 
 	p = kthread_create(do_stop, &smdata, "kstopmachine");
 	if (!IS_ERR(p)) {

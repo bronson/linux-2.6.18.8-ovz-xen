@@ -27,8 +27,6 @@
 #define BR_PORT_BITS	10
 #define BR_MAX_PORTS	(1<<BR_PORT_BITS)
 
-#define BR_PORT_DEBOUNCE (HZ/10)
-
 #define BR_VERSION	"2.2"
 
 typedef struct bridge_id bridge_id;
@@ -82,7 +80,6 @@ struct net_bridge_port
 	struct timer_list		hold_timer;
 	struct timer_list		message_age_timer;
 	struct kobject			kobj;
-	struct work_struct		carrier_check;
 	struct rcu_head			rcu;
 };
 
@@ -173,6 +170,7 @@ extern void br_flood_forward(struct net_bridge *br,
 		      int clone);
 
 /* br_if.c */
+extern void br_port_carrier_check(struct net_bridge_port *p);
 extern int br_add_bridge(const char *name);
 extern int br_del_bridge(const char *name);
 extern void br_cleanup_bridges(void);

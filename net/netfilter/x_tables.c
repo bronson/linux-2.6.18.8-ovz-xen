@@ -24,6 +24,10 @@
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_arp.h>
+#include <linux/nfcalls.h>
+
+#include <ub/beancounter.h>
+#include <ub/ub_mem.h>
 
 
 MODULE_LICENSE("GPL");
@@ -41,6 +45,14 @@ struct xt_af {
 };
 
 static struct xt_af *xt;
+
+#ifdef CONFIG_VE_IPTABLES
+/* include ve.h and define get_exec_env */
+#include <linux/sched.h>
+#define xt_tables(af)	(get_exec_env()->_xt_tables[af])
+#else
+#define xt_tables(af)	xt[af].tables
+#endif
 
 #ifdef DEBUG_IP_FIREWALL_USER
 #define duprintf(format, args...) printk(format , ## args)
@@ -60,6 +72,46 @@ static const char *xt_prefix[NPROTO] = {
 	[NF_ARP]	= "arp",
 };
 
+#ifdef CONFIG_USER_RESOURCE
+static inline struct user_beancounter *xt_table_ub(struct xt_table_info *info)
+{
+	struct user_beancounter *ub;
+
+	for (ub = mem_ub(info); ub->parent != NULL; ub = ub->parent);
+	return ub;
+}
+
+static void uncharge_xtables(struct xt_table_info *info, unsigned long size)
+{
+	struct user_beancounter *ub;
+
+	ub = xt_table_ub(info);
+	uncharge_beancounter(ub, UB_NUMXTENT, size);
+}
+
+static int recharge_xtables(int check_ub,
+		struct xt_table_info *new, struct xt_table_info *old)
+{
+	struct user_beancounter *ub;
+	long change;
+
+	ub = xt_table_ub(new);
+	BUG_ON(check_ub && ub != xt_table_ub(old));
+
+	change = (long)new->number - (long)old->number;
+	if (change > 0) {
+		if (charge_beancounter(ub, UB_NUMXTENT, change, UB_SOFT))
+			return -ENOMEM;
+	} else if (change < 0)
+		uncharge_beancounter(ub, UB_NUMXTENT, -change);
+
+	return 0;
+}
+#else
+#define recharge_xtables(c, new, old)	(0)
+#define uncharge_xtables(info, s)	do { } while (0)
+#endif	/* CONFIG_USER_RESOURCE */
+
 /* Registration hooks for targets. */
 int
 xt_register_target(struct xt_target *target)
@@ -71,7 +123,7 @@ xt_register_target(struct xt_target *target)
 		return ret;
 	list_add(&target->list, &xt[af].target);
 	mutex_unlock(&xt[af].mutex);
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL(xt_register_target);
 
@@ -98,7 +150,7 @@ xt_register_match(struct xt_match *match)
 	list_add(&match->list, &xt[af].match);
 	mutex_unlock(&xt[af].mutex);
 
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL(xt_register_match);
 
@@ -248,24 +300,25 @@ int xt_check_match(const struct xt_match *match, unsigned short family,
 		   unsigned short proto, int inv_proto)
 {
 	if (XT_ALIGN(match->matchsize) != size) {
-		printk("%s_tables: %s match: invalid size %Zu != %u\n",
-		       xt_prefix[family], match->name,
-		       XT_ALIGN(match->matchsize), size);
+		ve_printk(VE_LOG, "%s_tables: %s match: invalid size %Zu != "
+			"%u\n", xt_prefix[family], match->name,
+			XT_ALIGN(match->matchsize), size);
 		return -EINVAL;
 	}
 	if (match->table && strcmp(match->table, table)) {
-		printk("%s_tables: %s match: only valid in %s table, not %s\n",
-		       xt_prefix[family], match->name, match->table, table);
+		ve_printk(VE_LOG, "%s_tables: %s match: only valid in %s table,"
+			" not %s\n", xt_prefix[family], match->name,
+			match->table, table);
 		return -EINVAL;
 	}
 	if (match->hooks && (hook_mask & ~match->hooks) != 0) {
-		printk("%s_tables: %s match: bad hook_mask %u\n",
+		ve_printk(VE_LOG, "%s_tables: %s match: bad hook_mask %u\n",
 		       xt_prefix[family], match->name, hook_mask);
 		return -EINVAL;
 	}
 	if (match->proto && (match->proto != proto || inv_proto)) {
-		printk("%s_tables: %s match: only valid for protocol %u\n",
-		       xt_prefix[family], match->name, match->proto);
+		ve_printk(VE_LOG, "%s_tables: %s match: only valid for protocol"
+			" %u\n", xt_prefix[family], match->name, match->proto);
 		return -EINVAL;
 	}
 	return 0;
@@ -325,24 +378,26 @@ int xt_check_target(const struct xt_target *target, unsigned short family,
 		    unsigned short proto, int inv_proto)
 {
 	if (XT_ALIGN(target->targetsize) != size) {
-		printk("%s_tables: %s target: invalid size %Zu != %u\n",
-		       xt_prefix[family], target->name,
-		       XT_ALIGN(target->targetsize), size);
+		ve_printk(VE_LOG, "%s_tables: %s target: invalid size %Zu != "
+			"%u\n", xt_prefix[family], target->name,
+			XT_ALIGN(target->targetsize), size);
 		return -EINVAL;
 	}
 	if (target->table && strcmp(target->table, table)) {
-		printk("%s_tables: %s target: only valid in %s table, not %s\n",
-		       xt_prefix[family], target->name, target->table, table);
+		ve_printk(VE_LOG, "%s_tables: %s target: only valid in %s "
+			"table, not %s\n", xt_prefix[family], target->name,
+			target->table, table);
 		return -EINVAL;
 	}
 	if (target->hooks && (hook_mask & ~target->hooks) != 0) {
-		printk("%s_tables: %s target: bad hook_mask %u\n",
+		ve_printk(VE_LOG, "%s_tables: %s target: bad hook_mask %u\n",
 		       xt_prefix[family], target->name, hook_mask);
 		return -EINVAL;
 	}
 	if (target->proto && (target->proto != proto || inv_proto)) {
-		printk("%s_tables: %s target: only valid for protocol %u\n",
-		       xt_prefix[family], target->name, target->proto);
+		ve_printk(VE_LOG, "%s_tables: %s target: only valid for "
+			"protocol %u\n", xt_prefix[family], target->name,
+			target->proto);
 		return -EINVAL;
 	}
 	return 0;
@@ -406,19 +461,19 @@ struct xt_table_info *xt_alloc_table_info(unsigned int size)
 	if ((SMP_ALIGN(size) >> PAGE_SHIFT) + 2 > num_physpages)
 		return NULL;
 
-	newinfo = kzalloc(sizeof(struct xt_table_info), GFP_KERNEL);
+	newinfo = kzalloc(sizeof(struct xt_table_info), GFP_KERNEL_UBC);
 	if (!newinfo)
 		return NULL;
 
-	newinfo->size = size;
+	newinfo->alloc_size = newinfo->size = size;
 
 	for_each_possible_cpu(cpu) {
 		if (size <= PAGE_SIZE)
 			newinfo->entries[cpu] = kmalloc_node(size,
-							GFP_KERNEL,
+							GFP_KERNEL_UBC,
 							cpu_to_node(cpu));
 		else
-			newinfo->entries[cpu] = vmalloc_node(size,
+			newinfo->entries[cpu] = ub_vmalloc_node(size,
 							cpu_to_node(cpu));
 
 		if (newinfo->entries[cpu] == NULL) {
@@ -436,7 +491,7 @@ void xt_free_table_info(struct xt_table_info *info)
 	int cpu;
 
 	for_each_possible_cpu(cpu) {
-		if (info->size <= PAGE_SIZE)
+		if (info->alloc_size <= PAGE_SIZE)
 			kfree(info->entries[cpu]);
 		else
 			vfree(info->entries[cpu]);
@@ -453,7 +508,7 @@ struct xt_table *xt_find_table_lock(int af, const char *name)
 	if (mutex_lock_interruptible(&xt[af].mutex) != 0)
 		return ERR_PTR(-EINTR);
 
-	list_for_each_entry(t, &xt[af].tables, list)
+	list_for_each_entry(t, &xt_tables(af), list)
 		if (strcmp(t->name, name) == 0 && try_module_get(t->me))
 			return t;
 	mutex_unlock(&xt[af].mutex);
@@ -501,6 +556,13 @@ xt_replace_table(struct xt_table *table,
 		return NULL;
 	}
 	oldinfo = private;
+
+	if (recharge_xtables(num_counters != 0, newinfo, oldinfo)) {
+		write_unlock_bh(&table->lock);
+		*error = -ENOMEM;
+		return NULL;
+	}
+
 	table->private = newinfo;
 	newinfo->initial_entries = oldinfo->initial_entries;
 	write_unlock_bh(&table->lock);
@@ -521,7 +583,7 @@ int xt_register_table(struct xt_table *table,
 		return ret;
 
 	/* Don't autoload: we'd eat our tail... */
-	if (list_named_find(&xt[table->af].tables, table->name)) {
+	if (list_named_find(&xt_tables(table->af), table->name)) {
 		ret = -EEXIST;
 		goto unlock;
 	}
@@ -538,7 +600,7 @@ int xt_register_table(struct xt_table *table,
 	/* save number of initial entries */
 	private->initial_entries = private->number;
 
-	list_prepend(&xt[table->af].tables, table);
+	list_prepend(&xt_tables(table->af), table);
 
 	ret = 0;
  unlock:
@@ -547,18 +609,66 @@ int xt_register_table(struct xt_table *table,
 }
 EXPORT_SYMBOL_GPL(xt_register_table);
 
+struct xt_table * virt_xt_register_table(struct xt_table *table,
+		      struct xt_table_info *bootstrap,
+		      struct xt_table_info *newinfo)
+{
+	int ret;
+	struct module *mod = table->me;
+
+	if (!ve_is_super(get_exec_env())) {
+		struct xt_table *tmp;
+		__module_get(mod);
+		ret = -ENOMEM;
+		tmp = ub_kmalloc(sizeof(struct xt_table), GFP_KERNEL);
+		if (!tmp)
+			goto nomem;
+		memcpy(tmp, table, sizeof(struct xt_table));
+		table = tmp;
+	}
+
+	ret = xt_register_table(table, bootstrap, newinfo);
+	if (ret)
+		goto out;
+
+	return table;
+out:
+	if (!ve_is_super(get_exec_env())) {
+		kfree(table);
+nomem:
+		module_put(mod);
+	}
+	return ERR_PTR(ret);
+}
+EXPORT_SYMBOL_GPL(virt_xt_register_table);
+
 void *xt_unregister_table(struct xt_table *table)
 {
 	struct xt_table_info *private;
 
 	mutex_lock(&xt[table->af].mutex);
 	private = table->private;
-	LIST_DELETE(&xt[table->af].tables, table);
+	LIST_DELETE(&xt_tables(table->af), table);
 	mutex_unlock(&xt[table->af].mutex);
+
+	uncharge_xtables(private, private->number);
 
 	return private;
 }
 EXPORT_SYMBOL_GPL(xt_unregister_table);
+
+void *virt_xt_unregister_table(struct xt_table *table)
+{
+	void *ret;
+
+	ret = xt_unregister_table(table);
+	if (!ve_is_super(get_exec_env())) {
+		module_put(table->me);
+		kfree(table);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(virt_xt_unregister_table);
 
 #ifdef CONFIG_PROC_FS
 static char *xt_proto_prefix[NPROTO] = {
@@ -594,7 +704,7 @@ static struct list_head *type2list(u_int16_t af, u_int16_t type)
 		list = &xt[af].match;
 		break;
 	case TABLE:
-		list = &xt[af].tables;
+		list = &xt_tables(af);
 		break;
 	default:
 		list = NULL;
@@ -707,6 +817,7 @@ int xt_proto_init(int af)
 		return -EINVAL;
 
 
+	INIT_LIST_HEAD(&xt_tables(af));
 #ifdef CONFIG_PROC_FS
 	strlcpy(buf, xt_proto_prefix[af], sizeof(buf));
 	strlcat(buf, FORMAT_TABLES, sizeof(buf));
@@ -795,6 +906,6 @@ static void __exit xt_fini(void)
 	kfree(xt);
 }
 
-module_init(xt_init);
+subsys_initcall(xt_init);
 module_exit(xt_fini);
 

@@ -55,6 +55,8 @@
 #include <net/dst.h>
 #include <net/checksum.h>
 
+#include <ub/ub_net.h>
+
 /*
  * This structure really needs to be cleaned up.
  * Most of it is for TCP, and not used by any of
@@ -258,6 +260,8 @@ struct sock {
   	int			(*sk_backlog_rcv)(struct sock *sk,
 						  struct sk_buff *skb);  
 	void                    (*sk_destruct)(struct sock *sk);
+	struct sock_beancounter sk_bc;
+	struct ve_struct	*owner_env;
 };
 
 /*
@@ -492,6 +496,8 @@ static inline void sk_add_backlog(struct sock *sk, struct sk_buff *skb)
 })
 
 extern int sk_stream_wait_connect(struct sock *sk, long *timeo_p);
+extern int __sk_stream_wait_memory(struct sock *sk, long *timeo_p,
+				unsigned long amount);
 extern int sk_stream_wait_memory(struct sock *sk, long *timeo_p);
 extern void sk_stream_wait_close(struct sock *sk, long timeo_p);
 extern int sk_stream_error(struct sock *sk, int flags, int err);
@@ -721,8 +727,11 @@ static inline void sk_stream_writequeue_purge(struct sock *sk)
 
 static inline int sk_stream_rmem_schedule(struct sock *sk, struct sk_buff *skb)
 {
-	return (int)skb->truesize <= sk->sk_forward_alloc ||
-		sk_stream_mem_schedule(sk, skb->truesize, 1);
+	if ((int)skb->truesize > sk->sk_forward_alloc &&
+		!sk_stream_mem_schedule(sk, skb->truesize, 1))
+		/* The situation is bad according to mainstream. Den */
+		return 0;
+	return ub_tcprcvbuf_charge(sk, skb) == 0;
 }
 
 static inline int sk_stream_wmem_schedule(struct sock *sk, int size)
@@ -781,6 +790,11 @@ extern int			sock_getsockopt(struct socket *sock, int level,
 						int __user *optlen);
 extern struct sk_buff 		*sock_alloc_send_skb(struct sock *sk,
 						     unsigned long size,
+						     int noblock,
+						     int *errcode);
+extern struct sk_buff 		*sock_alloc_send_skb2(struct sock *sk,
+						     unsigned long size,
+						     unsigned long size2,
 						     int noblock,
 						     int *errcode);
 extern void *sock_kmalloc(struct sock *sk, int size,
@@ -1041,6 +1055,8 @@ static inline int sk_can_gso(const struct sock *sk)
 
 static inline void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 {
+	extern int sysctl_tcp_use_sg;
+
 	__sk_dst_set(sk, dst);
 	sk->sk_route_caps = dst->dev->features;
 	if (sk->sk_route_caps & NETIF_F_GSO)
@@ -1051,6 +1067,8 @@ static inline void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 		else 
 			sk->sk_route_caps |= NETIF_F_SG | NETIF_F_HW_CSUM;
 	}
+	if (!sysctl_tcp_use_sg)
+		sk->sk_route_caps &= ~NETIF_F_SG;
 }
 
 static inline void sk_charge_skb(struct sock *sk, struct sk_buff *skb)
@@ -1093,6 +1111,7 @@ static inline int skb_copy_to_page(struct sock *sk, char __user *from,
 
 static inline void skb_set_owner_w(struct sk_buff *skb, struct sock *sk)
 {
+	WARN_ON(skb->destructor);
 	sock_hold(sk);
 	skb->sk = sk;
 	skb->destructor = sock_wfree;
@@ -1101,6 +1120,7 @@ static inline void skb_set_owner_w(struct sk_buff *skb, struct sock *sk)
 
 static inline void skb_set_owner_r(struct sk_buff *skb, struct sock *sk)
 {
+	WARN_ON(skb->destructor);
 	skb->sk = sk;
 	skb->destructor = sock_rfree;
 	atomic_add(skb->truesize, &sk->sk_rmem_alloc);

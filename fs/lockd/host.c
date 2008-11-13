@@ -65,6 +65,7 @@ nlm_lookup_host(int server, struct sockaddr_in *sin,
 	struct nlm_host	*host, **hp;
 	u32		addr;
 	int		hash;
+	struct ve_struct *ve;
 
 	dprintk("lockd: nlm_lookup_host(%08x, p=%d, v=%d)\n",
 			(unsigned)(sin? ntohl(sin->sin_addr.s_addr) : 0), proto, version);
@@ -77,12 +78,15 @@ nlm_lookup_host(int server, struct sockaddr_in *sin,
 	if (time_after_eq(jiffies, next_gc))
 		nlm_gc_hosts();
 
+	ve = get_exec_env();
 	for (hp = &nlm_hosts[hash]; (host = *hp) != 0; hp = &host->h_next) {
 		if (host->h_proto != proto)
 			continue;
 		if (host->h_version != version)
 			continue;
 		if (host->h_server != server)
+			continue;
+		if (!ve_accessible_strict(host->owner_env, ve))
 			continue;
 
 		if (nlm_cmp_addr(&host->h_addr, sin)) {
@@ -127,6 +131,7 @@ nlm_lookup_host(int server, struct sockaddr_in *sin,
 	spin_lock_init(&host->h_lock);
 	INIT_LIST_HEAD(&host->h_granted);
 	INIT_LIST_HEAD(&host->h_reclaim);
+	host->owner_env    = ve;
 
 	if (++nrhosts > NLM_HOST_MAX)
 		next_gc = 0;
@@ -143,10 +148,15 @@ nlm_find_client(void)
 	 * and return it
 	 */
 	int hash;
+	struct ve_struct *ve;
+
+	ve = get_exec_env();
 	mutex_lock(&nlm_host_mutex);
 	for (hash = 0 ; hash < NLM_HOST_NRHASH; hash++) {
 		struct nlm_host *host, **hp;
 		for (hp = &nlm_hosts[hash]; (host = *hp) != 0; hp = &host->h_next) {
+			if (!ve_accessible_strict(host->owner_env, ve))
+				continue;
 			if (host->h_server &&
 			    host->h_killed == 0) {
 				nlm_get_host(host);
@@ -348,3 +358,51 @@ nlm_gc_hosts(void)
 	next_gc = jiffies + NLM_HOST_COLLECT;
 }
 
+#ifdef CONFIG_VE
+void ve_nlm_shutdown_hosts(struct ve_struct *ve)
+{
+	struct nlm_host	**q, *host;
+	envid_t veid = ve->veid;
+	int  i;
+
+	dprintk("lockd: shutting down host module for ve %d\n", veid);
+	mutex_lock(&nlm_host_mutex);
+
+	/* Perform a garbage collection pass */
+	for (i = 0; i < NLM_HOST_NRHASH; i++) {
+		q = &nlm_hosts[i];
+		while ((host = *q) != NULL) {
+			struct rpc_clnt	*clnt;
+
+			if (ve != host->owner_env) {
+				q = &host->h_next;
+				continue;
+			}
+
+			*q = host->h_next;
+			host->h_monitored = 0;
+			dprintk("lockd: delete host %s ve %d\n", host->h_name,
+				veid);
+			if ((clnt = host->h_rpcclnt) != NULL) {
+				if (atomic_read(&clnt->cl_users)) {
+					struct rpc_xprt *xprt;
+
+					printk(KERN_WARNING
+						"lockd: active RPC handle\n");
+					clnt->cl_dead = 1;
+					rpc_killall_tasks(clnt);
+					xprt = clnt->cl_xprt;
+					xprt_disconnect(xprt);
+					xprt->ops->close(xprt);
+				} else {
+					rpc_destroy_client(clnt);
+				}
+			}
+			kfree(host);
+			nrhosts--;
+		}
+	}
+
+	mutex_unlock(&nlm_host_mutex);
+}
+#endif

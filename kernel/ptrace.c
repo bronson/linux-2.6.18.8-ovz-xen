@@ -129,6 +129,8 @@ static int may_attach(struct task_struct *task)
 	 * or halting the specified task is impossible.
 	 */
 	int dumpable = 0;
+	int vps_dumpable = 0;
+
 	/* Don't let security modules deny introspection */
 	if (task == current)
 		return 0;
@@ -140,11 +142,17 @@ static int may_attach(struct task_struct *task)
 	     (current->gid != task->gid)) && !capable(CAP_SYS_PTRACE))
 		return -EPERM;
 	smp_rmb();
-	if (task->mm)
+	if (task->mm) {
 		dumpable = task->mm->dumpable;
+		vps_dumpable = (task->mm->vps_dumpable == 1);
+	}
+
 	if (!dumpable && !capable(CAP_SYS_PTRACE))
 		return -EPERM;
-
+	if (!vps_dumpable && !ve_is_super(get_exec_env()))
+		return -EPERM;
+	if (!ve_accessible(VE_TASK_INFO(task)->owner_env, get_exec_env()))
+		return -EPERM;
 	return security_ptrace(current, task);
 }
 
@@ -189,6 +197,8 @@ repeat:
 	}
 
 	if (!task->mm)
+		goto bad;
+	if (task->mm->vps_dumpable == 2)
 		goto bad;
 	/* the same process cannot be attached many times */
 	if (task->ptrace & PT_PTRACED)
@@ -294,6 +304,7 @@ int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, in
 	
 	return buf - old_buf;
 }
+EXPORT_SYMBOL_GPL(access_process_vm);
 
 int ptrace_readdata(struct task_struct *tsk, unsigned long src, char __user *dst, int len)
 {
@@ -491,7 +502,7 @@ struct task_struct *ptrace_get_task_struct(pid_t pid)
 		return ERR_PTR(-EPERM);
 
 	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
+	child = find_task_by_pid_ve(pid);
 	if (child)
 		get_task_struct(child);
 	read_unlock(&tasklist_lock);

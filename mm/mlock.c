@@ -8,9 +8,11 @@
 #include <linux/capability.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/mempolicy.h>
 #include <linux/syscalls.h>
 
+#include <ub/ub_vmpages.h>
 
 static int mlock_fixup(struct vm_area_struct *vma, struct vm_area_struct **prev,
 	unsigned long start, unsigned long end, unsigned int newflags)
@@ -23,6 +25,14 @@ static int mlock_fixup(struct vm_area_struct *vma, struct vm_area_struct **prev,
 	if (newflags == vma->vm_flags) {
 		*prev = vma;
 		goto out;
+	}
+
+	if (newflags & VM_LOCKED) {
+		ret = ub_locked_charge(mm, end - start);
+		if (ret < 0) {
+			*prev = vma;
+			goto out;
+		}
 	}
 
 	pgoff = vma->vm_pgoff + ((start - vma->vm_start) >> PAGE_SHIFT);
@@ -38,13 +48,13 @@ static int mlock_fixup(struct vm_area_struct *vma, struct vm_area_struct **prev,
 	if (start != vma->vm_start) {
 		ret = split_vma(mm, vma, start, 1);
 		if (ret)
-			goto out;
+			goto out_uncharge;
 	}
 
 	if (end != vma->vm_end) {
 		ret = split_vma(mm, vma, end, 0);
 		if (ret)
-			goto out;
+			goto out_uncharge;
 	}
 
 success:
@@ -63,13 +73,19 @@ success:
 		pages = -pages;
 		if (!(newflags & VM_IO))
 			ret = make_pages_present(start, end);
-	}
+	} else
+		ub_locked_uncharge(mm, end - start);
 
 	vma->vm_mm->locked_vm -= pages;
 out:
 	if (ret == -ENOMEM)
 		ret = -EAGAIN;
 	return ret;
+
+out_uncharge:
+	if (newflags & VM_LOCKED)
+		ub_locked_uncharge(mm, end - start);
+	goto out;
 }
 
 static int do_mlock(unsigned long start, size_t len, int on)
@@ -146,6 +162,7 @@ asmlinkage long sys_mlock(unsigned long start, size_t len)
 	up_write(&current->mm->mmap_sem);
 	return error;
 }
+EXPORT_SYMBOL_GPL(sys_mlock);
 
 asmlinkage long sys_munlock(unsigned long start, size_t len)
 {
@@ -158,6 +175,7 @@ asmlinkage long sys_munlock(unsigned long start, size_t len)
 	up_write(&current->mm->mmap_sem);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(sys_munlock);
 
 static int do_mlockall(int flags)
 {

@@ -23,5 +23,6 @@
 
 #define MAP_POPULATE	0x8000		/* populate (prefault) pagetables */
 #define MAP_NONBLOCK	0x10000		/* do not block on IO */
+#define MAP_EXECPRIO   0x20000         /* do soft ubc charge */
 
 #endif	/* _ASM_POWERPC_MMAN_H */

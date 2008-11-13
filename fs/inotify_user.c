@@ -20,6 +20,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
@@ -65,46 +66,6 @@ int inotify_max_queued_events __read_mostly;
  * first event, or to inotify_destroy().
  */
 
-/*
- * struct inotify_device - represents an inotify instance
- *
- * This structure is protected by the mutex 'mutex'.
- */
-struct inotify_device {
-	wait_queue_head_t 	wq;		/* wait queue for i/o */
-	struct mutex		ev_mutex;	/* protects event queue */
-	struct mutex		up_mutex;	/* synchronizes watch updates */
-	struct list_head 	events;		/* list of queued events */
-	atomic_t		count;		/* reference count */
-	struct user_struct	*user;		/* user who opened this dev */
-	struct inotify_handle	*ih;		/* inotify handle */
-	unsigned int		queue_size;	/* size of the queue (bytes) */
-	unsigned int		event_count;	/* number of pending events */
-	unsigned int		max_events;	/* maximum number of events */
-};
-
-/*
- * struct inotify_kernel_event - An inotify event, originating from a watch and
- * queued for user-space.  A list of these is attached to each instance of the
- * device.  In read(), this list is walked and all events that can fit in the
- * buffer are returned.
- *
- * Protected by dev->ev_mutex of the device in which we are queued.
- */
-struct inotify_kernel_event {
-	struct inotify_event	event;	/* the user-space event */
-	struct list_head        list;	/* entry in inotify_device's list */
-	char			*name;	/* filename, if any */
-};
-
-/*
- * struct inotify_user_watch - our version of an inotify_watch, we add
- * a reference to the associated inotify_device.
- */
-struct inotify_user_watch {
-	struct inotify_device	*dev;	/* associated device */
-	struct inotify_watch	wdata;	/* inotify watch data */
-};
 
 #ifdef CONFIG_SYSCTL
 
@@ -360,8 +321,8 @@ static int find_inode(const char __user *dirname, struct nameidata *nd,
  *
  * Callers must hold dev->up_mutex.
  */
-static int create_watch(struct inotify_device *dev, struct inode *inode,
-			u32 mask)
+int inotify_create_watch(struct inotify_device *dev, struct dentry *d,
+			 struct vfsmount *mnt, u32 mask)
 {
 	struct inotify_user_watch *watch;
 	int ret;
@@ -381,12 +342,13 @@ static int create_watch(struct inotify_device *dev, struct inode *inode,
 	atomic_inc(&dev->user->inotify_watches);
 
 	inotify_init_watch(&watch->wdata);
-	ret = inotify_add_watch(dev->ih, &watch->wdata, inode, mask);
+	ret = inotify_add_watch_dget(dev->ih, &watch->wdata, d, mnt, mask);
 	if (ret < 0)
 		free_inotify_user_watch(&watch->wdata);
 
 	return ret;
 }
+EXPORT_SYMBOL(inotify_create_watch);
 
 /* Device Interface */
 
@@ -518,13 +480,14 @@ static long inotify_ioctl(struct file *file, unsigned int cmd,
 	return ret;
 }
 
-static const struct file_operations inotify_fops = {
+const struct file_operations inotify_fops = {
 	.poll           = inotify_poll,
 	.read           = inotify_read,
 	.release        = inotify_release,
 	.unlocked_ioctl = inotify_ioctl,
 	.compat_ioctl	= inotify_ioctl,
 };
+EXPORT_SYMBOL(inotify_fops);
 
 static const struct inotify_operations inotify_user_ops = {
 	.handle_event	= inotify_dev_queue_event,
@@ -601,6 +564,7 @@ out_put_fd:
 	put_unused_fd(fd);
 	return ret;
 }
+EXPORT_SYMBOL(sys_inotify_init);
 
 asmlinkage long sys_inotify_add_watch(int fd, const char __user *path, u32 mask)
 {
@@ -637,7 +601,7 @@ asmlinkage long sys_inotify_add_watch(int fd, const char __user *path, u32 mask)
 	mutex_lock(&dev->up_mutex);
 	ret = inotify_find_update_watch(dev->ih, inode, mask);
 	if (ret == -ENOENT)
-		ret = create_watch(dev, inode, mask);
+		ret = inotify_create_watch(dev, nd.dentry, nd.mnt, mask);
 	mutex_unlock(&dev->up_mutex);
 
 	path_release(&nd);
@@ -676,7 +640,7 @@ static int
 inotify_get_sb(struct file_system_type *fs_type, int flags,
 	       const char *dev_name, void *data, struct vfsmount *mnt)
 {
-	return get_sb_pseudo(fs_type, "inotify", NULL, 0xBAD1DEA, mnt);
+	return get_sb_pseudo(fs_type, "inotify", NULL, 0x2BAD1DEA, mnt);
 }
 
 static struct file_system_type inotify_fs_type = {

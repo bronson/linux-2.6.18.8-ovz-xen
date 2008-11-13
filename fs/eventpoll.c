@@ -106,11 +106,6 @@
 #define EP_MAX_MSTIMEO min(1000ULL * MAX_SCHEDULE_TIMEOUT / HZ, (LONG_MAX - 999ULL) / HZ)
 
 
-struct epoll_filefd {
-	struct file *file;
-	int fd;
-};
-
 /*
  * Node that is linked into the "wake_task_list" member of the "struct poll_safewake".
  * It is used to keep track on all tasks that are currently inside the wake_up() code
@@ -133,36 +128,6 @@ struct poll_safewake {
 	spinlock_t lock;
 };
 
-/*
- * This structure is stored inside the "private_data" member of the file
- * structure and rapresent the main data sructure for the eventpoll
- * interface.
- */
-struct eventpoll {
-	/* Protect the this structure access */
-	rwlock_t lock;
-
-	/*
-	 * This semaphore is used to ensure that files are not removed
-	 * while epoll is using them. This is read-held during the event
-	 * collection loop and it is write-held during the file cleanup
-	 * path, the epoll file exit code and the ctl operations.
-	 */
-	struct rw_semaphore sem;
-
-	/* Wait queue used by sys_epoll_wait() */
-	wait_queue_head_t wq;
-
-	/* Wait queue used by file->poll() */
-	wait_queue_head_t poll_wait;
-
-	/* List of ready file descriptors */
-	struct list_head rdllist;
-
-	/* RB-Tree root used to store monitored fd structs */
-	struct rb_root rbr;
-};
-
 /* Wait structure used by the poll hooks */
 struct eppoll_entry {
 	/* List header used to link this structure to the "struct epitem" */
@@ -181,51 +146,6 @@ struct eppoll_entry {
 	wait_queue_head_t *whead;
 };
 
-/*
- * Each file descriptor added to the eventpoll interface will
- * have an entry of this type linked to the hash.
- */
-struct epitem {
-	/* RB-Tree node used to link this structure to the eventpoll rb-tree */
-	struct rb_node rbn;
-
-	/* List header used to link this structure to the eventpoll ready list */
-	struct list_head rdllink;
-
-	/* The file descriptor information this item refers to */
-	struct epoll_filefd ffd;
-
-	/* Number of active wait queue attached to poll operations */
-	int nwait;
-
-	/* List containing poll wait queues */
-	struct list_head pwqlist;
-
-	/* The "container" of this item */
-	struct eventpoll *ep;
-
-	/* The structure that describe the interested events and the source fd */
-	struct epoll_event event;
-
-	/*
-	 * Used to keep track of the usage count of the structure. This avoids
-	 * that the structure will desappear from underneath our processing.
-	 */
-	atomic_t usecnt;
-
-	/* List header used to link this item to the "struct file" items list */
-	struct list_head fllink;
-
-	/* List header used to link the item to the transfer list */
-	struct list_head txlink;
-
-	/*
-	 * This is used during the collection/transfer of events to userspace
-	 * to pin items empty events set.
-	 */
-	unsigned int revents;
-};
-
 /* Wrapper struct used by poll queueing */
 struct ep_pqueue {
 	poll_table pt;
@@ -240,14 +160,10 @@ static int ep_getfd(int *efd, struct inode **einode, struct file **efile,
 		    struct eventpoll *ep);
 static int ep_alloc(struct eventpoll **pep);
 static void ep_free(struct eventpoll *ep);
-static struct epitem *ep_find(struct eventpoll *ep, struct file *file, int fd);
 static void ep_use_epitem(struct epitem *epi);
-static void ep_release_epitem(struct epitem *epi);
 static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
 				 poll_table *pt);
 static void ep_rbtree_insert(struct eventpoll *ep, struct epitem *epi);
-static int ep_insert(struct eventpoll *ep, struct epoll_event *event,
-		     struct file *tfile, int fd);
 static int ep_modify(struct eventpoll *ep, struct epitem *epi,
 		     struct epoll_event *event);
 static void ep_unregister_pollwait(struct eventpoll *ep, struct epitem *epi);
@@ -275,7 +191,8 @@ static int eventpollfs_get_sb(struct file_system_type *fs_type,
 /*
  * This semaphore is used to serialize ep_free() and eventpoll_release_file().
  */
-static struct mutex epmutex;
+struct mutex epmutex;
+EXPORT_SYMBOL_GPL(epmutex);
 
 /* Safe wake up implementation */
 static struct poll_safewake psw;
@@ -290,10 +207,11 @@ static kmem_cache_t *pwq_cache __read_mostly;
 static struct vfsmount *eventpoll_mnt __read_mostly;
 
 /* File callbacks that implement the eventpoll file behaviour */
-static const struct file_operations eventpoll_fops = {
+const struct file_operations eventpoll_fops = {
 	.release	= ep_eventpoll_close,
 	.poll		= ep_eventpoll_poll
 };
+EXPORT_SYMBOL_GPL(eventpoll_fops);
 
 /*
  * This is used to register the virtual file system from where
@@ -534,7 +452,7 @@ eexit_1:
 		     current, size, error));
 	return error;
 }
-
+EXPORT_SYMBOL_GPL(sys_epoll_create);
 
 /*
  * The following function implements the controller interface for
@@ -844,7 +762,7 @@ static void ep_free(struct eventpoll *ep)
  * the returned item, so the caller must call ep_release_epitem()
  * after finished using the "struct epitem".
  */
-static struct epitem *ep_find(struct eventpoll *ep, struct file *file, int fd)
+struct epitem *ep_find(struct eventpoll *ep, struct file *file, int fd)
 {
 	int kcmp;
 	unsigned long flags;
@@ -874,6 +792,7 @@ static struct epitem *ep_find(struct eventpoll *ep, struct file *file, int fd)
 
 	return epir;
 }
+EXPORT_SYMBOL_GPL(ep_find);
 
 
 /*
@@ -892,13 +811,13 @@ static void ep_use_epitem(struct epitem *epi)
  * has finished using the structure. It might lead to freeing the
  * structure itself if the count goes to zero.
  */
-static void ep_release_epitem(struct epitem *epi)
+void ep_release_epitem(struct epitem *epi)
 {
 
 	if (atomic_dec_and_test(&epi->usecnt))
 		kmem_cache_free(epi_cache, epi);
 }
-
+EXPORT_SYMBOL_GPL(ep_release_epitem);
 
 /*
  * This is the callback that is used to add our wait queue to the
@@ -944,7 +863,7 @@ static void ep_rbtree_insert(struct eventpoll *ep, struct epitem *epi)
 }
 
 
-static int ep_insert(struct eventpoll *ep, struct epoll_event *event,
+int ep_insert(struct eventpoll *ep, struct epoll_event *event,
 		     struct file *tfile, int fd)
 {
 	int error, revents, pwake = 0;
@@ -1036,6 +955,7 @@ eexit_2:
 eexit_1:
 	return error;
 }
+EXPORT_SYMBOL_GPL(ep_insert);
 
 
 /*

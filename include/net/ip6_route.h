@@ -165,5 +165,13 @@ static inline int ipv6_unicast_destination(struct sk_buff *skb)
 	return rt->rt6i_flags & RTF_LOCAL;
 }
 
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+int init_ve_route6(struct ve_struct *ve);
+void fini_ve_route6(struct ve_struct *ve);
+#else
+#define init_ve_route6(ve)	(0)
+#define fini_ve_route6(ve)	do { } while (0)
+#endif
+
 #endif
 #endif

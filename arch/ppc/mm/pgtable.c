@@ -83,7 +83,8 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 {
 	pgd_t *ret;
 
-	ret = (pgd_t *)__get_free_pages(GFP_KERNEL|__GFP_ZERO, PGDIR_ORDER);
+	ret = (pgd_t *)__get_free_pages(GFP_KERNEL_UBC | __GFP_SOFT_UBC |
+			__GFP_ZERO, PGDIR_ORDER);
 	return ret;
 }
 
@@ -117,6 +118,7 @@ struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 #else
 	gfp_t flags = GFP_KERNEL | __GFP_REPEAT;
 #endif
+	flags |= (__GFP_UBC | __GFP_SOFT_UBC);
 
 	ptepage = alloc_pages(flags, 0);
 	if (ptepage)

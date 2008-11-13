@@ -272,7 +272,7 @@ config NR_CPUS
 
 config HOTPLUG_CPU
 	bool "Support for hot-pluggable CPUs (EXPERIMENTAL)"
-	depends on SMP && EXPERIMENTAL
+	depends on SMP && EXPERIMENTAL && !SCHED_VCPU
 	select HOTPLUG
 	default n
 	---help---
@@ -321,6 +321,8 @@ config PREEMPT
 
           Say Y here if you are building a kernel for a desktop, embedded
           or real-time system.  Say N if you are unsure.
+
+source "kernel/Kconfig.fairsched"
 
 source "mm/Kconfig"
 
@@ -525,6 +527,10 @@ endmenu
 
 source "arch/ia64/Kconfig.debug"
 
+source "kernel/Kconfig.openvz"
+
 source "security/Kconfig"
 
 source "crypto/Kconfig"
+
+source "kernel/ub/Kconfig"

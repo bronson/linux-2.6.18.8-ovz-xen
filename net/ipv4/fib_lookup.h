@@ -41,5 +41,6 @@ extern struct fib_alias *fib_find_alias(struct list_head *fah,
 extern int fib_detect_death(struct fib_info *fi, int order,
 			    struct fib_info **last_resort,
 			    int *last_idx, int *dflt);
+void fib_hash_free(struct hlist_head *hash, int bytes);
 
 #endif /* _FIB_LOOKUP_H */

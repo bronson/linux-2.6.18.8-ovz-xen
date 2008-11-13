@@ -67,12 +67,48 @@ struct ip_conntrack_protocol
 /* Protocol registration. */
 extern int ip_conntrack_protocol_register(struct ip_conntrack_protocol *proto);
 extern void ip_conntrack_protocol_unregister(struct ip_conntrack_protocol *proto);
+
 /* Existing built-in protocols */
 extern struct ip_conntrack_protocol ip_conntrack_protocol_tcp;
 extern struct ip_conntrack_protocol ip_conntrack_protocol_udp;
 extern struct ip_conntrack_protocol ip_conntrack_protocol_icmp;
 extern struct ip_conntrack_protocol ip_conntrack_generic_protocol;
 extern int ip_conntrack_protocol_tcp_init(void);
+
+#if defined(CONFIG_VE_IPTABLES) && defined(CONFIG_SYSCTL)
+#include <linux/sched.h>
+#define ve_ip_ct_tcp_timeouts \
+	(get_exec_env()->_ip_conntrack->_ip_ct_tcp_timeouts)
+#define ve_ip_ct_udp_timeout \
+	(get_exec_env()->_ip_conntrack->_ip_ct_udp_timeout)
+#define ve_ip_ct_udp_timeout_stream \
+	(get_exec_env()->_ip_conntrack->_ip_ct_udp_timeout_stream)
+#define ve_ip_ct_icmp_timeout \
+	(get_exec_env()->_ip_conntrack->_ip_ct_icmp_timeout)
+#define ve_ip_ct_generic_timeout \
+	(get_exec_env()->_ip_conntrack->_ip_ct_generic_timeout)
+#define ve_ip_ct_log_invalid	\
+	(get_exec_env()->_ip_conntrack->_ip_ct_log_invalid)
+#define ve_ip_ct_tcp_timeout_max_retrans \
+	(get_exec_env()->_ip_conntrack->_ip_ct_tcp_timeout_max_retrans)
+#define ve_ip_ct_tcp_loose	\
+	(get_exec_env()->_ip_conntrack->_ip_ct_tcp_loose)
+#define ve_ip_ct_tcp_be_liberal	\
+	(get_exec_env()->_ip_conntrack->_ip_ct_tcp_be_liberal)
+#define ve_ip_ct_tcp_max_retrans	\
+	(get_exec_env()->_ip_conntrack->_ip_ct_tcp_max_retrans)
+#else
+#define ve_ip_ct_tcp_timeouts		*tcp_timeouts
+#define ve_ip_ct_udp_timeout		ip_ct_udp_timeout
+#define ve_ip_ct_udp_timeout_stream	ip_ct_udp_timeout_stream
+#define ve_ip_ct_icmp_timeout		ip_ct_icmp_timeout
+#define ve_ip_ct_generic_timeout	ip_ct_generic_timeout
+#define ve_ip_ct_log_invalid		ip_ct_log_invalid
+#define ve_ip_ct_tcp_timeout_max_retrans ip_ct_tcp_timeout_max_retrans
+#define ve_ip_ct_tcp_loose		ip_ct_tcp_loose
+#define ve_ip_ct_tcp_be_liberal		ip_ct_tcp_be_liberal
+#define ve_ip_ct_tcp_max_retrans	ip_ct_tcp_max_retrans
+#endif
 
 /* Log invalid packets */
 extern unsigned int ip_ct_log_invalid;
@@ -85,10 +121,10 @@ extern int ip_ct_port_nfattr_to_tuple(struct nfattr *tb[],
 #ifdef CONFIG_SYSCTL
 #ifdef DEBUG_INVALID_PACKETS
 #define LOG_INVALID(proto) \
-	(ip_ct_log_invalid == (proto) || ip_ct_log_invalid == IPPROTO_RAW)
+	(ve_ip_ct_log_invalid == (proto) || ve_ip_ct_log_invalid == IPPROTO_RAW)
 #else
 #define LOG_INVALID(proto) \
-	((ip_ct_log_invalid == (proto) || ip_ct_log_invalid == IPPROTO_RAW) \
+	((ve_ip_ct_log_invalid == (proto) || ve_ip_ct_log_invalid == IPPROTO_RAW) \
 	 && net_ratelimit())
 #endif
 #else

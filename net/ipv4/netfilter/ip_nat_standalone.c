@@ -29,6 +29,7 @@
 #include <net/ip.h>
 #include <net/checksum.h>
 #include <linux/spinlock.h>
+#include <linux/nfcalls.h>
 
 #define ASSERT_READ_LOCK(x)
 #define ASSERT_WRITE_LOCK(x)
@@ -110,12 +111,17 @@ ip_nat_fn(unsigned int hooknum,
 	IP_NF_ASSERT(!((*pskb)->nh.iph->frag_off
 		       & htons(IP_MF|IP_OFFSET)));
 
+	ct = ip_conntrack_get(*pskb, &ctinfo);
+
+	/* Don't try to NAT if this packet is not conntracked */
+	if (ct == &ip_conntrack_untracked)
+		return NF_ACCEPT;
+
 	/* If we had a hardware checksum before, it's now invalid */
 	if ((*pskb)->ip_summed == CHECKSUM_HW)
 		if (skb_checksum_help(*pskb, (out == NULL)))
 			return NF_DROP;
 
-	ct = ip_conntrack_get(*pskb, &ctinfo);
 	/* Can't track?  It's not due to stress, or conntrack would
 	   have dropped it.  Hence it's the user's responsibilty to
 	   packet filter it out, or implement conntrack/NAT for that
@@ -136,10 +142,6 @@ ip_nat_fn(unsigned int hooknum,
 		}
 		return NF_ACCEPT;
 	}
-
-	/* Don't try to NAT if this packet is not conntracked */
-	if (ct == &ip_conntrack_untracked)
-		return NF_ACCEPT;
 
 	switch (ctinfo) {
 	case IP_CT_RELATED:
@@ -274,7 +276,8 @@ ip_nat_local_fn(unsigned int hooknum,
 		       ct->tuplehash[!dir].tuple.src.u.all
 #endif
 		    )
-			return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
+			if (ip_route_me_harder(pskb, RTN_UNSPEC))
+				ret = NF_DROP;
 	}
 	return ret;
 }
@@ -351,21 +354,19 @@ static struct nf_hook_ops ip_nat_ops[] = {
 	},
 };
 
-static int __init ip_nat_standalone_init(void)
+int init_iptable_nat(void)
 {
 	int ret = 0;
 
-	need_conntrack();
+	if (!ve_is_super(get_exec_env()))
+		__module_get(THIS_MODULE);
 
-#ifdef CONFIG_XFRM
-	BUG_ON(ip_nat_decode_session != NULL);
-	ip_nat_decode_session = nat_decode_session;
-#endif
 	ret = ip_nat_rule_init();
 	if (ret < 0) {
 		printk("ip_nat_init: can't setup rules.\n");
-		goto cleanup_decode_session;
+ 		goto out_modput;
 	}
+
 	ret = nf_register_hooks(ip_nat_ops, ARRAY_SIZE(ip_nat_ops));
 	if (ret < 0) {
 		printk("ip_nat_init: can't register hooks.\n");
@@ -375,25 +376,64 @@ static int __init ip_nat_standalone_init(void)
 
  cleanup_rule_init:
 	ip_nat_rule_cleanup();
- cleanup_decode_session:
-#ifdef CONFIG_XFRM
-	ip_nat_decode_session = NULL;
-	synchronize_net();
-#endif
+ out_modput:
+	if (!ve_is_super(get_exec_env()))
+		module_put(THIS_MODULE);
 	return ret;
+}
+
+void fini_iptable_nat(void)
+{
+	nf_unregister_hooks(ip_nat_ops, ARRAY_SIZE(ip_nat_ops));
+	ip_nat_rule_cleanup();
+	if (!ve_is_super(get_exec_env()))
+		module_put(THIS_MODULE);
+}
+
+static int __init ip_nat_standalone_init(void)
+{
+	int err;
+
+	need_conntrack();
+
+#ifdef CONFIG_XFRM
+	BUG_ON(ip_nat_decode_session != NULL);
+	ip_nat_decode_session = nat_decode_session;
+#endif
+	if (!ip_conntrack_disable_ve0)
+		err = init_iptable_nat();
+	else
+		err = ip_nat_rule_init();
+	if (err < 0) {
+#ifdef CONFIG_XFRM
+		ip_nat_decode_session = NULL;
+		synchronize_net();
+#endif
+		return err;
+	}
+
+	KSYMRESOLVE(init_iptable_nat);
+	KSYMRESOLVE(fini_iptable_nat);
+	KSYMMODRESOLVE(iptable_nat);
+	return 0;
 }
 
 static void __exit ip_nat_standalone_fini(void)
 {
-	nf_unregister_hooks(ip_nat_ops, ARRAY_SIZE(ip_nat_ops));
-	ip_nat_rule_cleanup();
+	KSYMMODUNRESOLVE(iptable_nat);
+	KSYMUNRESOLVE(init_iptable_nat);
+	KSYMUNRESOLVE(fini_iptable_nat);
+	if (!ip_conntrack_disable_ve0)
+		fini_iptable_nat();
+	else
+		ip_nat_rule_cleanup();
 #ifdef CONFIG_XFRM
 	ip_nat_decode_session = NULL;
 	synchronize_net();
 #endif
 }
 
-module_init(ip_nat_standalone_init);
+fs_initcall(ip_nat_standalone_init);
 module_exit(ip_nat_standalone_fini);
 
 MODULE_LICENSE("GPL");

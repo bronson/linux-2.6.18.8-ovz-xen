@@ -1,5 +1,14 @@
 
-extern struct vfsmount * sysfs_mount;
+#ifndef CONFIG_VE
+extern struct vfsmount *sysfs_mount;
+extern struct super_block *sysfs_sb;
+#define ve_sysfs_alowed()	(1)
+#else
+#define sysfs_mount		(get_exec_env()->sysfs_mnt)
+#define sysfs_sb		(get_exec_env()->sysfs_sb)
+#define ve_sysfs_alowed()	(sysfs_sb != NULL)
+#endif
+
 extern kmem_cache_t *sysfs_dir_cachep;
 
 extern struct inode * sysfs_new_inode(mode_t mode, struct sysfs_dirent *);
@@ -20,8 +29,8 @@ extern const unsigned char * sysfs_get_name(struct sysfs_dirent *sd);
 extern void sysfs_drop_dentry(struct sysfs_dirent *sd, struct dentry *parent);
 extern int sysfs_setattr(struct dentry *dentry, struct iattr *iattr);
 
+extern spinlock_t sysfs_lock;
 extern struct rw_semaphore sysfs_rename_sem;
-extern struct super_block * sysfs_sb;
 extern const struct file_operations sysfs_dir_operations;
 extern const struct file_operations sysfs_file_operations;
 extern const struct file_operations bin_fops;

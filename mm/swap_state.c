@@ -19,6 +19,9 @@
 
 #include <asm/pgtable.h>
 
+#include <ub/ub_vmpages.h>
+#include <ub/io_acct.h>
+
 /*
  * swapper_space is a fiction, retained to simplify the path through
  * vmscan's shrink_list, to make sync_page look nicer, and to allow
@@ -43,6 +46,7 @@ struct address_space swapper_space = {
 	.i_mmap_nonlinear = LIST_HEAD_INIT(swapper_space.i_mmap_nonlinear),
 	.backing_dev_info = &swap_backing_dev_info,
 };
+EXPORT_SYMBOL(swapper_space);
 
 #define INC_CACHE_INFO(x)	do { swap_cache_info.x++; } while (0)
 
@@ -53,14 +57,18 @@ static struct {
 	unsigned long find_total;
 	unsigned long noent_race;
 	unsigned long exist_race;
+	unsigned long remove_race;
 } swap_cache_info;
+EXPORT_SYMBOL(swap_cache_info);
 
 void show_swap_cache_info(void)
 {
-	printk("Swap cache: add %lu, delete %lu, find %lu/%lu, race %lu+%lu\n",
+	printk("Swap cache: add %lu, delete %lu, find %lu/%lu, "
+		"race %lu+%lu+%lu\n",
 		swap_cache_info.add_total, swap_cache_info.del_total,
 		swap_cache_info.find_success, swap_cache_info.find_total,
-		swap_cache_info.noent_race, swap_cache_info.exist_race);
+		swap_cache_info.noent_race, swap_cache_info.exist_race,
+		swap_cache_info.remove_race);
 	printk("Free swap  = %lukB\n", nr_swap_pages << (PAGE_SHIFT - 10));
 	printk("Total swap = %lukB\n", total_swap_pages << (PAGE_SHIFT - 10));
 }
@@ -69,8 +77,7 @@ void show_swap_cache_info(void)
  * __add_to_swap_cache resembles add_to_page_cache on swapper_space,
  * but sets SwapCache flag and private instead of mapping and index.
  */
-static int __add_to_swap_cache(struct page *page, swp_entry_t entry,
-			       gfp_t gfp_mask)
+int __add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
 {
 	int error;
 
@@ -95,7 +102,9 @@ static int __add_to_swap_cache(struct page *page, swp_entry_t entry,
 	return error;
 }
 
-static int add_to_swap_cache(struct page *page, swp_entry_t entry)
+EXPORT_SYMBOL(__add_to_swap_cache);
+
+int add_to_swap_cache(struct page *page, swp_entry_t entry)
 {
 	int error;
 
@@ -116,6 +125,8 @@ static int add_to_swap_cache(struct page *page, swp_entry_t entry)
 	INC_CACHE_INFO(add_total);
 	return 0;
 }
+
+EXPORT_SYMBOL(add_to_swap_cache);
 
 /*
  * This must be called only on pages that have
@@ -151,7 +162,14 @@ int add_to_swap(struct page * page, gfp_t gfp_mask)
 	BUG_ON(!PageLocked(page));
 
 	for (;;) {
-		entry = get_swap_page();
+		struct user_beancounter *ub;
+
+		ub = pb_grab_page_ub(page);
+		if (IS_ERR(ub))
+			return 0;
+
+		entry = get_swap_page(ub);
+		put_beancounter(ub);
 		if (!entry.val)
 			return 0;
 
@@ -237,6 +255,7 @@ int move_from_swap_cache(struct page *page, unsigned long index,
 		delete_from_swap_cache(page);
 		/* shift page from clean_pages to dirty_pages list */
 		ClearPageDirty(page);
+		ub_io_release_debug(page);
 		set_page_dirty(page);
 	}
 	return err;
@@ -252,10 +271,13 @@ int move_from_swap_cache(struct page *page, unsigned long index,
  */
 static inline void free_swap_cache(struct page *page)
 {
-	if (PageSwapCache(page) && !TestSetPageLocked(page)) {
+	if (!PageSwapCache(page))
+		return;
+	if (!TestSetPageLocked(page)) {
 		remove_exclusive_swap_page(page);
 		unlock_page(page);
-	}
+	} else
+		INC_CACHE_INFO(remove_race);
 }
 
 /* 
@@ -364,3 +386,5 @@ struct page *read_swap_cache_async(swp_entry_t entry,
 		page_cache_release(new_page);
 	return found_page;
 }
+
+EXPORT_SYMBOL(read_swap_cache_async);

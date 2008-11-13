@@ -117,6 +117,9 @@
 #include <net/checksum.h>
 #include <linux/security.h>
 
+#include <ub/ub_net.h>
+#include <ub/beancounter.h>
+
 int sysctl_unix_max_dgram_qlen = 10;
 
 struct hlist_head unix_socket_table[UNIX_HASH_SIZE + 1];
@@ -252,6 +255,8 @@ static struct sock *__unix_find_socket_byname(struct sockaddr_un *sunname,
 	sk_for_each(s, node, &unix_socket_table[hash ^ type]) {
 		struct unix_sock *u = unix_sk(s);
 
+		if (!ve_accessible(s->owner_env, get_exec_env()))
+			continue;
 		if (u->addr->len == len &&
 		    !memcmp(u->addr->name, sunname, len))
 			goto found;
@@ -456,7 +461,7 @@ static int unix_listen(struct socket *sock, int backlog)
 	sk->sk_max_ack_backlog	= backlog;
 	sk->sk_state		= TCP_LISTEN;
 	/* set credentials so connect can copy them */
-	sk->sk_peercred.pid	= current->tgid;
+	sk->sk_peercred.pid	= virt_tgid(current);
 	sk->sk_peercred.uid	= current->euid;
 	sk->sk_peercred.gid	= current->egid;
 	err = 0;
@@ -578,6 +583,8 @@ static struct sock * unix_create1(struct socket *sock)
 	sk = sk_alloc(PF_UNIX, GFP_KERNEL, &unix_proto, 1);
 	if (!sk)
 		goto out;
+	if (ub_other_sock_charge(sk))
+		goto out_sk_free;
 
 	atomic_inc(&unix_nr_socks);
 
@@ -598,6 +605,9 @@ static struct sock * unix_create1(struct socket *sock)
 	unix_insert_socket(unix_sockets_unbound, sk);
 out:
 	return sk;
+out_sk_free:
+	sk_free(sk);
+	return NULL;
 }
 
 static int unix_create(struct socket *sock, int protocol)
@@ -958,6 +968,7 @@ static int unix_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	int st;
 	int err;
 	long timeo;
+	unsigned long chargesize;
 
 	err = unix_mkname(sunaddr, addr_len, &hash);
 	if (err < 0)
@@ -986,6 +997,10 @@ static int unix_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	skb = sock_wmalloc(newsk, 1, 0, GFP_KERNEL);
 	if (skb == NULL)
 		goto out;
+	chargesize = skb_charge_fullsize(skb);
+	if (ub_sock_getwres_other(newsk, chargesize) < 0)
+		goto out;	
+	ub_skb_set_charge(skb, newsk, chargesize, UB_OTHERSOCKBUF);
 
 restart:
 	/*  Find listening sock. */
@@ -1069,7 +1084,7 @@ restart:
 	unix_peer(newsk)	= sk;
 	newsk->sk_state		= TCP_ESTABLISHED;
 	newsk->sk_type		= sk->sk_type;
-	newsk->sk_peercred.pid	= current->tgid;
+	newsk->sk_peercred.pid	= virt_tgid(current);
 	newsk->sk_peercred.uid	= current->euid;
 	newsk->sk_peercred.gid	= current->egid;
 	newu = unix_sk(newsk);
@@ -1133,7 +1148,7 @@ static int unix_socketpair(struct socket *socka, struct socket *sockb)
 	sock_hold(skb);
 	unix_peer(ska)=skb;
 	unix_peer(skb)=ska;
-	ska->sk_peercred.pid = skb->sk_peercred.pid = current->tgid;
+	ska->sk_peercred.pid = skb->sk_peercred.pid = virt_tgid(current);
 	ska->sk_peercred.uid = skb->sk_peercred.uid = current->euid;
 	ska->sk_peercred.gid = skb->sk_peercred.gid = current->egid;
 
@@ -1237,7 +1252,7 @@ static void unix_detach_fds(struct scm_cookie *scm, struct sk_buff *skb)
 		unix_notinflight(scm->fp->fp[i]);
 }
 
-static void unix_destruct_fds(struct sk_buff *skb)
+void unix_destruct_fds(struct sk_buff *skb)
 {
 	struct scm_cookie scm;
 	memset(&scm, 0, sizeof(scm));
@@ -1248,6 +1263,7 @@ static void unix_destruct_fds(struct sk_buff *skb)
 	scm_destroy(&scm);
 	sock_wfree(skb);
 }
+EXPORT_SYMBOL_GPL(unix_destruct_fds);
 
 static void unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
 {
@@ -1460,6 +1476,16 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 
 		size = len-sent;
 
+		if (msg->msg_flags & MSG_DONTWAIT)
+			ub_sock_makewres_other(sk, skb_charge_size(size));
+		if (sock_bc(sk) != NULL && 
+				sock_bc(sk)->poll_reserv >= 
+					SOCK_MIN_UBCSPACE &&
+				skb_charge_size(size) >
+					sock_bc(sk)->poll_reserv)
+			size = skb_charge_datalen(sock_bc(sk)->poll_reserv);
+				
+
 		/* Keep two messages in the pipe so it schedules better */
 		if (size > ((sk->sk_sndbuf >> 1) - 64))
 			size = (sk->sk_sndbuf >> 1) - 64;
@@ -1471,7 +1497,8 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 		 *	Grab a buffer
 		 */
 		 
-		skb=sock_alloc_send_skb(sk,size,msg->msg_flags&MSG_DONTWAIT, &err);
+		skb = sock_alloc_send_skb2(sk, size, SOCK_MIN_UBCSPACE,
+				msg->msg_flags&MSG_DONTWAIT, &err);
 
 		if (skb==NULL)
 			goto out_err;
@@ -1897,6 +1924,7 @@ static unsigned int unix_poll(struct file * file, struct socket *sock, poll_tabl
 {
 	struct sock *sk = sock->sk;
 	unsigned int mask;
+	int no_ub_res;
 
 	poll_wait(file, sk->sk_sleep, wait);
 	mask = 0;
@@ -1908,6 +1936,10 @@ static unsigned int unix_poll(struct file * file, struct socket *sock, poll_tabl
 		mask |= POLLHUP;
 	if (sk->sk_shutdown & RCV_SHUTDOWN)
 		mask |= POLLRDHUP;
+
+	no_ub_res = ub_sock_makewres_other(sk, SOCK_MIN_UBCSPACE_CH);
+	if (no_ub_res)
+		ub_sock_sndqueueadd_other(sk, SOCK_MIN_UBCSPACE_CH);
 
 	/* readable? */
 	if (!skb_queue_empty(&sk->sk_receive_queue) ||
@@ -1922,7 +1954,7 @@ static unsigned int unix_poll(struct file * file, struct socket *sock, poll_tabl
 	 * we set writable also when the other side has shut down the
 	 * connection. This prevents stuck sockets.
 	 */
-	if (unix_writable(sk))
+	if (!no_ub_res && unix_writable(sk))
 		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
 
 	return mask;
@@ -2074,7 +2106,7 @@ static int __init af_unix_init(void)
 
 	sock_register(&unix_family_ops);
 #ifdef CONFIG_PROC_FS
-	proc_net_fops_create("unix", 0, &unix_seq_fops);
+	proc_glob_fops_create("net/unix", 0, &unix_seq_fops);
 #endif
 	unix_sysctl_register();
 out:
@@ -2085,7 +2117,7 @@ static void __exit af_unix_exit(void)
 {
 	sock_unregister(PF_UNIX);
 	unix_sysctl_unregister();
-	proc_net_remove("unix");
+	remove_proc_glob_entry("net/unix", NULL);
 	proto_unregister(&unix_proto);
 }
 

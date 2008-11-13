@@ -72,7 +72,7 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		 * the relevant capability.
 		 */
 		if ((jflag ^ oldflags) & (EXT3_JOURNAL_DATA_FL)) {
-			if (!capable(CAP_SYS_RESOURCE)) {
+			if (!capable(CAP_SYS_ADMIN)) {
 				mutex_unlock(&inode->i_mutex);
 				return -EPERM;
 			}

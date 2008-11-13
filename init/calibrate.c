@@ -7,6 +7,7 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/module.h>
 
 #include <asm/timex.h>
 
@@ -105,6 +106,60 @@ static unsigned long __devinit calibrate_delay_direct(void)
 static unsigned long __devinit calibrate_delay_direct(void) {return 0;}
 #endif
 
+unsigned long cycles_per_jiffy, cycles_per_clock;
+
+static __devinit void calibrate_cycles(void)
+{
+	unsigned long ticks;
+	cycles_t time;
+
+	ticks = jiffies;
+	while (ticks == jiffies)
+		/* nothing */;
+	time = get_cycles();
+	ticks = jiffies;
+	while (ticks == jiffies)
+		/* nothing */;
+
+	time = get_cycles() - time;
+	cycles_per_jiffy = time;
+	if ((time >> 32) != 0) {
+		printk("CPU too fast! timings are incorrect\n");
+		cycles_per_jiffy = -1;
+	}
+}
+
+EXPORT_SYMBOL(cycles_per_jiffy);
+EXPORT_SYMBOL(cycles_per_clock);
+
+static __devinit void calc_cycles_per_jiffy(void)
+{
+#if 0
+	extern unsigned long fast_gettimeoffset_quotient;
+	unsigned long low, high;
+
+	if (fast_gettimeoffset_quotient != 0) {
+		__asm__("divl %2"
+				:"=a" (low), "=d" (high)
+				:"r" (fast_gettimeoffset_quotient),
+				"0" (0), "1" (1000000/HZ));
+
+		cycles_per_jiffy = low;
+	}
+#endif
+	if (cycles_per_jiffy == 0)
+		calibrate_cycles();
+
+	if (cycles_per_jiffy == 0) {
+		printk(KERN_WARNING "Cycles are stuck! "
+				"Some statistics will not be available.");
+		/* to prevent division by zero in cycles_to_(clocks|jiffies) */
+		cycles_per_jiffy = 1;
+		cycles_per_clock = 1;
+	} else
+		cycles_per_clock = cycles_per_jiffy * (HZ / CLOCKS_PER_SEC);
+}
+
 /*
  * This is the number of bits of precision for the loops_per_jiffy.  Each
  * bit takes on average 1.5/HZ seconds.  This (like the original) is a little
@@ -170,4 +225,5 @@ void __devinit calibrate_delay(void)
 			loops_per_jiffy);
 	}
 
+	calc_cycles_per_jiffy();
 }

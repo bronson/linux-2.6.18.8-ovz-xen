@@ -49,6 +49,8 @@
 #include <asm/firmware.h>
 #endif
 
+#include <linux/utsrelease.h>
+
 extern unsigned long _get_SP(void);
 
 #ifndef CONFIG_SMP
@@ -423,8 +425,9 @@ void show_regs(struct pt_regs * regs)
 
 	printk("NIP: "REG" LR: "REG" CTR: "REG"\n",
 	       regs->nip, regs->link, regs->ctr);
-	printk("REGS: %p TRAP: %04lx   %s  (%s)\n",
-	       regs, regs->trap, print_tainted(), system_utsname.release);
+	printk("REGS: %p TRAP: %04lx   %s  (%s %s)\n",
+	       regs, regs->trap, print_tainted(), init_utsname()->release,
+	       VZVERSION);
 	printk("MSR: "REG" ", regs->msr);
 	printbits(regs->msr, msr_bits);
 	printk("  CR: %08lX  XER: %08lX\n", regs->ccr, regs->xer);
@@ -435,7 +438,7 @@ void show_regs(struct pt_regs * regs)
 	       current, current->pid, current->comm, task_thread_info(current));
 
 #ifdef CONFIG_SMP
-	printk(" CPU: %d", smp_processor_id());
+	printk(" CPU: %d, VCPU: %d:%d", smp_processor_id(), task_vsched_id(current), task_cpu(current));
 #endif /* CONFIG_SMP */
 
 	for (i = 0;  i < 32;  i++) {
@@ -834,12 +837,12 @@ int validate_sp(unsigned long sp, struct task_struct *p,
 		return 1;
 
 #ifdef CONFIG_IRQSTACKS
-	stack_page = (unsigned long) hardirq_ctx[task_cpu(p)];
+	stack_page = (unsigned long) hardirq_ctx[task_pcpu(p)];
 	if (sp >= stack_page + sizeof(struct thread_struct)
 	    && sp <= stack_page + THREAD_SIZE - nbytes)
 		return 1;
 
-	stack_page = (unsigned long) softirq_ctx[task_cpu(p)];
+	stack_page = (unsigned long) softirq_ctx[task_pcpu(p)];
 	if (sp >= stack_page + sizeof(struct thread_struct)
 	    && sp <= stack_page + THREAD_SIZE - nbytes)
 		return 1;
@@ -949,6 +952,20 @@ void dump_stack(void)
 	show_stack(current, NULL);
 }
 EXPORT_SYMBOL(dump_stack);
+
+long kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
+{
+	extern long ppc_kernel_thread(int (*fn)(void *), void *arg,
+			unsigned long flags);
+
+	if (!ve_is_super(get_exec_env())) {
+		printk("kernel_thread call inside container\n");
+		dump_stack();
+		return -EPERM;
+	}
+
+	return ppc_kernel_thread(fn, arg, flags);
+}
 
 #ifdef CONFIG_PPC64
 void ppc64_runlatch_on(void)

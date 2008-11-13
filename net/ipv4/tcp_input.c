@@ -72,6 +72,8 @@
 #include <asm/unaligned.h>
 #include <net/netdma.h>
 
+#include <ub/ub_tcp.h>
+
 int sysctl_tcp_timestamps = 1;
 int sysctl_tcp_window_scaling = 1;
 int sysctl_tcp_sack = 1;
@@ -252,7 +254,7 @@ static void tcp_grow_window(struct sock *sk, struct tcp_sock *tp,
 	/* Check #1 */
 	if (tp->rcv_ssthresh < tp->window_clamp &&
 	    (int)tp->rcv_ssthresh < tcp_space(sk) &&
-	    !tcp_memory_pressure) {
+	    ub_tcp_rmem_allows_expand(sk)) {
 		int incr;
 
 		/* Check #2. Increase window, if skb with such overhead
@@ -321,6 +323,8 @@ static void tcp_init_buffer_space(struct sock *sk)
 
 	tp->rcv_ssthresh = min(tp->rcv_ssthresh, tp->window_clamp);
 	tp->snd_cwnd_stamp = tcp_time_stamp;
+
+	ub_tcp_update_maxadvmss(sk);
 }
 
 /* 5. Recalculate window clamp after socket hit its memory bounds. */
@@ -332,7 +336,7 @@ static void tcp_clamp_window(struct sock *sk, struct tcp_sock *tp)
 
 	if (sk->sk_rcvbuf < sysctl_tcp_rmem[2] &&
 	    !(sk->sk_userlocks & SOCK_RCVBUF_LOCK) &&
-	    !tcp_memory_pressure &&
+	    !ub_tcp_memory_pressure(sk) &&
 	    atomic_read(&tcp_memory_allocated) < sysctl_tcp_mem[0]) {
 		sk->sk_rcvbuf = min(atomic_read(&sk->sk_rmem_alloc),
 				    sysctl_tcp_rmem[2]);
@@ -2237,13 +2241,12 @@ static int tcp_tso_acked(struct sock *sk, struct sk_buff *skb,
 	return acked;
 }
 
-static u32 tcp_usrtt(const struct sk_buff *skb)
+static u32 tcp_usrtt(struct timeval *tv)
 {
-	struct timeval tv, now;
+	struct timeval now;
 
 	do_gettimeofday(&now);
-	skb_get_timestamp(skb, &tv);
-	return (now.tv_sec - tv.tv_sec) * 1000000 + (now.tv_usec - tv.tv_usec);
+	return (now.tv_sec - tv->tv_sec) * 1000000 + (now.tv_usec - tv->tv_usec);
 }
 
 /* Remove acknowledged frames from the retransmission queue. */
@@ -2258,6 +2261,7 @@ static int tcp_clean_rtx_queue(struct sock *sk, __s32 *seq_rtt_p)
 	u32 pkts_acked = 0;
 	void (*rtt_sample)(struct sock *sk, u32 usrtt)
 		= icsk->icsk_ca_ops->rtt_sample;
+	struct timeval tv;
 
 	while ((skb = skb_peek(&sk->sk_write_queue)) &&
 	       skb != sk->sk_send_head) {
@@ -2306,8 +2310,7 @@ static int tcp_clean_rtx_queue(struct sock *sk, __s32 *seq_rtt_p)
 				seq_rtt = -1;
 			} else if (seq_rtt < 0) {
 				seq_rtt = now - scb->when;
-				if (rtt_sample)
-					(*rtt_sample)(sk, tcp_usrtt(skb));
+				skb_get_timestamp(skb, &tv);
 			}
 			if (sacked & TCPCB_SACKED_ACKED)
 				tp->sacked_out -= tcp_skb_pcount(skb);
@@ -2320,8 +2323,7 @@ static int tcp_clean_rtx_queue(struct sock *sk, __s32 *seq_rtt_p)
 			}
 		} else if (seq_rtt < 0) {
 			seq_rtt = now - scb->when;
-			if (rtt_sample)
-				(*rtt_sample)(sk, tcp_usrtt(skb));
+			skb_get_timestamp(skb, &tv);
 		}
 		tcp_dec_pcount_approx(&tp->fackets_out, skb);
 		tcp_packets_out_dec(tp, skb);
@@ -2333,6 +2335,8 @@ static int tcp_clean_rtx_queue(struct sock *sk, __s32 *seq_rtt_p)
 	if (acked&FLAG_ACKED) {
 		tcp_ack_update_rtt(sk, acked, seq_rtt);
 		tcp_ack_packets_out(sk, tp);
+		if (rtt_sample && !(acked & FLAG_RETRANS_DATA_ACKED))
+			(*rtt_sample)(sk, tcp_usrtt(&tv));
 
 		if (icsk->icsk_ca_ops->pkts_acked)
 			icsk->icsk_ca_ops->pkts_acked(sk, pkts_acked);
@@ -3123,7 +3127,27 @@ static void tcp_ofo_queue(struct sock *sk)
 	}
 }
 
+static int tcp_prune_ofo_queue(struct sock *sk);
 static int tcp_prune_queue(struct sock *sk);
+
+static inline int tcp_try_rmem_schedule(struct sock *sk, struct sk_buff *skb)
+{
+	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
+	    !sk_stream_rmem_schedule(sk, skb)) {
+
+		if (tcp_prune_queue(sk) < 0)
+			return -1;
+
+		if (!sk_stream_rmem_schedule(sk, skb)) {
+			if (!tcp_prune_ofo_queue(sk))
+				return -1;
+
+			if (!sk_stream_rmem_schedule(sk, skb))
+				return -1;
+		}
+	}
+	return 0;
+}
 
 static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 {
@@ -3174,12 +3198,8 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 		if (eaten <= 0) {
 queue_and_out:
 			if (eaten < 0 &&
-			    (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
-			     !sk_stream_rmem_schedule(sk, skb))) {
-				if (tcp_prune_queue(sk) < 0 ||
-				    !sk_stream_rmem_schedule(sk, skb))
-					goto drop;
-			}
+			    tcp_try_rmem_schedule(sk, skb))
+				goto drop_part;
 			sk_stream_set_owner_r(skb, sk);
 			__skb_queue_tail(&sk->sk_receive_queue, skb);
 		}
@@ -3222,6 +3242,12 @@ out_of_window:
 drop:
 		__kfree_skb(skb);
 		return;
+
+drop_part:
+		if (after(tp->copied_seq, tp->rcv_nxt))
+			tp->rcv_nxt = tp->copied_seq;
+		__kfree_skb(skb);
+		return;
 	}
 
 	/* Out of window. F.e. zero window probe. */
@@ -3248,12 +3274,8 @@ drop:
 
 	TCP_ECN_check_ce(tp, skb);
 
-	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
-	    !sk_stream_rmem_schedule(sk, skb)) {
-		if (tcp_prune_queue(sk) < 0 ||
-		    !sk_stream_rmem_schedule(sk, skb))
-			goto drop;
-	}
+	if (tcp_try_rmem_schedule(sk, skb))
+		goto drop;
 
 	/* Disable header prediction. */
 	tp->pred_flags = 0;
@@ -3393,6 +3415,10 @@ tcp_collapse(struct sock *sk, struct sk_buff_head *list,
 		nskb = alloc_skb(copy+header, GFP_ATOMIC);
 		if (!nskb)
 			return;
+		if (ub_tcprcvbuf_charge_forced(skb->sk, nskb) < 0) {
+			kfree_skb(nskb);
+			return;
+		}
 		skb_reserve(nskb, header);
 		memcpy(nskb->head, skb->head, header);
 		nskb->nh.raw = nskb->head + (skb->nh.raw-skb->head);
@@ -3472,6 +3498,32 @@ static void tcp_collapse_ofo_queue(struct sock *sk)
 	}
 }
 
+/*
+ * Purge the out-of-order queue.
+ * Return true if queue was pruned.
+ */
+static int tcp_prune_ofo_queue(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int res = 0;
+
+	if (!skb_queue_empty(&tp->out_of_order_queue)) {
+		NET_INC_STATS_BH(LINUX_MIB_OFOPRUNED);
+		__skb_queue_purge(&tp->out_of_order_queue);
+
+		/* Reset SACK state.  A conforming SACK implementation will
+		 * do the same at a timeout based retransmit.  When a connection
+		 * is in a sad state like this, we care only about integrity
+		 * of the connection not performance.
+		 */
+		if (tp->rx_opt.sack_ok)
+			tcp_sack_reset(&tp->rx_opt);
+		sk_stream_mem_reclaim(sk);
+		res = 1;
+	}
+	return res;
+}
+
 /* Reduce allocated memory if we can, trying to get
  * the socket within its memory limits again.
  *
@@ -3489,7 +3541,7 @@ static int tcp_prune_queue(struct sock *sk)
 
 	if (atomic_read(&sk->sk_rmem_alloc) >= sk->sk_rcvbuf)
 		tcp_clamp_window(sk, tp);
-	else if (tcp_memory_pressure)
+	else if (ub_tcp_memory_pressure(sk))
 		tp->rcv_ssthresh = min(tp->rcv_ssthresh, 4U * tp->advmss);
 
 	tcp_collapse_ofo_queue(sk);
@@ -3505,20 +3557,7 @@ static int tcp_prune_queue(struct sock *sk)
 	/* Collapsing did not help, destructive actions follow.
 	 * This must not ever occur. */
 
-	/* First, purge the out_of_order queue. */
-	if (!skb_queue_empty(&tp->out_of_order_queue)) {
-		NET_INC_STATS_BH(LINUX_MIB_OFOPRUNED);
-		__skb_queue_purge(&tp->out_of_order_queue);
-
-		/* Reset SACK state.  A conforming SACK implementation will
-		 * do the same at a timeout based retransmit.  When a connection
-		 * is in a sad state like this, we care only about integrity
-		 * of the connection not performance.
-		 */
-		if (tp->rx_opt.sack_ok)
-			tcp_sack_reset(&tp->rx_opt);
-		sk_stream_mem_reclaim(sk);
-	}
+	tcp_prune_ofo_queue(sk);
 
 	if (atomic_read(&sk->sk_rmem_alloc) <= sk->sk_rcvbuf)
 		return 0;
@@ -3566,7 +3605,7 @@ static int tcp_should_expand_sndbuf(struct sock *sk, struct tcp_sock *tp)
 		return 0;
 
 	/* If we are under global TCP memory pressure, do not expand.  */
-	if (tcp_memory_pressure)
+	if (ub_tcp_memory_pressure(sk))
 		return 0;
 
 	/* If we are under soft global TCP memory pressure, do not expand.  */
@@ -4011,6 +4050,10 @@ int tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 
 				if ((int)skb->truesize > sk->sk_forward_alloc)
 					goto step5;
+				/* This is OK not to try to free memory here.
+				 * Do this below on slow path. Den */
+				if (ub_tcprcvbuf_charge(sk, skb) < 0)
+					goto step5;
 
 				NET_INC_STATS_BH(LINUX_MIB_TCPHPHITS);
 
@@ -4408,9 +4451,11 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 			 * But, this leaves one open to an easy denial of
 		 	 * service attack, and SYN cookies can't defend
 			 * against this problem. So, we drop the data
-			 * in the interest of security over speed.
+			 * in the interest of security over speed unless
+			 * it's still in use.
 			 */
-			goto discard;
+			kfree_skb(skb);
+			return 0;
 		}
 		goto discard;
 

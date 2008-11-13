@@ -37,6 +37,7 @@
 #include <linux/device.h>
 #include <linux/percpu.h>
 #include <linux/dmaengine.h>
+#include <linux/ctype.h>
 
 struct divert_blk;
 struct vlan_group;
@@ -235,6 +236,11 @@ enum netdev_state_t
 	__LINK_STATE_QDISC_RUNNING,
 };
 
+struct netdev_bc {
+	struct user_beancounter *exec_ub, *owner_ub;
+};
+
+#define netdev_bc(dev)		(&(dev)->dev_bc)
 
 /*
  * This structure holds at boot time configured netdevice settings. They
@@ -319,6 +325,10 @@ struct net_device
 #define NETIF_F_GSO_ROBUST	(SKB_GSO_DODGY << NETIF_F_GSO_SHIFT)
 #define NETIF_F_TSO_ECN		(SKB_GSO_TCP_ECN << NETIF_F_GSO_SHIFT)
 #define NETIF_F_TSO6		(SKB_GSO_TCPV6 << NETIF_F_GSO_SHIFT)
+/* device is venet device */
+#define NETIF_F_VENET		(1 << (NETIF_F_GSO_SHIFT - 1))
+/* can be registered inside VE */
+#define NETIF_F_VIRTUAL		(1 << (NETIF_F_GSO_SHIFT - 2))
 
 	/* List of features with software fallbacks. */
 #define NETIF_F_GSO_SOFTWARE	(NETIF_F_TSO | NETIF_F_TSO_ECN | NETIF_F_TSO6)
@@ -402,6 +412,7 @@ struct net_device
 							because most packets are unicast) */
 
 	unsigned char		broadcast[MAX_ADDR_LEN];	/* hw bcast add	*/
+	unsigned char		is_leaked;
 
 /*
  * Cache line mostly used on queue transmit path (qdisc)
@@ -521,10 +532,19 @@ struct net_device
 	struct divert_blk	*divert;
 #endif /* CONFIG_NET_DIVERT */
 
+	struct ve_struct	*owner_env; /* Owner VE of the interface */
+	struct netdev_bc	dev_bc;
+
 	/* class/net/name entry */
 	struct class_device	class_dev;
 	/* space for optional statistics and wireless sysfs groups */
 	struct attribute_group  *sysfs_groups[3];
+
+#ifdef CONFIG_VE
+	/* List entry in global devices list to keep track of their names
+	 * assignment */
+	struct list_head	dev_global_list_entry;
+#endif
 };
 
 #define	NETDEV_ALIGN		32
@@ -560,9 +580,24 @@ struct packet_type {
 #include <linux/interrupt.h>
 #include <linux/notifier.h>
 
+extern struct net_device		templ_loopback_dev;
 extern struct net_device		loopback_dev;		/* The loopback */
+#if defined(CONFIG_VE) && defined(CONFIG_NET)
+#define loopback_dev	(*get_exec_env()->_loopback_dev)
+#define ve0_loopback	(*get_ve0()->_loopback_dev)
+#define dev_base	(get_exec_env()->_net_dev_base)
+#define visible_dev_head(x)	(&(x)->_net_dev_head)
+#define visible_dev_index_head(x) (&(x)->_net_dev_index_head)
+#else
 extern struct net_device		*dev_base;		/* All devices */
+#define ve0_loopback	loopback_dev
+#define visible_dev_head(x)	NULL
+#define visible_dev_index_head(x) NULL
+#endif
 extern rwlock_t				dev_base_lock;		/* Device list lock */
+
+struct hlist_head *dev_name_hash(const char *name, struct ve_struct *env);
+struct hlist_head *dev_index_hash(int ifindex, struct ve_struct *env);
 
 extern int 			netdev_boot_setup_check(struct net_device *dev);
 extern unsigned long		netdev_boot_base(const char *prefix, int unit);
@@ -997,6 +1032,18 @@ extern void dev_seq_stop(struct seq_file *seq, void *v);
 
 extern void linkwatch_run_queue(void);
 
+#if defined(CONFIG_VE) && defined(CONFIG_NET)
+static inline int ve_is_dev_movable(struct net_device *dev)
+{
+	return !(dev->features & NETIF_F_VIRTUAL);
+}
+#else
+static inline int ve_is_dev_movable(struct net_device *dev)
+{
+	return 0;
+}
+#endif
+
 static inline int net_gso_ok(int features, int gso_type)
 {
 	int feature = gso_type << NETIF_F_GSO_SHIFT;
@@ -1038,6 +1085,16 @@ static inline int skb_bond_should_drop(struct sk_buff *skb)
 	}
 	return 0;
 }
+
+#ifdef CONFIG_SYSFS
+extern int netdev_sysfs_init(void);
+extern int netdev_register_sysfs(struct net_device *);
+extern void netdev_unregister_sysfs(struct net_device *);
+#else
+#define netdev_sysfs_init()	 	(0)
+#define netdev_register_sysfs(dev)	(0)
+#define	netdev_unregister_sysfs(dev)	do { } while(0)
+#endif
 
 #endif /* __KERNEL__ */
 

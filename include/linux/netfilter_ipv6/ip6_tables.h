@@ -293,7 +293,7 @@ extern void ip6t_init(void) __init;
 	xt_register_match(match); })
 #define ip6t_unregister_match(match) xt_unregister_match(match)
 
-extern int ip6t_register_table(struct ip6t_table *table,
+extern struct ip6t_table *ip6t_register_table(struct ip6t_table *table,
 			       const struct ip6t_replace *repl);
 extern void ip6t_unregister_table(struct ip6t_table *table);
 extern unsigned int ip6t_do_table(struct sk_buff **pskb,

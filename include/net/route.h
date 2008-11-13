@@ -137,6 +137,7 @@ static inline void ip_rt_put(struct rtable * rt)
 #define IPTOS_RT_MASK	(IPTOS_TOS_MASK & ~3)
 
 extern __u8 ip_tos2prio[16];
+extern int ip_rt_src_check;
 
 static inline char rt_tos2priority(u8 tos)
 {
@@ -200,4 +201,14 @@ static inline struct inet_peer *rt_get_peer(struct rtable *rt)
 
 extern ctl_table ipv4_route_table[];
 
+#ifdef CONFIG_SYSCTL
+extern int ipv4_flush_delay;
+extern int ipv4_sysctl_rtcache_flush(ctl_table *ctl, int write,
+		struct file *filp, void __user *buffer,	size_t *lenp,
+		loff_t *ppos);
+extern int ipv4_sysctl_rtcache_flush_strategy(ctl_table *table,
+		int __user *name, int nlen, void __user *oldval,
+		size_t __user *oldlenp,	void __user *newval,
+		size_t newlen, void **context);
+#endif
 #endif	/* _ROUTE_H */

@@ -275,6 +275,7 @@ struct xt_table_info
 {
 	/* Size per table */
 	unsigned int size;
+	unsigned int alloc_size;
 	/* Number of entries: FIXME. --RR */
 	unsigned int number;
 	/* Initial number of entries. Needed for module usage count */
@@ -304,6 +305,10 @@ extern int xt_register_table(struct xt_table *table,
 			     struct xt_table_info *bootstrap,
 			     struct xt_table_info *newinfo);
 extern void *xt_unregister_table(struct xt_table *table);
+extern struct xt_table *virt_xt_register_table(struct xt_table *table,
+			     struct xt_table_info *bootstrap,
+			     struct xt_table_info *newinfo);
+extern void *virt_xt_unregister_table(struct xt_table *table);
 
 extern struct xt_table_info *xt_replace_table(struct xt_table *table,
 					      unsigned int num_counters,

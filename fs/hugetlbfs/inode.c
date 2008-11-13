@@ -747,7 +747,7 @@ struct file *hugetlb_zero_setup(size_t size)
 	struct inode *inode;
 	struct dentry *dentry, *root;
 	struct qstr quick_string;
-	char buf[16];
+	char buf[64];
 	static atomic_t counter;
 
 	if (!can_do_hugetlb_shm())
@@ -757,7 +757,8 @@ struct file *hugetlb_zero_setup(size_t size)
 		return ERR_PTR(-ENOMEM);
 
 	root = hugetlbfs_vfsmount->mnt_root;
-	snprintf(buf, 16, "%u", atomic_inc_return(&counter));
+	snprintf(buf, 16, "VE%d-%u", VEID(get_exec_env()),
+			atomic_inc_return(&counter));
 	quick_string.name = buf;
 	quick_string.len = strlen(quick_string.name);
 	quick_string.hash = 0;

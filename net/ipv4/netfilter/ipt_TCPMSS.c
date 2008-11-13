@@ -224,13 +224,14 @@ ipt_tcpmss_checkentry(const char *tablename,
 			((hook_mask & ~((1 << NF_IP_FORWARD)
 			   	| (1 << NF_IP_LOCAL_OUT)
 			   	| (1 << NF_IP_POST_ROUTING))) != 0)) {
-		printk("TCPMSS: path-MTU clamping only supported in FORWARD, OUTPUT and POSTROUTING hooks\n");
+		ve_printk(VE_LOG, "TCPMSS: path-MTU clamping only supported in"
+				" FORWARD, OUTPUT and POSTROUTING hooks\n");
 		return 0;
 	}
 
 	if (IPT_MATCH_ITERATE(e, find_syn_match))
 		return 1;
-	printk("TCPMSS: Only works on TCP SYN packets\n");
+	ve_printk(VE_LOG, "TCPMSS: Only works on TCP SYN packets\n");
 	return 0;
 }
 

@@ -4,6 +4,7 @@
 #include <asm/semaphore.h>
 #include <linux/seq_file.h>
 #include <linux/cpufreq.h>
+#include <linux/vsched.h>
 
 /*
  *	Get CPU information for use by the procfs.
@@ -77,7 +78,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	int fpu_exception;
 
 #ifdef CONFIG_SMP
-	if (!cpu_online(n))
+	if (!vcpu_online(n))
 		return 0;
 #endif
 	seq_printf(m, "processor\t: %d\n"
@@ -97,9 +98,13 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		seq_printf(m, "stepping\t: unknown\n");
 
 	if ( cpu_has(c, X86_FEATURE_TSC) ) {
+#ifndef CONFIG_FAIRSCHED
 		unsigned int freq = cpufreq_quick_get(n);
 		if (!freq)
 			freq = cpu_khz;
+#else
+		unsigned int freq = ve_scale_khz(cpu_khz);
+#endif
 		seq_printf(m, "cpu MHz\t\t: %u.%03u\n",
 			freq / 1000, (freq % 1000));
 	}

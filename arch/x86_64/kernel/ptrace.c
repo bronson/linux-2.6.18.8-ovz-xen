@@ -223,10 +223,6 @@ static int putreg(struct task_struct *child,
 {
 	unsigned long tmp; 
 	
-	/* Some code in the 64bit emulation may not be 64bit clean.
-	   Don't take any chances. */
-	if (test_tsk_thread_flag(child, TIF_IA32))
-		value &= 0xffffffff;
 	switch (regno) {
 		case offsetof(struct user_regs_struct,fs):
 			if (value && (value & 3) != 3)
@@ -295,6 +291,15 @@ static unsigned long getreg(struct task_struct *child, unsigned long regno)
 			return child->thread.fs;
 		case offsetof(struct user_regs_struct, gs_base):
 			return child->thread.gs;
+		case offsetof(struct user_regs_struct, cs):
+			if (test_tsk_thread_flag(child, TIF_SYSCALL_TRACE)) {
+				val = get_stack_long(child, regno - sizeof(struct pt_regs));
+				if (val == __USER_CS)
+					return 0x33;
+				if (val == __USER32_CS)
+					return 0x23;
+			}
+			/* fall through */
 		default:
 			regno = regno - sizeof(struct pt_regs);
 			val = get_stack_long(child, regno);
@@ -576,8 +581,10 @@ static void syscall_trace(struct pt_regs *regs)
 	       current_thread_info()->flags, current->ptrace); 
 #endif
 
+	set_pn_state(current, (regs->rax != -ENOSYS) ? PN_STOP_LEAVE : PN_STOP_ENTRY);
 	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
 				? 0x80 : 0));
+	clear_pn_state(current);
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the

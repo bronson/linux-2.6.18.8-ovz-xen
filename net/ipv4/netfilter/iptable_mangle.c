@@ -16,6 +16,7 @@
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <net/route.h>
+#include <linux/nfcalls.h>
 #include <linux/ip.h>
 
 MODULE_LICENSE("GPL");
@@ -34,7 +35,7 @@ static struct
 	struct ipt_replace repl;
 	struct ipt_standard entries[5];
 	struct ipt_error term;
-} initial_table __initdata
+} initial_table
 = { { "mangle", MANGLE_VALID_HOOKS, 6,
       sizeof(struct ipt_standard) * 5 + sizeof(struct ipt_error),
       { [NF_IP_PRE_ROUTING] 	= 0,
@@ -111,6 +112,13 @@ static struct ipt_table packet_mangler = {
 	.af		= AF_INET,
 };
 
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/sched.h>
+#define ve_packet_mangler	(get_exec_env()->_ipt_mangle_table)
+#else
+#define ve_packet_mangler	&packet_mangler
+#endif
+
 /* The work comes in here from netfilter.c. */
 static unsigned int
 ipt_route_hook(unsigned int hook,
@@ -119,7 +127,7 @@ ipt_route_hook(unsigned int hook,
 	 const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	return ipt_do_table(pskb, hook, in, out, &packet_mangler, NULL);
+	return ipt_do_table(pskb, hook, in, out, ve_packet_mangler, NULL);
 }
 
 static unsigned int
@@ -148,7 +156,8 @@ ipt_local_hook(unsigned int hook,
 	daddr = (*pskb)->nh.iph->daddr;
 	tos = (*pskb)->nh.iph->tos;
 
-	ret = ipt_do_table(pskb, hook, in, out, &packet_mangler, NULL);
+	ret = ipt_do_table(pskb, hook, in, out, ve_packet_mangler, NULL);
+
 	/* Reroute for ANY change. */
 	if (ret != NF_DROP && ret != NF_STOLEN && ret != NF_QUEUE
 	    && ((*pskb)->nh.iph->saddr != saddr
@@ -157,7 +166,8 @@ ipt_local_hook(unsigned int hook,
 		|| (*pskb)->nfmark != nfmark
 #endif
 		|| (*pskb)->nh.iph->tos != tos))
-		return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
+		if (ip_route_me_harder(pskb, RTN_UNSPEC))
+			ret = NF_DROP;
 
 	return ret;
 }
@@ -200,14 +210,19 @@ static struct nf_hook_ops ipt_ops[] = {
 	},
 };
 
-static int __init iptable_mangle_init(void)
+int init_iptable_mangle(void)
 {
 	int ret;
+	struct ipt_table *tmp_mangler;
 
 	/* Register table */
-	ret = ipt_register_table(&packet_mangler, &initial_table.repl);
-	if (ret < 0)
-		return ret;
+	tmp_mangler = ipt_register_table(&packet_mangler,
+			&initial_table.repl);
+	if (IS_ERR(tmp_mangler))
+		return PTR_ERR(tmp_mangler);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_mangler = tmp_mangler;
+#endif
 
 	/* Register hooks */
 	ret = nf_register_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
@@ -217,14 +232,42 @@ static int __init iptable_mangle_init(void)
 	return ret;
 
  cleanup_table:
-	ipt_unregister_table(&packet_mangler);
+	ipt_unregister_table(ve_packet_mangler);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_mangler = NULL;
+#endif
 	return ret;
+}
+
+void fini_iptable_mangle(void)
+{
+	nf_unregister_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
+	ipt_unregister_table(ve_packet_mangler);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_mangler = NULL;
+#endif
+}
+
+static int __init iptable_mangle_init(void)
+{
+	int err;
+
+	err = init_iptable_mangle();
+	if (err < 0)
+		return err;
+
+	KSYMRESOLVE(init_iptable_mangle);
+	KSYMRESOLVE(fini_iptable_mangle);
+	KSYMMODRESOLVE(iptable_mangle);
+	return 0;
 }
 
 static void __exit iptable_mangle_fini(void)
 {
-	nf_unregister_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
-	ipt_unregister_table(&packet_mangler);
+	KSYMMODUNRESOLVE(iptable_mangle);
+	KSYMUNRESOLVE(init_iptable_mangle);
+	KSYMUNRESOLVE(fini_iptable_mangle);
+	fini_iptable_mangle();
 }
 
 module_init(iptable_mangle_init);

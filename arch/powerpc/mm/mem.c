@@ -226,6 +226,7 @@ void show_mem(void)
 	printk("%ld pages shared\n", shared);
 	printk("%ld pages swap cached\n", cached);
 }
+EXPORT_SYMBOL(show_mem);
 
 /*
  * Initialize the bootmem system and give it all the memory we

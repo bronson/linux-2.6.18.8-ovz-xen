@@ -228,6 +228,8 @@ enum {
  *	@secmark: security marking
  */
 
+#include <ub/ub_sk.h>
+
 struct sk_buff {
 	/* These two members must be first. */
 	struct sk_buff		*next;
@@ -282,7 +284,9 @@ struct sk_buff {
 				nfctinfo:3;
 	__u8			pkt_type:3,
 				fclone:2,
-				ipvs_property:1;
+				ipvs_property:1,
+				accounted:1,
+				redirected:1;
 	__be16			protocol;
 
 	void			(*destructor)(struct sk_buff *skb);
@@ -317,6 +321,8 @@ struct sk_buff {
 				*data,
 				*tail,
 				*end;
+	struct skb_beancounter	skb_bc;
+	struct ve_struct	*owner_env;
 };
 
 #ifdef __KERNEL__
@@ -324,6 +330,7 @@ struct sk_buff {
  *	Handling routines are only of interest to the kernel
  */
 #include <linux/slab.h>
+#include <ub/ub_net.h>
 
 #include <asm/system.h>
 
@@ -617,6 +624,13 @@ static inline void skb_queue_head_init(struct sk_buff_head *list)
 	spin_lock_init(&list->lock);
 	list->prev = list->next = (struct sk_buff *)list;
 	list->qlen = 0;
+}
+
+static inline void skb_queue_head_init_class(struct sk_buff_head *list,
+		struct lock_class_key *class)
+{
+	skb_queue_head_init(list);
+	lockdep_set_class(&list->lock, class);
 }
 
 /*
@@ -1064,6 +1078,8 @@ static inline void pskb_trim_unique(struct sk_buff *skb, unsigned int len)
  */
 static inline void skb_orphan(struct sk_buff *skb)
 {
+	ub_skb_uncharge(skb);
+
 	if (skb->destructor)
 		skb->destructor(skb);
 	skb->destructor = NULL;

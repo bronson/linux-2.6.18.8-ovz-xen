@@ -27,6 +27,7 @@
 #include <linux/ip.h>
 #include <net/checksum.h>
 #include <net/tcp.h>
+#include <linux/nfcalls.h>
 
 #include <linux/netfilter_ipv4/ip_conntrack_helper.h>
 #include <linux/netfilter_ipv4/ip_conntrack_irc.h>
@@ -243,6 +244,33 @@ static char irc_names[MAX_PORTS][sizeof("irc-65535")];
 
 static void ip_conntrack_irc_fini(void);
 
+void fini_ip_ct_irc(void)
+{
+	int i;
+	for (i = 0; i < ports_c; i++) {
+		DEBUGP("unregistering port %d\n",
+		       ports[i]);
+		virt_ip_conntrack_helper_unregister(&irc_helpers[i]);
+	}
+}
+
+int init_ip_ct_irc(void)
+{
+	int i, ret;
+
+	for (i = 0; i < ports_c; i++) {
+		DEBUGP("port #%d: %d\n", i, ports[i]);
+		ret = virt_ip_conntrack_helper_register(&irc_helpers[i]);
+		if (ret) {
+			printk("ip_conntrack_irc: ERROR registering port %d\n",
+				ports[i]);
+			fini_ip_ct_irc();
+			return -EBUSY;
+		}
+	}
+	return 0;
+}
+
 static int __init ip_conntrack_irc_init(void)
 {
 	int i, ret;
@@ -282,7 +310,7 @@ static int __init ip_conntrack_irc_init(void)
 
 		DEBUGP("port #%d: %d\n", i, ports[i]);
 
-		ret = ip_conntrack_helper_register(hlpr);
+		ret = virt_ip_conntrack_helper_register(hlpr);
 
 		if (ret) {
 			printk("ip_conntrack_irc: ERROR registering port %d\n",
@@ -291,6 +319,10 @@ static int __init ip_conntrack_irc_init(void)
 			return -EBUSY;
 		}
 	}
+
+	KSYMRESOLVE(init_ip_ct_irc);
+	KSYMRESOLVE(fini_ip_ct_irc);
+	KSYMMODRESOLVE(ip_conntrack_irc);
 	return 0;
 }
 
@@ -298,12 +330,10 @@ static int __init ip_conntrack_irc_init(void)
  * it is needed by the init function */
 static void ip_conntrack_irc_fini(void)
 {
-	int i;
-	for (i = 0; i < ports_c; i++) {
-		DEBUGP("unregistering port %d\n",
-		       ports[i]);
-		ip_conntrack_helper_unregister(&irc_helpers[i]);
-	}
+	KSYMMODUNRESOLVE(ip_conntrack_irc);
+	KSYMUNRESOLVE(init_ip_ct_irc);
+	KSYMUNRESOLVE(fini_ip_ct_irc);
+	fini_ip_ct_irc();
 	kfree(irc_buffer);
 }
 

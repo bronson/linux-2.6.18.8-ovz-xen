@@ -119,7 +119,10 @@ int snd_iprintf(struct snd_info_buffer *buffer, char *fmt,...)
 	len = buffer->len - buffer->size;
 	va_start(args, fmt);
 	for (;;) {
-		res = vsnprintf(buffer->buffer + buffer->curr, len, fmt, args);
+		va_list ap;
+		va_copy(ap, args);
+		res = vsnprintf(buffer->buffer + buffer->curr, len, fmt, ap);
+		va_end(ap);
 		if (res < len)
 			break;
 		err = resize_info_buffer(buffer, buffer->len + PAGE_SIZE);
@@ -541,7 +544,7 @@ int __init snd_info_init(void)
 {
 	struct proc_dir_entry *p;
 
-	p = snd_create_proc_entry("asound", S_IFDIR | S_IRUGO | S_IXUGO, &proc_root);
+	p = snd_create_proc_entry("asound", S_IFDIR | S_IRUGO | S_IXUGO, NULL);
 	if (p == NULL)
 		return -ENOMEM;
 	snd_proc_root = p;

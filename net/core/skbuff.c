@@ -47,6 +47,7 @@
 #include <linux/in.h>
 #include <linux/inet.h>
 #include <linux/slab.h>
+#include <linux/kmem_cache.h>
 #include <linux/netdevice.h>
 #ifdef CONFIG_NET_CLS_ACT
 #include <net/pkt_sched.h>
@@ -66,6 +67,8 @@
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
+
+#include <ub/ub_net.h>
 
 static kmem_cache_t *skbuff_head_cache __read_mostly;
 static kmem_cache_t *skbuff_fclone_cache __read_mostly;
@@ -154,6 +157,9 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	if (!skb)
 		goto out;
 
+	if (ub_skb_alloc_bc(skb, gfp_mask & ~__GFP_DMA))
+		goto nobc;
+
 	/* Get the DATA. Size must match skb_add_mtu(). */
 	size = SKB_DATA_ALIGN(size);
 	data = ____kmalloc(size + sizeof(struct skb_shared_info), gfp_mask);
@@ -167,6 +173,7 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	skb->data = data;
 	skb->tail = data;
 	skb->end  = data + size;
+	skb->owner_env = get_exec_env();
 	/* make sure we initialize shinfo sequentially */
 	shinfo = skb_shinfo(skb);
 	atomic_set(&shinfo->dataref, 1);
@@ -189,6 +196,8 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 out:
 	return skb;
 nodata:
+	ub_skb_free_bc(skb);
+nobc:
 	kmem_cache_free(cache, skb);
 	skb = NULL;
 	goto out;
@@ -221,6 +230,9 @@ struct sk_buff *alloc_skb_from_cache(kmem_cache_t *cp,
 	if (!skb)
 		goto out;
 
+	if (ub_skb_alloc_bc(skb, gfp_mask & ~__GFP_DMA))
+		goto nobc;
+
 	/* Get the DATA. */
 	size = SKB_DATA_ALIGN(size);
 	data = kmem_cache_alloc(cp, gfp_mask);
@@ -234,6 +246,7 @@ struct sk_buff *alloc_skb_from_cache(kmem_cache_t *cp,
 	skb->data = data;
 	skb->tail = data;
 	skb->end  = data + size;
+	skb->owner_env = get_exec_env();
 
 	atomic_set(&(skb_shinfo(skb)->dataref), 1);
 	skb_shinfo(skb)->nr_frags  = 0;
@@ -244,6 +257,8 @@ struct sk_buff *alloc_skb_from_cache(kmem_cache_t *cp,
 out:
 	return skb;
 nodata:
+	ub_skb_free_bc(skb);
+nobc:
 	kmem_cache_free(skbuff_head_cache, skb);
 	skb = NULL;
 	goto out;
@@ -328,6 +343,7 @@ void kfree_skbmem(struct sk_buff *skb)
 	atomic_t *fclone_ref;
 
 	skb_release_data(skb);
+	ub_skb_free_bc(skb);
 	switch (skb->fclone) {
 	case SKB_FCLONE_UNAVAILABLE:
 		kmem_cache_free(skbuff_head_cache, skb);
@@ -369,6 +385,7 @@ void __kfree_skb(struct sk_buff *skb)
 #ifdef CONFIG_XFRM
 	secpath_put(skb->sp);
 #endif
+	ub_skb_uncharge(skb);
 	if (skb->destructor) {
 		WARN_ON(in_irq());
 		skb->destructor(skb);
@@ -442,6 +459,11 @@ struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp_mask)
 		n->fclone = SKB_FCLONE_UNAVAILABLE;
 	}
 
+	if (ub_skb_alloc_bc(n, gfp_mask)) {
+		kmem_cache_free(skbuff_head_cache, n);
+		return NULL;
+	}
+
 #define C(x) n->x = skb->x
 
 	n->next = n->prev = NULL;
@@ -471,6 +493,7 @@ struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp_mask)
 	C(ipvs_property);
 #endif
 	C(protocol);
+	C(owner_env);
 	n->destructor = NULL;
 #ifdef CONFIG_NETFILTER
 	C(nfmark);
@@ -638,6 +661,7 @@ struct sk_buff *pskb_copy(struct sk_buff *skb, gfp_t gfp_mask)
 	n->csum	     = skb->csum;
 	n->ip_summed = skb->ip_summed;
 
+	n->truesize += skb->data_len;
 	n->data_len  = skb->data_len;
 	n->len	     = skb->len;
 
@@ -1945,7 +1969,7 @@ struct sk_buff *skb_segment(struct sk_buff *skb, int features)
 	do {
 		struct sk_buff *nskb;
 		skb_frag_t *frag;
-		int hsize, nsize;
+		int hsize;
 		int k;
 		int size;
 
@@ -1956,11 +1980,10 @@ struct sk_buff *skb_segment(struct sk_buff *skb, int features)
 		hsize = skb_headlen(skb) - offset;
 		if (hsize < 0)
 			hsize = 0;
-		nsize = hsize + doffset;
-		if (nsize > len + doffset || !sg)
-			nsize = len + doffset;
+		if (hsize > len || !sg)
+			hsize = len;
 
-		nskb = alloc_skb(nsize + headroom, GFP_ATOMIC);
+		nskb = alloc_skb(hsize + doffset + headroom, GFP_ATOMIC);
 		if (unlikely(!nskb))
 			goto err;
 

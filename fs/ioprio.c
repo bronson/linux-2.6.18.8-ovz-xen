@@ -25,6 +25,7 @@
 #include <linux/capability.h>
 #include <linux/syscalls.h>
 #include <linux/security.h>
+#include <ub/io_prio.h>
 
 static int set_task_ioprio(struct task_struct *task, int ioprio)
 {
@@ -62,6 +63,9 @@ asmlinkage long sys_ioprio_set(int which, int who, int ioprio)
 	struct user_struct *user;
 	int ret;
 
+	if (!ve_is_super(get_exec_env()))
+		return -EPERM;
+
 	switch (class) {
 		case IOPRIO_CLASS_RT:
 			if (!capable(CAP_SYS_ADMIN))
@@ -87,18 +91,18 @@ asmlinkage long sys_ioprio_set(int which, int who, int ioprio)
 			if (!who)
 				p = current;
 			else
-				p = find_task_by_pid(who);
+				p = find_task_by_pid_all(who);
 			if (p)
 				ret = set_task_ioprio(p, ioprio);
 			break;
 		case IOPRIO_WHO_PGRP:
 			if (!who)
 				who = process_group(current);
-			do_each_task_pid(who, PIDTYPE_PGID, p) {
+			do_each_task_pid_all(who, PIDTYPE_PGID, p) {
 				ret = set_task_ioprio(p, ioprio);
 				if (ret)
 					break;
-			} while_each_task_pid(who, PIDTYPE_PGID, p);
+			} while_each_task_pid_all(who, PIDTYPE_PGID, p);
 			break;
 		case IOPRIO_WHO_USER:
 			if (!who)
@@ -109,16 +113,22 @@ asmlinkage long sys_ioprio_set(int which, int who, int ioprio)
 			if (!user)
 				break;
 
-			do_each_thread(g, p) {
+			do_each_thread_all(g, p) {
 				if (p->uid != who)
 					continue;
 				ret = set_task_ioprio(p, ioprio);
 				if (ret)
 					goto free_uid;
-			} while_each_thread(g, p);
+			} while_each_thread_all(g, p);
 free_uid:
 			if (who)
 				free_uid(user);
+			break;
+		case IOPRIO_WHO_UBC:
+			if (class != IOPRIO_CLASS_BE)
+				return -ERANGE;
+
+			ret = bc_set_ioprio(who, data);
 			break;
 		default:
 			ret = -EINVAL;
@@ -176,14 +186,14 @@ asmlinkage long sys_ioprio_get(int which, int who)
 			if (!who)
 				p = current;
 			else
-				p = find_task_by_pid(who);
+				p = find_task_by_pid_ve(who);
 			if (p)
 				ret = get_task_ioprio(p);
 			break;
 		case IOPRIO_WHO_PGRP:
 			if (!who)
 				who = process_group(current);
-			do_each_task_pid(who, PIDTYPE_PGID, p) {
+			do_each_task_pid_ve(who, PIDTYPE_PGID, p) {
 				tmpio = get_task_ioprio(p);
 				if (tmpio < 0)
 					continue;
@@ -191,7 +201,7 @@ asmlinkage long sys_ioprio_get(int which, int who)
 					ret = tmpio;
 				else
 					ret = ioprio_best(ret, tmpio);
-			} while_each_task_pid(who, PIDTYPE_PGID, p);
+			} while_each_task_pid_ve(who, PIDTYPE_PGID, p);
 			break;
 		case IOPRIO_WHO_USER:
 			if (!who)
@@ -202,7 +212,7 @@ asmlinkage long sys_ioprio_get(int which, int who)
 			if (!user)
 				break;
 
-			do_each_thread(g, p) {
+			do_each_thread_ve(g, p) {
 				if (p->uid != user->uid)
 					continue;
 				tmpio = get_task_ioprio(p);
@@ -212,7 +222,7 @@ asmlinkage long sys_ioprio_get(int which, int who)
 					ret = tmpio;
 				else
 					ret = ioprio_best(ret, tmpio);
-			} while_each_thread(g, p);
+			} while_each_thread_ve(g, p);
 
 			if (who)
 				free_uid(user);

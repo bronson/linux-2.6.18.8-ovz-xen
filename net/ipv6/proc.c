@@ -24,13 +24,18 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/stddef.h>
+#include <linux/ve.h>
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <net/transp_v6.h>
 #include <net/ipv6.h>
 
 #ifdef CONFIG_PROC_FS
+#ifdef CONFIG_VE
+#define proc_net_devsnmp6	(get_exec_env()->_proc_net_devsnmp6)
+#else
 static struct proc_dir_entry *proc_net_devsnmp6;
+#endif
 
 static int fold_prot_inuse(struct proto *proto)
 {
@@ -163,9 +168,9 @@ static int snmp6_seq_show(struct seq_file *seq, void *v)
 		seq_printf(seq, "%-32s\t%u\n", "ifIndex", idev->dev->ifindex);
 		snmp6_seq_show_item(seq, (void **)idev->stats.icmpv6, snmp6_icmp6_list);
 	} else {
-		snmp6_seq_show_item(seq, (void **)ipv6_statistics, snmp6_ipstats_list);
-		snmp6_seq_show_item(seq, (void **)icmpv6_statistics, snmp6_icmp6_list);
-		snmp6_seq_show_item(seq, (void **)udp_stats_in6, snmp6_udp6_list);
+		snmp6_seq_show_item(seq, (void **)ve_ipv6_statistics, snmp6_ipstats_list);
+		snmp6_seq_show_item(seq, (void **)ve_icmpv6_statistics, snmp6_icmp6_list);
+		snmp6_seq_show_item(seq, (void **)ve_udp_stats_in6, snmp6_udp6_list);
 	}
 	return 0;
 }
@@ -228,15 +233,27 @@ int snmp6_unregister_dev(struct inet6_dev *idev)
 	return 0;
 }
 
+int ve_snmp_proc_init(void)
+{
+	proc_net_devsnmp6 = proc_mkdir("dev_snmp6", proc_net);
+	return proc_net_devsnmp6 == NULL ? -ENOMEM : 0;
+}
+EXPORT_SYMBOL(ve_snmp_proc_init);
+
+void ve_snmp_proc_fini(void)
+{
+	proc_net_remove("dev_snmp6");
+}
+EXPORT_SYMBOL(ve_snmp_proc_fini);
+
 int __init ipv6_misc_proc_init(void)
 {
 	int rc = 0;
 
-	if (!proc_net_fops_create("snmp6", S_IRUGO, &snmp6_seq_fops))
+	if (!proc_glob_fops_create("net/snmp6", S_IRUGO, &snmp6_seq_fops))
 		goto proc_snmp6_fail;
 
-	proc_net_devsnmp6 = proc_mkdir("dev_snmp6", proc_net);
-	if (!proc_net_devsnmp6)
+	if (ve_snmp_proc_init())
 		goto proc_dev_snmp6_fail;
 
 	if (!proc_net_fops_create("sockstat6", S_IRUGO, &sockstat6_seq_fops))
@@ -245,9 +262,9 @@ out:
 	return rc;
 
 proc_sockstat6_fail:
-	proc_net_remove("dev_snmp6");
+	ve_snmp_proc_fini();
 proc_dev_snmp6_fail:
-	proc_net_remove("snmp6");
+	remove_proc_glob_entry("net/snmp6", NULL);
 proc_snmp6_fail:
 	rc = -ENOMEM;
 	goto out;
@@ -256,7 +273,7 @@ proc_snmp6_fail:
 void ipv6_misc_proc_exit(void)
 {
 	proc_net_remove("sockstat6");
-	proc_net_remove("dev_snmp6");
+	ve_snmp_proc_fini();
 	proc_net_remove("snmp6");
 }
 

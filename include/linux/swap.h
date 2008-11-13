@@ -13,6 +13,7 @@
 #define SWAP_FLAG_PREFER	0x8000	/* set if swap priority specified */
 #define SWAP_FLAG_PRIO_MASK	0x7fff
 #define SWAP_FLAG_PRIO_SHIFT	0
+#define SWAP_FLAG_READONLY	0x40000000      /* set if swap is read-only */
 
 static inline int current_is_kswapd(void)
 {
@@ -88,6 +89,7 @@ struct address_space;
 struct sysinfo;
 struct writeback_control;
 struct zone;
+struct user_beancounter;
 
 /*
  * A swap extent maps a range of a swapfile's PAGE_SIZE pages onto a range of
@@ -117,6 +119,7 @@ enum {
 	SWP_ACTIVE	= (SWP_USED | SWP_WRITEOK),
 					/* add others here before... */
 	SWP_SCANNING	= (1 << 8),	/* refcount in scan_swap_map */
+	SWP_READONLY	= (1 << 2),
 };
 
 #define SWAP_CLUSTER_MAX 32
@@ -127,6 +130,7 @@ enum {
 /*
  * The in-memory structure used to track swap areas.
  */
+struct user_beancounter;
 struct swap_info_struct {
 	unsigned int flags;
 	int prio;			/* swap priority */
@@ -144,6 +148,9 @@ struct swap_info_struct {
 	unsigned int max;
 	unsigned int inuse_pages;
 	int next;			/* next entry on swap list */
+#ifdef CONFIG_USER_SWAP_ACCOUNTING
+	struct user_beancounter **swap_ubs;
+#endif
 };
 
 struct swap_list_t {
@@ -151,11 +158,16 @@ struct swap_list_t {
 	int next;	/* swapfile to be used next */
 };
 
+extern struct swap_list_t swap_list;
+extern struct swap_info_struct swap_info[MAX_SWAPFILES];
+
 /* Swap 50% full? Release swapcache more aggressively.. */
 #define vm_swap_full() (nr_swap_pages*2 < total_swap_pages)
 
 /* linux/mm/oom_kill.c */
 extern void out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask, int order);
+extern int oom_kill_process(struct task_struct *p, const char *message);
+extern struct task_struct *oom_select_bad_process(struct user_beancounter *ub);
 
 /* linux/mm/memory.c */
 extern void swapin_readahead(swp_entry_t, unsigned long, struct vm_area_struct *);
@@ -190,6 +202,7 @@ extern long vm_total_pages;
 #ifdef CONFIG_NUMA
 extern int zone_reclaim_mode;
 extern int sysctl_min_unmapped_ratio;
+extern int sysctl_min_slab_ratio;
 extern int zone_reclaim(struct zone *, gfp_t, unsigned int);
 #else
 #define zone_reclaim_mode 0
@@ -220,6 +233,9 @@ extern struct address_space swapper_space;
 extern void show_swap_cache_info(void);
 extern int add_to_swap(struct page *, gfp_t);
 extern void __delete_from_swap_cache(struct page *);
+extern int add_to_swap_cache(struct page *page, swp_entry_t entry);
+extern int __add_to_swap_cache(struct page *page,
+			       swp_entry_t entry, gfp_t gfp_mask);
 extern void delete_from_swap_cache(struct page *);
 extern int move_to_swap_cache(struct page *, swp_entry_t);
 extern int move_from_swap_cache(struct page *, unsigned long,
@@ -233,7 +249,7 @@ extern struct page * read_swap_cache_async(swp_entry_t, struct vm_area_struct *v
 extern long total_swap_pages;
 extern unsigned int nr_swapfiles;
 extern void si_swapinfo(struct sysinfo *);
-extern swp_entry_t get_swap_page(void);
+extern swp_entry_t get_swap_page(struct user_beancounter *);
 extern swp_entry_t get_swap_page_of_type(int);
 extern int swap_duplicate(swp_entry_t);
 extern int valid_swaphandles(swp_entry_t, unsigned long *);
@@ -245,6 +261,7 @@ extern sector_t map_swap_page(struct swap_info_struct *, pgoff_t);
 extern struct swap_info_struct *get_swap_info_struct(unsigned);
 extern int can_share_swap_page(struct page *);
 extern int remove_exclusive_swap_page(struct page *);
+extern int try_to_remove_exclusive_swap_page(struct page *);
 struct backing_dev_info;
 
 extern spinlock_t swap_lock;
@@ -346,7 +363,7 @@ static inline int remove_exclusive_swap_page(struct page *p)
 	return 0;
 }
 
-static inline swp_entry_t get_swap_page(void)
+static inline swp_entry_t get_swap_page(struct user_beancounter *ub)
 {
 	swp_entry_t entry;
 	entry.val = 0;

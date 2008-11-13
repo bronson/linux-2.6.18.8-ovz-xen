@@ -117,7 +117,13 @@ void nf_unregister_hooks(struct nf_hook_ops *reg, unsigned int n);
 int nf_register_sockopt(struct nf_sockopt_ops *reg);
 void nf_unregister_sockopt(struct nf_sockopt_ops *reg);
 
+#ifdef CONFIG_VE_IPTABLES
+#define ve_nf_hooks \
+       ((struct list_head (*)[NF_MAX_HOOKS])(get_exec_env()->_nf_hooks))
+#else
 extern struct list_head nf_hooks[NPROTO][NF_MAX_HOOKS];
+#define ve_nf_hooks nf_hooks
+#endif
 
 /* those NF_LOG_* defines and struct nf_loginfo are legacy definitios that will
  * disappear once iptables is replaced with pkttables.  Please DO NOT use them
@@ -195,7 +201,7 @@ static inline int nf_hook_thresh(int pf, unsigned int hook,
 	if (!cond)
 		return 1;
 #ifndef CONFIG_NETFILTER_DEBUG
-	if (list_empty(&nf_hooks[pf][hook]))
+	if (list_empty(&ve_nf_hooks[pf][hook]))
 		return 1;
 #endif
 	return nf_hook_slow(pf, hook, pskb, indev, outdev, okfn, thresh);

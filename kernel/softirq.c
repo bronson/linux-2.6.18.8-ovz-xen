@@ -13,10 +13,13 @@
 #include <linux/mm.h>
 #include <linux/notifier.h>
 #include <linux/percpu.h>
+#include <linux/sysctl.h>
 #include <linux/cpu.h>
 #include <linux/kthread.h>
 #include <linux/rcupdate.h>
 #include <linux/smp.h>
+
+#include <ub/beancounter.h>
 
 #include <asm/irq.h>
 /*
@@ -45,6 +48,8 @@ EXPORT_SYMBOL(irq_stat);
 static struct softirq_action softirq_vec[32] __cacheline_aligned_in_smp;
 
 static DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
+static DEFINE_PER_CPU(struct task_struct *, ksoftirqd_wakeup);
+static int ksoftirqd_stat[NR_CPUS];
 
 /*
  * we cannot loop indefinitely here to avoid userspace starvation,
@@ -55,7 +60,7 @@ static DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
 static inline void wakeup_softirqd(void)
 {
 	/* Interrupts are disabled: no need to stop preemption */
-	struct task_struct *tsk = __get_cpu_var(ksoftirqd);
+	struct task_struct *tsk = __get_cpu_var(ksoftirqd_wakeup);
 
 	if (tsk && tsk->state != TASK_RUNNING)
 		wake_up_process(tsk);
@@ -205,10 +210,14 @@ EXPORT_SYMBOL(local_bh_enable_ip);
 
 asmlinkage void __do_softirq(void)
 {
+	struct user_beancounter *ub;
 	struct softirq_action *h;
 	__u32 pending;
 	int max_restart = MAX_SOFTIRQ_RESTART;
 	int cpu;
+	struct ve_struct *envid;
+
+	envid = set_exec_env(get_ve0());
 
 	pending = local_softirq_pending();
 	account_system_vtime(current);
@@ -225,6 +234,7 @@ restart:
 
 	h = softirq_vec;
 
+	ub = set_exec_ub(get_ub0());
 	do {
 		if (pending & 1) {
 			h->action(h);
@@ -233,6 +243,7 @@ restart:
 		h++;
 		pending >>= 1;
 	} while (pending);
+	(void)set_exec_ub(ub);
 
 	local_irq_disable();
 
@@ -246,6 +257,7 @@ restart:
 	trace_softirq_exit();
 
 	account_system_vtime(current);
+	(void)set_exec_env(envid);
 	_local_bh_enable();
 }
 
@@ -286,6 +298,7 @@ void irq_exit(void)
 {
 	account_system_vtime(current);
 	trace_hardirq_exit();
+	restore_context();
 	sub_preempt_count(IRQ_EXIT_OFFSET);
 	if (!in_interrupt() && local_softirq_pending())
 		invoke_softirq();
@@ -574,8 +587,6 @@ static int __cpuinit cpu_callback(struct notifier_block *nfb,
 
 	switch (action) {
 	case CPU_UP_PREPARE:
-		BUG_ON(per_cpu(tasklet_vec, hotcpu).list);
-		BUG_ON(per_cpu(tasklet_hi_vec, hotcpu).list);
 		p = kthread_create(ksoftirqd, hcpu, "ksoftirqd/%d", hotcpu);
 		if (IS_ERR(p)) {
 			printk("ksoftirqd for %i failed\n", hotcpu);
@@ -605,6 +616,52 @@ static int __cpuinit cpu_callback(struct notifier_block *nfb,
 	return NOTIFY_OK;
 }
 
+static int proc_ksoftirqd(ctl_table *ctl, int write, struct file *filp,
+		void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	int ret, cpu;
+
+	ret = proc_dointvec(ctl, write, filp, buffer, lenp, ppos);
+	if (!write)
+		return ret;
+
+	for_each_online_cpu(cpu) {
+		per_cpu(ksoftirqd_wakeup, cpu) =
+			ksoftirqd_stat[cpu] ? per_cpu(ksoftirqd, cpu) : NULL;
+	}
+	return ret;
+}
+
+static int sysctl_ksoftirqd(ctl_table *table, int __user *name, int nlen,
+		void __user *oldval, size_t __user *oldlenp,
+		void __user *newval, size_t newlen, void **context)
+{
+	return -EINVAL;
+}
+
+static ctl_table debug_table[] = {
+	{
+		.ctl_name	= 1246,
+		.procname	= "ksoftirqd",
+		.data		= ksoftirqd_stat,
+		.maxlen		= sizeof(ksoftirqd_stat),
+		.mode		= 0644,
+		.proc_handler	= &proc_ksoftirqd,
+		.strategy	= &sysctl_ksoftirqd
+	},
+	{0}
+};
+
+static ctl_table root_table[] = {
+	{
+		.ctl_name	= CTL_DEBUG,
+		.procname	= "debug",
+		.mode		= 0555,
+		.child		= debug_table
+	},
+	{0}
+};
+
 static struct notifier_block __cpuinitdata cpu_nfb = {
 	.notifier_call = cpu_callback
 };
@@ -615,6 +672,7 @@ __init int spawn_ksoftirqd(void)
 	cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
 	cpu_callback(&cpu_nfb, CPU_ONLINE, cpu);
 	register_cpu_notifier(&cpu_nfb);
+	register_sysctl_table(root_table, 0);
 	return 0;
 }
 

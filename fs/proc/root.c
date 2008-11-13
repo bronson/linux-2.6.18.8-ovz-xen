@@ -19,7 +19,10 @@
 
 #include "internal.h"
 
-struct proc_dir_entry *proc_net, *proc_net_stat, *proc_bus, *proc_root_fs, *proc_root_driver;
+#ifndef CONFIG_VE
+struct proc_dir_entry *proc_net, *proc_net_stat;
+#endif
+struct proc_dir_entry *proc_bus, *proc_root_fs, *proc_root_driver;
 
 #ifdef CONFIG_SYSCTL
 struct proc_dir_entry *proc_sys_root;
@@ -31,11 +34,13 @@ static int proc_get_sb(struct file_system_type *fs_type,
 	return get_sb_single(fs_type, flags, data, proc_fill_super, mnt);
 }
 
-static struct file_system_type proc_fs_type = {
+struct file_system_type proc_fs_type = {
 	.name		= "proc",
 	.get_sb		= proc_get_sb,
 	.kill_sb	= kill_anon_super,
 };
+
+EXPORT_SYMBOL(proc_fs_type);
 
 void __init proc_root_init(void)
 {
@@ -82,8 +87,19 @@ void __init proc_root_init(void)
 static int proc_root_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat
 )
 {
+	struct ve_struct *ve = get_exec_env();
+
 	generic_fillattr(dentry->d_inode, stat);
-	stat->nlink = proc_root.nlink + nr_processes();
+	stat->nlink = proc_root.nlink;
+	if (ve_is_super(ve))
+		stat->nlink += nr_processes();
+#ifdef CONFIG_VE
+	else
+		/* not really processes count, it's not right, but it's ok */
+		stat->nlink += atomic_read(&ve->pcounter);
+	/* the same logic as in the proc_getattr */
+	stat->nlink += ve->proc_root->nlink - 2;
+#endif
 	return 0;
 }
 
@@ -156,7 +172,9 @@ EXPORT_SYMBOL(create_proc_entry);
 EXPORT_SYMBOL(remove_proc_entry);
 EXPORT_SYMBOL(proc_root);
 EXPORT_SYMBOL(proc_root_fs);
+#ifndef CONFIG_VE
 EXPORT_SYMBOL(proc_net);
 EXPORT_SYMBOL(proc_net_stat);
+#endif
 EXPORT_SYMBOL(proc_bus);
 EXPORT_SYMBOL(proc_root_driver);

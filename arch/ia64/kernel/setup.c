@@ -43,6 +43,7 @@
 #include <linux/initrd.h>
 #include <linux/pm.h>
 #include <linux/cpufreq.h>
+#include <linux/vsched.h>
 
 #include <asm/ia32.h>
 #include <asm/machvec.h>
@@ -545,9 +546,13 @@ show_cpuinfo (struct seq_file *m, void *v)
 		sprintf(cp, " 0x%lx", mask);
 	}
 
+#ifndef CONFIG_FAIRSCHED
 	proc_freq = cpufreq_quick_get(cpunum);
 	if (!proc_freq)
 		proc_freq = c->proc_freq / 1000;
+#else
+	proc_freq = ve_scale_khz(c->proc_freq) / 1000;
+#endif
 
 	seq_printf(m,
 		   "processor  : %d\n"
@@ -586,7 +591,7 @@ static void *
 c_start (struct seq_file *m, loff_t *pos)
 {
 #ifdef CONFIG_SMP
-	while (*pos < NR_CPUS && !cpu_isset(*pos, cpu_online_map))
+	while (*pos < NR_CPUS && !vcpu_online(*pos))
 		++*pos;
 #endif
 	return *pos < NR_CPUS ? cpu_data(*pos) : NULL;

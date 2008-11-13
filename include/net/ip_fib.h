@@ -167,10 +167,22 @@ struct fib_table {
 	unsigned char	tb_data[0];
 };
 
+struct fn_zone;
+struct fn_hash
+{
+	struct fn_zone	*fn_zones[33];
+	struct fn_zone	*fn_zone_list;
+};
+
 #ifndef CONFIG_IP_MULTIPLE_TABLES
 
+#if defined(CONFIG_VE) && defined(CONFIG_INET)
+#define ip_fib_local_table 	get_exec_env()->_local_table
+#define ip_fib_main_table 	get_exec_env()->_main_table
+#else
 extern struct fib_table *ip_fib_local_table;
 extern struct fib_table *ip_fib_main_table;
+#endif
 
 static inline struct fib_table *fib_get_table(int id)
 {
@@ -202,7 +214,12 @@ static inline void fib_select_default(const struct flowi *flp, struct fib_result
 #define ip_fib_local_table (fib_tables[RT_TABLE_LOCAL])
 #define ip_fib_main_table (fib_tables[RT_TABLE_MAIN])
 
+#ifdef CONFIG_VE
+#define fib_tables get_exec_env()->_fib_tables
+#else
 extern struct fib_table * fib_tables[RT_TABLE_MAX+1];
+#endif
+
 extern int fib_lookup(const struct flowi *flp, struct fib_result *res);
 extern struct fib_table *__fib_new_table(int id);
 extern void fib_rule_put(struct fib_rule *r);
@@ -249,10 +266,19 @@ extern u32  __fib_res_prefsrc(struct fib_result *res);
 
 /* Exported by fib_hash.c */
 extern struct fib_table *fib_hash_init(int id);
+#if defined(CONFIG_VE) && defined(CONFIG_INET)
+struct ve_struct;
+extern int init_ve_route(struct ve_struct *ve);
+extern void fini_ve_route(struct ve_struct *ve);
+#else
+#define init_ve_route(ve)	(0)
+#define fini_ve_route(ve)	do { } while (0)
+#endif
 
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 /* Exported by fib_rules.c */
-
+extern int fib_rules_create(void);
+extern void fib_rules_destroy(void);
 extern int inet_rtm_delrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg);
 extern int inet_rtm_newrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg);
 extern int inet_dump_rules(struct sk_buff *skb, struct netlink_callback *cb);

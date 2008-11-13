@@ -4,6 +4,7 @@
 
 #include <linux/mount.h>
 #include <linux/sched.h>
+#include <linux/nsproxy.h>
 
 struct namespace {
 	atomic_t		count;
@@ -12,6 +13,8 @@ struct namespace {
 	wait_queue_head_t poll;
 	int event;
 };
+
+extern struct rw_semaphore namespace_sem;
 
 extern int copy_namespace(int, struct task_struct *);
 extern void __put_namespace(struct namespace *namespace);
@@ -26,11 +29,8 @@ static inline void put_namespace(struct namespace *namespace)
 
 static inline void exit_namespace(struct task_struct *p)
 {
-	struct namespace *namespace = p->namespace;
+	struct namespace *namespace = p->nsproxy->namespace;
 	if (namespace) {
-		task_lock(p);
-		p->namespace = NULL;
-		task_unlock(p);
 		put_namespace(namespace);
 	}
 }

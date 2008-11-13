@@ -32,16 +32,25 @@ struct percpu_data {
         (__typeof__(ptr))__p->ptrs[(cpu)];	\
 })
 
-extern void *__alloc_percpu(size_t size);
+#define static_percpu_ptr(sptr, sptrs) ({		\
+		int i;					\
+		for (i = 0; i < NR_CPUS; i++)		\
+			(sptr)->ptrs[i] = &(sptrs)[i];	\
+		((void *)(~(unsigned long)(sptr)));	\
+	})
+
+extern void *__alloc_percpu_mask(size_t size, gfp_t gfp);
 extern void free_percpu(const void *);
 
 #else /* CONFIG_SMP */
 
 #define per_cpu_ptr(ptr, cpu) ({ (void)(cpu); (ptr); })
 
-static inline void *__alloc_percpu(size_t size)
+#define static_percpu_ptr(sptr, sptrs)	(&sptrs[0])
+
+static inline void *__alloc_percpu_mask(size_t size, gfp_t gfp)
 {
-	void *ret = kmalloc(size, GFP_KERNEL);
+	void *ret = kmalloc(size, gfp);
 	if (ret)
 		memset(ret, 0, size);
 	return ret;
@@ -54,6 +63,11 @@ static inline void free_percpu(const void *ptr)
 #endif /* CONFIG_SMP */
 
 /* Simple wrapper for the common case: zeros memory. */
-#define alloc_percpu(type)	((type *)(__alloc_percpu(sizeof(type))))
+#define __alloc_percpu(size)		\
+	__alloc_percpu_mask((size), GFP_KERNEL)
+#define alloc_percpu(type)		\
+	((type *)(__alloc_percpu_mask(sizeof(type), GFP_KERNEL)))
+#define alloc_percpu_atomic(type)	\
+	((type *)(__alloc_percpu_mask(sizeof(type), GFP_ATOMIC)))
 
 #endif /* __LINUX_PERCPU_H */

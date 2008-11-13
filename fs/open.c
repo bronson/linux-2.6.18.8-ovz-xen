@@ -25,6 +25,7 @@
 #include <linux/fs.h>
 #include <linux/personality.h>
 #include <linux/pagemap.h>
+#include <linux/faudit.h>
 #include <linux/syscalls.h>
 #include <linux/rcupdate.h>
 #include <linux/audit.h>
@@ -52,12 +53,30 @@ int vfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 EXPORT_SYMBOL(vfs_statfs);
 
-static int vfs_statfs_native(struct dentry *dentry, struct statfs *buf)
+int faudit_statfs(struct super_block *sb, struct kstatfs *buf)
+{
+	struct faudit_statfs_arg arg;
+
+	arg.sb = sb;
+	arg.stat = buf;
+
+	if (virtinfo_notifier_call(VITYPE_FAUDIT, VIRTINFO_FAUDIT_STATFS, &arg)
+			!= NOTIFY_DONE)
+		return arg.err;
+	return 0;
+}
+
+static int vfs_statfs_native(struct dentry *dentry, struct vfsmount *mnt,
+		struct statfs *buf)
 {
 	struct kstatfs st;
 	int retval;
 
 	retval = vfs_statfs(dentry, &st);
+	if (retval)
+		return retval;
+
+	retval = faudit_statfs(mnt->mnt_sb, &st);
 	if (retval)
 		return retval;
 
@@ -95,12 +114,17 @@ static int vfs_statfs_native(struct dentry *dentry, struct statfs *buf)
 	return 0;
 }
 
-static int vfs_statfs64(struct dentry *dentry, struct statfs64 *buf)
+static int vfs_statfs64(struct dentry *dentry, struct vfsmount *mnt,
+		struct statfs64 *buf)
 {
 	struct kstatfs st;
 	int retval;
 
 	retval = vfs_statfs(dentry, &st);
+	if (retval)
+		return retval;
+
+	retval = faudit_statfs(mnt->mnt_sb, &st);
 	if (retval)
 		return retval;
 
@@ -130,7 +154,7 @@ asmlinkage long sys_statfs(const char __user * path, struct statfs __user * buf)
 	error = user_path_walk(path, &nd);
 	if (!error) {
 		struct statfs tmp;
-		error = vfs_statfs_native(nd.dentry, &tmp);
+		error = vfs_statfs_native(nd.dentry, nd.mnt, &tmp);
 		if (!error && copy_to_user(buf, &tmp, sizeof(tmp)))
 			error = -EFAULT;
 		path_release(&nd);
@@ -149,7 +173,7 @@ asmlinkage long sys_statfs64(const char __user *path, size_t sz, struct statfs64
 	error = user_path_walk(path, &nd);
 	if (!error) {
 		struct statfs64 tmp;
-		error = vfs_statfs64(nd.dentry, &tmp);
+		error = vfs_statfs64(nd.dentry, nd.mnt, &tmp);
 		if (!error && copy_to_user(buf, &tmp, sizeof(tmp)))
 			error = -EFAULT;
 		path_release(&nd);
@@ -168,7 +192,7 @@ asmlinkage long sys_fstatfs(unsigned int fd, struct statfs __user * buf)
 	file = fget(fd);
 	if (!file)
 		goto out;
-	error = vfs_statfs_native(file->f_dentry, &tmp);
+	error = vfs_statfs_native(file->f_dentry, file->f_vfsmnt, &tmp);
 	if (!error && copy_to_user(buf, &tmp, sizeof(tmp)))
 		error = -EFAULT;
 	fput(file);
@@ -189,7 +213,7 @@ asmlinkage long sys_fstatfs64(unsigned int fd, size_t sz, struct statfs64 __user
 	file = fget(fd);
 	if (!file)
 		goto out;
-	error = vfs_statfs64(file->f_dentry, &tmp);
+	error = vfs_statfs64(file->f_dentry, file->f_vfsmnt, &tmp);
 	if (!error && copy_to_user(buf, &tmp, sizeof(tmp)))
 		error = -EFAULT;
 	fput(file);
@@ -368,52 +392,16 @@ asmlinkage long sys_ftruncate64(unsigned int fd, loff_t length)
  */
 asmlinkage long sys_utime(char __user * filename, struct utimbuf __user * times)
 {
-	int error;
-	struct nameidata nd;
-	struct inode * inode;
-	struct iattr newattrs;
+	struct timeval tv[2];
 
-	error = user_path_walk(filename, &nd);
-	if (error)
-		goto out;
-	inode = nd.dentry->d_inode;
-
-	error = -EROFS;
-	if (IS_RDONLY(inode))
-		goto dput_and_out;
-
-	/* Don't worry, the checks are done in inode_change_ok() */
-	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (times) {
-		error = -EPERM;
-		if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
-			goto dput_and_out;
-
-		error = get_user(newattrs.ia_atime.tv_sec, &times->actime);
-		newattrs.ia_atime.tv_nsec = 0;
-		if (!error)
-			error = get_user(newattrs.ia_mtime.tv_sec, &times->modtime);
-		newattrs.ia_mtime.tv_nsec = 0;
-		if (error)
-			goto dput_and_out;
-
-		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
-	} else {
-                error = -EACCES;
-                if (IS_IMMUTABLE(inode))
-                        goto dput_and_out;
-
-		if (current->fsuid != inode->i_uid &&
-		    (error = vfs_permission(&nd, MAY_WRITE)) != 0)
-			goto dput_and_out;
+		if (get_user(tv[0].tv_sec, &times->actime) ||
+		    get_user(tv[1].tv_sec, &times->modtime))
+			return -EFAULT;
+		tv[0].tv_usec = 0;
+		tv[1].tv_usec = 0;
 	}
-	mutex_lock(&inode->i_mutex);
-	error = notify_change(nd.dentry, &newattrs);
-	mutex_unlock(&inode->i_mutex);
-dput_and_out:
-	path_release(&nd);
-out:
-	return error;
+	return do_utimes(AT_FDCWD, filename, times ? tv : NULL, 0);
 }
 
 #endif
@@ -422,14 +410,19 @@ out:
  * must be owner or have write permission.
  * Else, update from *times, must be owner or super user.
  */
-long do_utimes(int dfd, char __user *filename, struct timeval *times)
+long do_utimes(int dfd, char __user *filename, struct timeval *times, int flags)
 {
-	int error;
+	int error = -EINVAL;
 	struct nameidata nd;
 	struct inode * inode;
 	struct iattr newattrs;
+	int follow;
 
-	error = __user_walk_fd(dfd, filename, LOOKUP_FOLLOW, &nd);
+	if ((flags & ~AT_SYMLINK_NOFOLLOW) != 0)
+		goto out;
+
+	follow = (flags & AT_SYMLINK_NOFOLLOW) ? 0 : LOOKUP_FOLLOW;
+	error = __user_walk_fd(dfd, filename, follow, &nd);
 
 	if (error)
 		goto out;
@@ -475,7 +468,7 @@ asmlinkage long sys_futimesat(int dfd, char __user *filename, struct timeval __u
 
 	if (utimes && copy_from_user(&times, utimes, sizeof(times)))
 		return -EFAULT;
-	return do_utimes(dfd, filename, utimes ? times : NULL);
+	return do_utimes(dfd, filename, utimes ? times : NULL, 0);
 }
 
 asmlinkage long sys_utimes(char __user *filename, struct timeval __user *utimes)
@@ -655,15 +648,20 @@ out:
 	return err;
 }
 
-asmlinkage long sys_fchmodat(int dfd, const char __user *filename,
-			     mode_t mode)
+static long do_fchmodat(int dfd, const char __user *filename, mode_t mode,
+			int flags)
 {
 	struct nameidata nd;
 	struct inode * inode;
-	int error;
+	int error = -EINVAL;
 	struct iattr newattrs;
+	int follow;
 
-	error = __user_walk_fd(dfd, filename, LOOKUP_FOLLOW, &nd);
+	if ((flags & ~AT_SYMLINK_NOFOLLOW) != 0)
+		goto out;
+
+	follow = (flags & AT_SYMLINK_NOFOLLOW) ? 0 : LOOKUP_FOLLOW;
+	error = __user_walk_fd(dfd, filename, follow, &nd);
 	if (error)
 		goto out;
 	inode = nd.dentry->d_inode;
@@ -688,6 +686,12 @@ dput_and_out:
 	path_release(&nd);
 out:
 	return error;
+}
+
+asmlinkage long sys_fchmodat(int dfd, const char __user *filename,
+			     mode_t mode)
+{
+	return do_fchmodat(dfd, filename, mode, 0);
 }
 
 asmlinkage long sys_chmod(const char __user *filename, mode_t mode)
@@ -742,6 +746,7 @@ asmlinkage long sys_chown(const char __user * filename, uid_t user, gid_t group)
 	}
 	return error;
 }
+EXPORT_SYMBOL_GPL(sys_chown);
 
 asmlinkage long sys_fchownat(int dfd, const char __user *filename, uid_t user,
 			     gid_t group, int flag)
@@ -952,6 +957,7 @@ struct file *nameidata_to_filp(struct nameidata *nd, int flags)
 	return filp;
 }
 
+int odirect_enable = 0;
 /*
  * dentry_open() will have done dput(dentry) and mntput(mnt) if it returns an
  * error.
@@ -960,6 +966,9 @@ struct file *dentry_open(struct dentry *dentry, struct vfsmount *mnt, int flags)
 {
 	int error;
 	struct file *f;
+
+	if (!capable(CAP_SYS_RAWIO) && !odirect_enable)
+		flags &= ~O_DIRECT;
 
 	error = -ENFILE;
 	f = get_empty_filp();
@@ -1232,3 +1241,23 @@ int nonseekable_open(struct inode *inode, struct file *filp)
 }
 
 EXPORT_SYMBOL(nonseekable_open);
+
+long sys_lchmod(char __user * filename, mode_t mode)
+{
+	return do_fchmodat(AT_FDCWD, filename, mode, AT_SYMLINK_NOFOLLOW);
+}
+
+long sys_lutime(char __user * filename,
+		struct utimbuf __user * times)
+{
+	struct timeval tv[2];
+
+	if (times) {
+		if (get_user(tv[0].tv_sec, &times->actime) ||
+		    get_user(tv[1].tv_sec, &times->modtime))
+			return -EFAULT;
+		tv[0].tv_usec = 0;
+		tv[1].tv_usec = 0;
+	}
+	return do_utimes(AT_FDCWD, filename, times ? tv : NULL, AT_SYMLINK_NOFOLLOW);
+}

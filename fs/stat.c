@@ -14,6 +14,7 @@
 #include <linux/namei.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
+#include <linux/faudit.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -41,10 +42,18 @@ int vfs_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 {
 	struct inode *inode = dentry->d_inode;
 	int retval;
+	struct faudit_stat_arg arg;
 
 	retval = security_inode_getattr(mnt, dentry);
 	if (retval)
 		return retval;
+
+	arg.mnt = mnt;
+	arg.dentry = dentry;
+	arg.stat = stat;
+	if (virtinfo_notifier_call(VITYPE_FAUDIT, VIRTINFO_FAUDIT_STAT, &arg)
+			!= NOTIFY_DONE)
+		return arg.err;
 
 	if (inode->i_op->getattr)
 		return inode->i_op->getattr(mnt, dentry, stat);

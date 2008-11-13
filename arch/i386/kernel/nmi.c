@@ -579,7 +579,22 @@ EXPORT_SYMBOL(touch_nmi_watchdog);
 
 extern void die_nmi(struct pt_regs *, const char *msg);
 
-void nmi_watchdog_tick (struct pt_regs * regs)
+void smp_show_regs(struct pt_regs *regs, void *info)
+{
+	static DEFINE_SPINLOCK(show_regs_lock);
+
+	if (regs == NULL)
+		return;
+
+	spin_lock(&show_regs_lock);
+	bust_spinlocks(1);
+	printk("----------- IPI show regs -----------");
+	show_regs(regs);
+	bust_spinlocks(0);
+	spin_unlock(&show_regs_lock);
+}
+
+void nmi_watchdog_tick(struct pt_regs *regs)
 {
 
 	/*
@@ -595,10 +610,10 @@ void nmi_watchdog_tick (struct pt_regs * regs)
 	if (last_irq_sums[cpu] == sum) {
 		/*
 		 * Ayiee, looks like this CPU is stuck ...
-		 * wait a few IRQs (5 seconds) before doing the oops ...
+		 * wait a few IRQs (30 seconds) before doing the oops ...
 		 */
 		alert_counter[cpu]++;
-		if (alert_counter[cpu] == 5*nmi_hz)
+		if (alert_counter[cpu] == 30*nmi_hz)
 			/*
 			 * die_nmi will return ONLY if NOTIFY_STOP happens..
 			 */

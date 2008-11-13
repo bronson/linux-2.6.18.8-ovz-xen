@@ -9,6 +9,8 @@
 #include <linux/cache.h>
 #include <linux/rcupdate.h>
 
+#include <ub/ub_dcache.h>
+
 struct nameidata;
 struct vfsmount;
 
@@ -111,6 +113,9 @@ struct dentry {
 	struct dcookie_struct *d_cookie; /* cookie, if any */
 #endif
 	int d_mounted;
+#ifdef CONFIG_USER_RESOURCE
+	struct dentry_beancounter dentry_bc;
+#endif
 	unsigned char d_iname[DNAME_INLINE_LEN_MIN];	/* small names */
 };
 
@@ -173,9 +178,13 @@ d_iput:		no		no		no       yes
 
 #define DCACHE_REFERENCED	0x0008  /* Recently used, don't discard. */
 #define DCACHE_UNHASHED		0x0010	
+#define DCACHE_VIRTUAL		0x0100	/* ve accessible */
+
+extern void mark_tree_virtual(struct vfsmount *m, struct dentry *d);
 
 #define DCACHE_INOTIFY_PARENT_WATCHED	0x0020 /* Parent inode is watched */
 
+extern kmem_cache_t *dentry_cache;
 extern spinlock_t dcache_lock;
 
 /**
@@ -291,7 +300,12 @@ extern struct dentry * d_hash_and_lookup(struct dentry *, struct qstr *);
 /* validate "insecure" dentry pointer */
 extern int d_validate(struct dentry *, struct dentry *);
 
+extern int d_root_check(struct dentry *, struct vfsmount *);
 extern char * d_path(struct dentry *, struct vfsmount *, char *, int);
+extern char * __d_path( struct dentry *dentry, struct vfsmount *vfsmnt,
+			struct dentry *root, struct vfsmount *rootmnt,
+			char *buffer, int buflen);
+
   
 /* Allocation counts.. */
 
@@ -311,6 +325,12 @@ extern char * d_path(struct dentry *, struct vfsmount *, char *, int);
 static inline struct dentry *dget(struct dentry *dentry)
 {
 	if (dentry) {
+#ifdef CONFIG_USER_RESOURCE
+		preempt_disable();
+		if (ub_dentry_on && ub_dget_testone(dentry))
+			BUG();
+		preempt_enable_no_resched();
+#endif
 		BUG_ON(!atomic_read(&dentry->d_count));
 		atomic_inc(&dentry->d_count);
 	}
@@ -354,6 +374,8 @@ extern struct dentry *lookup_create(struct nameidata *nd, int is_dir);
 
 extern int sysctl_vfs_cache_pressure;
 
+extern int check_area_access_ve(struct dentry *, struct vfsmount *);
+extern int check_area_execute_ve(struct dentry *, struct vfsmount *);
 #endif /* __KERNEL__ */
 
 #endif	/* __LINUX_DCACHE_H */

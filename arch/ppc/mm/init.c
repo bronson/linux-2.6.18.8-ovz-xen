@@ -131,6 +131,7 @@ void show_mem(void)
 	printk("%d pages shared\n",shared);
 	printk("%d pages swap cached\n",cached);
 }
+EXPORT_SYMBOL(show_mem);
 
 /* Free up now-unused memory */
 static void free_sec(unsigned long start, unsigned long end, const char *name)

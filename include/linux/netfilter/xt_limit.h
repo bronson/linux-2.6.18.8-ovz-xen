@@ -18,4 +18,20 @@ struct xt_rateinfo {
 	/* Ugly, ugly fucker. */
 	struct xt_rateinfo *master;
 };
+
+#ifdef CONFIG_COMPAT
+struct compat_xt_rateinfo {
+	u_int32_t avg;    /* Average secs between packets * scale */
+	u_int32_t burst;  /* Period multiplier for upper limit. */
+
+	/* Used internally by the kernel */
+	compat_ulong_t prev;
+	u_int32_t credit;
+	u_int32_t credit_cap, cost;
+
+	/* Ugly, ugly fucker. */
+	compat_uptr_t master;
+};
+#endif
+
 #endif /*_XT_RATE_H*/

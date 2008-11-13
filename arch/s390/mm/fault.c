@@ -60,17 +60,9 @@ void bust_spinlocks(int yes)
 	if (yes) {
 		oops_in_progress = 1;
 	} else {
-		int loglevel_save = console_loglevel;
 		console_unblank();
 		oops_in_progress = 0;
-		/*
-		 * OK, the message is on the console.  Now we call printk()
-		 * without oops_in_progress set so that printk will give klogd
-		 * a poke.  Hold onto your hats...
-		 */
-		console_loglevel = 15;
-		printk(" ");
-		console_loglevel = loglevel_save;
+		wake_up_klogd();
 	}
 }
 

@@ -72,6 +72,10 @@ do {									\
 
 struct ip_conntrack_helper;
 
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/ve.h>
+#endif
+
 struct ip_conntrack
 {
 	/* Usage count in here is 1 for hash table/destruct timer, 1 per skb,
@@ -127,6 +131,9 @@ struct ip_conntrack
 	/* Traversed often, so hopefully in different cacheline to top */
 	/* These are my tuples; original and reply */
 	struct ip_conntrack_tuple_hash tuplehash[IP_CT_DIR_MAX];
+#ifdef CONFIG_VE_IPTABLES
+        struct ve_struct *ct_owner_env;
+#endif
 };
 
 struct ip_conntrack_expect
@@ -238,7 +245,15 @@ extern void ip_conntrack_tcp_update(struct sk_buff *skb,
 				    enum ip_conntrack_dir dir);
 
 /* Call me when a conntrack is destroyed. */
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/sched.h>
+#define ve_ip_conntrack_destroyed	\
+	(get_exec_env()->_ip_conntrack->_ip_conntrack_destroyed)
+#else
 extern void (*ip_conntrack_destroyed)(struct ip_conntrack *conntrack);
+#define ve_ip_conntrack_destroyed	ip_conntrack_destroyed
+#endif
+
 
 /* Fake conntrack entry for untracked connections */
 extern struct ip_conntrack ip_conntrack_untracked;
@@ -267,7 +282,7 @@ extern void ip_conntrack_proto_put(struct ip_conntrack_protocol *proto);
 extern void ip_ct_remove_expectations(struct ip_conntrack *ct);
 
 extern struct ip_conntrack *ip_conntrack_alloc(struct ip_conntrack_tuple *,
-					       struct ip_conntrack_tuple *);
+		struct ip_conntrack_tuple *, struct user_beancounter *);
 
 extern void ip_conntrack_free(struct ip_conntrack *ct);
 
@@ -275,6 +290,8 @@ extern void ip_conntrack_hash_insert(struct ip_conntrack *ct);
 
 extern struct ip_conntrack_expect *
 __ip_conntrack_expect_find(const struct ip_conntrack_tuple *tuple);
+
+extern void ip_conntrack_expect_insert(struct ip_conntrack_expect *exp);
 
 extern struct ip_conntrack_expect *
 ip_conntrack_expect_find(const struct ip_conntrack_tuple *tuple);
@@ -298,6 +315,7 @@ static inline int is_dying(struct ip_conntrack *ct)
 
 extern unsigned int ip_conntrack_htable_size;
 extern int ip_conntrack_checksum;
+extern int ip_conntrack_disable_ve0;
  
 #define CONNTRACK_STAT_INC(count) (__get_cpu_var(ip_conntrack_stat).count++)
 
@@ -349,6 +367,9 @@ ip_conntrack_event_cache(enum ip_conntrack_events event,
 	struct ip_conntrack *ct = (struct ip_conntrack *)skb->nfct;
 	struct ip_conntrack_ecache *ecache;
 	
+	if (!ve_is_super(get_exec_env()))
+		return;
+
 	local_bh_disable();
 	ecache = &__get_cpu_var(ip_conntrack_ecache);
 	if (ct != ecache->ct)
@@ -360,7 +381,7 @@ ip_conntrack_event_cache(enum ip_conntrack_events event,
 static inline void ip_conntrack_event(enum ip_conntrack_events event,
 				      struct ip_conntrack *ct)
 {
-	if (is_confirmed(ct) && !is_dying(ct))
+	if (is_confirmed(ct) && !is_dying(ct) && ve_is_super(get_exec_env()))
 		atomic_notifier_call_chain(&ip_conntrack_chain, event, ct);
 }
 
@@ -368,7 +389,9 @@ static inline void
 ip_conntrack_expect_event(enum ip_conntrack_expect_events event,
 			  struct ip_conntrack_expect *exp)
 {
-	atomic_notifier_call_chain(&ip_conntrack_expect_chain, event, exp);
+	if (ve_is_super(get_exec_env()))
+		atomic_notifier_call_chain(&ip_conntrack_expect_chain, event,
+									exp);
 }
 #else /* CONFIG_IP_NF_CONNTRACK_EVENTS */
 static inline void ip_conntrack_event_cache(enum ip_conntrack_events event, 

@@ -138,6 +138,8 @@ config NR_CPUS
 	depends on SMP
 	default "32"
 
+source "kernel/Kconfig.fairsched"
+
 source "drivers/cpufreq/Kconfig"
 
 config US3_FREQ
@@ -431,8 +433,12 @@ endmenu
 
 source "arch/sparc64/Kconfig.debug"
 
+source "kernel/Kconfig.openvz"
+
 source "security/Kconfig"
 
 source "crypto/Kconfig"
 
 source "lib/Kconfig"
+
+source "kernel/ub/Kconfig"

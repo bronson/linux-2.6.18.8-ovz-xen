@@ -29,6 +29,7 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/notifier.h>
+#include <net/sock.h>
 
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4/ip_conntrack.h>
@@ -39,6 +40,8 @@
 
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/nfnetlink_conntrack.h>
+#include <ub/beancounter.h>
+#include <ub/ub_sk.h>
 
 MODULE_LICENSE("GPL");
 
@@ -418,7 +421,7 @@ ctnetlink_dump_table(struct sk_buff *skb, struct netlink_callback *cb)
 	last = (struct ip_conntrack *)cb->args[1];
 	for (; cb->args[0] < ip_conntrack_htable_size; cb->args[0]++) {
 restart:
-		list_for_each_prev(i, &ip_conntrack_hash[cb->args[0]]) {
+		list_for_each_prev(i, &ve_ip_conntrack_hash[cb->args[0]]) {
 			h = (struct ip_conntrack_tuple_hash *) i;
 			if (DIRECTION(h) != IP_CT_DIR_ORIGINAL)
 				continue;
@@ -465,7 +468,7 @@ ctnetlink_dump_table_w(struct sk_buff *skb, struct netlink_callback *cb)
 
 	write_lock_bh(&ip_conntrack_lock);
 	for (; cb->args[0] < ip_conntrack_htable_size; cb->args[0]++, *id = 0) {
-		list_for_each_prev(i, &ip_conntrack_hash[cb->args[0]]) {
+		list_for_each_prev(i, &ve_ip_conntrack_hash[cb->args[0]]) {
 			h = (struct ip_conntrack_tuple_hash *) i;
 			if (DIRECTION(h) != IP_CT_DIR_ORIGINAL)
 				continue;
@@ -716,6 +719,9 @@ ctnetlink_del_conntrack(struct sock *ctnl, struct sk_buff *skb,
 
 	DEBUGP("entered %s\n", __FUNCTION__);
 
+	if (!ve_ip_ct_initialized())
+		return -ENOPROTOOPT;
+
 	if (nfattr_bad_size(cda, CTA_MAX, cta_min))
 		return -EINVAL;
 
@@ -767,6 +773,9 @@ ctnetlink_get_conntrack(struct sock *ctnl, struct sk_buff *skb,
 	int err = 0;
 
 	DEBUGP("entered %s\n", __FUNCTION__);
+
+	if (!ve_ip_ct_initialized())
+		return -ENOPROTOOPT;
 
 	if (nlh->nlmsg_flags & NLM_F_DUMP) {
 		struct nfgenmsg *msg = NLMSG_DATA(nlh);
@@ -1019,14 +1028,15 @@ ctnetlink_change_conntrack(struct ip_conntrack *ct, struct nfattr *cda[])
 static int
 ctnetlink_create_conntrack(struct nfattr *cda[], 
 			   struct ip_conntrack_tuple *otuple,
-			   struct ip_conntrack_tuple *rtuple)
+			   struct ip_conntrack_tuple *rtuple,
+			   struct user_beancounter *ub)
 {
 	struct ip_conntrack *ct;
 	int err = -EINVAL;
 
 	DEBUGP("entered %s\n", __FUNCTION__);
 
-	ct = ip_conntrack_alloc(otuple, rtuple);
+	ct = ip_conntrack_alloc(otuple, rtuple, ub);
 	if (ct == NULL || IS_ERR(ct))
 		return -ENOMEM;	
 
@@ -1078,6 +1088,9 @@ ctnetlink_new_conntrack(struct sock *ctnl, struct sk_buff *skb,
 
 	DEBUGP("entered %s\n", __FUNCTION__);
 
+	if (!ve_ip_ct_initialized())
+		return -ENOPROTOOPT;
+
 	if (nfattr_bad_size(cda, CTA_MAX, cta_min))
 		return -EINVAL;
 
@@ -1103,8 +1116,16 @@ ctnetlink_new_conntrack(struct sock *ctnl, struct sk_buff *skb,
 		write_unlock_bh(&ip_conntrack_lock);
 		DEBUGP("no such conntrack, create new\n");
 		err = -ENOENT;
-		if (nlh->nlmsg_flags & NLM_F_CREATE)
-			err = ctnetlink_create_conntrack(cda, &otuple, &rtuple);
+		if (nlh->nlmsg_flags & NLM_F_CREATE) {
+#ifdef CONFIG_USER_RESOURCE
+			if (skb->sk)
+				err = ctnetlink_create_conntrack(cda, &otuple,
+						&rtuple, sock_bc(skb->sk)->ub);
+			else
+#endif
+				err = ctnetlink_create_conntrack(cda,
+						&otuple, &rtuple, NULL);
+		}
 		return err;
 	}
 	/* implicit 'else' */
@@ -1292,7 +1313,7 @@ ctnetlink_exp_dump_table(struct sk_buff *skb, struct netlink_callback *cb)
 	DEBUGP("entered %s, last id=%llu\n", __FUNCTION__, *id);
 
 	read_lock_bh(&ip_conntrack_lock);
-	list_for_each_prev(i, &ip_conntrack_expect_list) {
+	list_for_each_prev(i, &ve_ip_conntrack_expect_list) {
 		exp = (struct ip_conntrack_expect *) i;
 		if (exp->id <= *id)
 			continue;
@@ -1326,6 +1347,9 @@ ctnetlink_get_expect(struct sock *ctnl, struct sk_buff *skb,
 	int err = 0;
 
 	DEBUGP("entered %s\n", __FUNCTION__);
+
+	if (!ve_ip_ct_initialized())
+		return -ENOPROTOOPT;
 
 	if (nfattr_bad_size(cda, CTA_EXPECT_MAX, cta_min_exp))
 		return -EINVAL;
@@ -1400,6 +1424,9 @@ ctnetlink_del_expect(struct sock *ctnl, struct sk_buff *skb,
 	struct ip_conntrack_helper *h;
 	int err;
 
+	if (!ve_ip_ct_initialized())
+		return -ENOPROTOOPT;
+
 	if (nfattr_bad_size(cda, CTA_EXPECT_MAX, cta_min_exp))
 		return -EINVAL;
 
@@ -1438,7 +1465,7 @@ ctnetlink_del_expect(struct sock *ctnl, struct sk_buff *skb,
 			write_unlock_bh(&ip_conntrack_lock);
 			return -EINVAL;
 		}
-		list_for_each_entry_safe(exp, tmp, &ip_conntrack_expect_list,
+		list_for_each_entry_safe(exp, tmp, &ve_ip_conntrack_expect_list,
 					 list) {
 			if (exp->master->helper == h 
 			    && del_timer(&exp->timeout)) {
@@ -1450,7 +1477,7 @@ ctnetlink_del_expect(struct sock *ctnl, struct sk_buff *skb,
 	} else {
 		/* This basically means we have to flush everything*/
 		write_lock_bh(&ip_conntrack_lock);
-		list_for_each_entry_safe(exp, tmp, &ip_conntrack_expect_list,
+		list_for_each_entry_safe(exp, tmp, &ve_ip_conntrack_expect_list,
 					 list) {
 			if (del_timer(&exp->timeout)) {
 				ip_ct_unlink_expect(exp);
@@ -1531,6 +1558,9 @@ ctnetlink_new_expect(struct sock *ctnl, struct sk_buff *skb,
 	int err = 0;
 
 	DEBUGP("entered %s\n", __FUNCTION__);	
+
+	if (!ve_ip_ct_initialized())
+		return -ENOPROTOOPT;
 
 	if (nfattr_bad_size(cda, CTA_EXPECT_MAX, cta_min_exp))
 		return -EINVAL;

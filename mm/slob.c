@@ -345,16 +345,16 @@ EXPORT_SYMBOL(slab_reclaim_pages);
 
 #ifdef CONFIG_SMP
 
-void *__alloc_percpu(size_t size)
+void *__alloc_percpu_mask(size_t size, gfp_t gfp)
 {
 	int i;
-	struct percpu_data *pdata = kmalloc(sizeof (*pdata), GFP_KERNEL);
+	struct percpu_data *pdata = kmalloc(sizeof (*pdata), gfp);
 
 	if (!pdata)
 		return NULL;
 
 	for_each_possible_cpu(i) {
-		pdata->ptrs[i] = kmalloc(size, GFP_KERNEL);
+		pdata->ptrs[i] = kmalloc(size, gfp);
 		if (!pdata->ptrs[i])
 			goto unwind_oom;
 		memset(pdata->ptrs[i], 0, size);
@@ -372,7 +372,7 @@ unwind_oom:
 	kfree(pdata);
 	return NULL;
 }
-EXPORT_SYMBOL(__alloc_percpu);
+EXPORT_SYMBOL(__alloc_percpu_mask);
 
 void
 free_percpu(const void *objp)

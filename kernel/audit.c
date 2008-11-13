@@ -53,6 +53,7 @@
 
 #include <net/sock.h>
 #include <net/netlink.h>
+#include <net/netlink_sock.h>
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/selinux.h>
@@ -488,6 +489,9 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	char			*ctx;
 	u32			len;
 
+	if (!ve_is_super(skb->owner_env))
+		return -ECONNREFUSED;
+
 	err = audit_netlink_ok(skb, msg_type);
 	if (err)
 		return err;
@@ -670,6 +674,8 @@ static void audit_receive(struct sock *sk, int length)
 	struct sk_buff  *skb;
 	unsigned int qlen;
 
+	BUG();
+
 	mutex_lock(&audit_cmd_mutex);
 
 	for (qlen = skb_queue_len(&sk->sk_receive_queue); qlen; qlen--) {
@@ -678,6 +684,14 @@ static void audit_receive(struct sock *sk, int length)
 		kfree_skb(skb);
 	}
 	mutex_unlock(&audit_cmd_mutex);
+}
+
+static void audit_rcv(struct sk_buff *skb)
+{
+	mutex_lock(&audit_cmd_mutex);
+	audit_receive_skb(skb);
+	mutex_unlock(&audit_cmd_mutex);
+	kfree_skb(skb);
 }
 
 #ifdef CONFIG_AUDITSYSCALL
@@ -691,6 +705,7 @@ static const struct inotify_operations audit_inotify_ops = {
 static int __init audit_init(void)
 {
 	int i;
+	struct netlink_sock *nlk;
 
 	printk(KERN_INFO "audit: initializing netlink socket (%s)\n",
 	       audit_default ? "enabled" : "disabled");
@@ -700,6 +715,9 @@ static int __init audit_init(void)
 		audit_panic("cannot initialize netlink socket");
 	else
 		audit_sock->sk_sndtimeo = MAX_SCHEDULE_TIMEOUT;
+
+	nlk = nlk_sk(audit_sock);
+	nlk->netlink_rcv = audit_rcv;
 
 	skb_queue_head_init(&audit_skb_queue);
 	audit_initialized = 1;

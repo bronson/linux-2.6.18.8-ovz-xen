@@ -31,6 +31,7 @@
  * POSIX clocks & timers
  */
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
@@ -48,6 +49,8 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/module.h>
+
+#include <ub/beancounter.h>
 
 /*
  * Management arrays for POSIX timers.	 Timers are kept in slab memory
@@ -242,7 +245,8 @@ static __init int init_posix_timers(void)
 	register_posix_clock(CLOCK_MONOTONIC, &clock_monotonic);
 
 	posix_timers_cache = kmem_cache_create("posix_timers_cache",
-					sizeof (struct k_itimer), 0, 0, NULL, NULL);
+					sizeof (struct k_itimer), 0,
+					SLAB_UBC, NULL, NULL);
 	idr_init(&posix_timers_id);
 	return 0;
 }
@@ -298,6 +302,13 @@ void do_schedule_next_timer(struct siginfo *info)
 
 int posix_timer_event(struct k_itimer *timr,int si_private)
 {
+	int ret;
+	struct ve_struct *ve;
+	struct user_beancounter *ub;
+
+	ve = set_exec_env(timr->it_process->ve_task_info.owner_env);
+	ub = set_exec_ub(timr->it_process->task_bc.task_ub);
+
 	memset(&timr->sigq->info, 0, sizeof(siginfo_t));
 	timr->sigq->info.si_sys_private = si_private;
 	/* Send signal to the process that owns this timer.*/
@@ -310,11 +321,11 @@ int posix_timer_event(struct k_itimer *timr,int si_private)
 
 	if (timr->it_sigev_notify & SIGEV_THREAD_ID) {
 		struct task_struct *leader;
-		int ret = send_sigqueue(timr->it_sigev_signo, timr->sigq,
+		ret = send_sigqueue(timr->it_sigev_signo, timr->sigq,
 					timr->it_process);
 
 		if (likely(ret >= 0))
-			return ret;
+			goto out;
 
 		timr->it_sigev_notify = SIGEV_SIGNAL;
 		leader = timr->it_process->group_leader;
@@ -322,8 +333,12 @@ int posix_timer_event(struct k_itimer *timr,int si_private)
 		timr->it_process = leader;
 	}
 
-	return send_group_sigqueue(timr->it_sigev_signo, timr->sigq,
+	ret = send_group_sigqueue(timr->it_sigev_signo, timr->sigq,
 				   timr->it_process);
+out:
+	(void)set_exec_ub(ub);
+	(void)set_exec_env(ve);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(posix_timer_event);
 
@@ -372,7 +387,7 @@ static struct task_struct * good_sigevent(sigevent_t * event)
 	struct task_struct *rtn = current->group_leader;
 
 	if ((event->sigev_notify & SIGEV_THREAD_ID ) &&
-		(!(rtn = find_task_by_pid(event->sigev_notify_thread_id)) ||
+		(!(rtn = find_task_by_pid_ve(event->sigev_notify_thread_id)) ||
 		 rtn->tgid != current->tgid ||
 		 (event->sigev_notify & ~SIGEV_THREAD_ID) != SIGEV_SIGNAL))
 		return NULL;

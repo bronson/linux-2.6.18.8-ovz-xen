@@ -7,6 +7,8 @@
 #include <linux/user.h>
 #include <linux/ptrace.h>
 
+extern int sysctl_at_vsyscall;
+
 struct elf_siginfo
 {
 	int	si_signo;			/* signal number */

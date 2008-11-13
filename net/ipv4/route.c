@@ -116,6 +116,8 @@
 
 #define RT_GC_TIMEOUT (300*HZ)
 
+int ip_rt_src_check		= 1;
+
 static int ip_rt_min_delay		= 2 * HZ;
 static int ip_rt_max_delay		= 10 * HZ;
 static int ip_rt_max_size;
@@ -261,11 +263,28 @@ static unsigned int rt_hash_code(u32 daddr, u32 saddr)
 		& rt_hash_mask);
 }
 
+void prepare_rt_cache(void)
+{
+#ifdef CONFIG_VE
+	struct rtable *r;
+	int i;
+
+	for (i = rt_hash_mask; i >= 0; i--) {
+		spin_lock_bh(rt_hash_lock_addr(i));
+		for (r = rt_hash_table[i].chain; r; r = r->u.rt_next) {
+			r->fl.owner_env = get_ve0();
+		}
+		spin_unlock_bh(rt_hash_lock_addr(i));
+        }
+#endif
+}
+
 #ifdef CONFIG_PROC_FS
 struct rt_cache_iter_state {
 	int bucket;
 };
 
+static struct rtable *rt_cache_get_next(struct seq_file *seq, struct rtable *r);
 static struct rtable *rt_cache_get_first(struct seq_file *seq)
 {
 	struct rtable *r = NULL;
@@ -278,6 +297,8 @@ static struct rtable *rt_cache_get_first(struct seq_file *seq)
 			break;
 		rcu_read_unlock_bh();
 	}
+	if (r && !ve_accessible_strict(r->fl.owner_env, get_exec_env()))
+		r = rt_cache_get_next(seq, r);
 	return r;
 }
 
@@ -285,6 +306,7 @@ static struct rtable *rt_cache_get_next(struct seq_file *seq, struct rtable *r)
 {
 	struct rt_cache_iter_state *st = rcu_dereference(seq->private);
 
+loop:
 	r = r->u.rt_next;
 	while (!r) {
 		rcu_read_unlock_bh();
@@ -293,6 +315,8 @@ static struct rtable *rt_cache_get_next(struct seq_file *seq, struct rtable *r)
 		rcu_read_lock_bh();
 		r = rt_hash_table[st->bucket].chain;
 	}
+	if (r && !ve_accessible_strict(r->fl.owner_env, get_exec_env()))
+		goto loop;
 	return r;
 }
 
@@ -564,7 +588,8 @@ static inline int compare_keys(struct flowi *fl1, struct flowi *fl2)
 {
 	return memcmp(&fl1->nl_u.ip4_u, &fl2->nl_u.ip4_u, sizeof(fl1->nl_u.ip4_u)) == 0 &&
 	       fl1->oif     == fl2->oif &&
-	       fl1->iif     == fl2->iif;
+	       fl1->iif     == fl2->iif &&
+	       ve_accessible_strict(fl1->owner_env, fl2->owner_env);
 }
 
 #ifdef CONFIG_IP_ROUTE_MULTIPATH_CACHED
@@ -678,26 +703,105 @@ static void rt_check_expire(unsigned long dummy)
 	mod_timer(&rt_periodic_timer, jiffies + ip_rt_gc_interval);
 }
 
+typedef unsigned long rt_flush_gen_t;
+
+#ifdef CONFIG_VE
+
+static rt_flush_gen_t rt_flush_gen;
+
+/* called under rt_flush_lock */
+static void set_rt_flush_required(struct ve_struct *env)
+{
+	/*
+	 * If the global generation rt_flush_gen is equal to G, then
+	 * the pass considering entries labelled by G is yet to come.
+	 */
+	env->rt_flush_required = rt_flush_gen;
+}
+
+static spinlock_t rt_flush_lock;
+static rt_flush_gen_t reset_rt_flush_required(void)
+{
+	rt_flush_gen_t g;
+
+	spin_lock_bh(&rt_flush_lock);
+	g = rt_flush_gen++;
+	spin_unlock_bh(&rt_flush_lock);
+	return g;
+}
+
+static int check_rt_flush_required(struct ve_struct *env, rt_flush_gen_t gen)
+{
+	/* can be checked without the lock */
+	return env->rt_flush_required >= gen;
+}
+
+#else
+
+static void set_rt_flush_required(struct ve_struct *env)
+{
+}
+
+static rt_flush_gen_t reset_rt_flush_required(void)
+{
+	return 0;
+}
+
+#endif
+
 /* This can run from both BH and non-BH contexts, the latter
  * in the case of a forced flush event.
  */
 static void rt_run_flush(unsigned long dummy)
 {
 	int i;
-	struct rtable *rth, *next;
+	struct rtable * rth, * next;
+	struct rtable * tail;
+	rt_flush_gen_t gen;
 
 	rt_deadline = 0;
 
 	get_random_bytes(&rt_hash_rnd, 4);
 
+	gen = reset_rt_flush_required();
+
 	for (i = rt_hash_mask; i >= 0; i--) {
+#ifdef CONFIG_VE
+		struct rtable ** prev, * p;
+
+		spin_lock_bh(rt_hash_lock_addr(i));
+		rth = rt_hash_table[i].chain;
+
+		/* defer releasing the head of the list after spin_unlock */
+		for (tail = rth; tail; tail = tail->u.rt_next)
+			if (!check_rt_flush_required(tail->fl.owner_env, gen))
+				break;
+		if (rth != tail)
+			rt_hash_table[i].chain = tail;
+
+		/* call rt_free on entries after the tail requiring flush */
+		prev = &rt_hash_table[i].chain;
+		for (p = *prev; p; p = next) {
+			next = p->u.rt_next;
+			if (!check_rt_flush_required(p->fl.owner_env, gen)) {
+				prev = &p->u.rt_next;
+			} else {
+				*prev = next;
+				rt_free(p);
+			}
+		}
+
+#else
 		spin_lock_bh(rt_hash_lock_addr(i));
 		rth = rt_hash_table[i].chain;
 		if (rth)
 			rt_hash_table[i].chain = NULL;
+		tail = NULL;
+
+#endif
 		spin_unlock_bh(rt_hash_lock_addr(i));
 
-		for (; rth; rth = next) {
+		for (; rth != tail; rth = next) {
 			next = rth->u.rt_next;
 			rt_free(rth);
 		}
@@ -736,6 +840,8 @@ void rt_cache_flush(int delay)
 			delay = tmo;
 	}
 
+	set_rt_flush_required(get_exec_env());
+
 	if (delay <= 0) {
 		spin_unlock_bh(&rt_flush_lock);
 		rt_run_flush(0);
@@ -751,9 +857,30 @@ void rt_cache_flush(int delay)
 
 static void rt_secret_rebuild(unsigned long dummy)
 {
+	int i;
+	struct rtable *rth, *next;
 	unsigned long now = jiffies;
 
-	rt_cache_flush(0);
+	spin_lock_bh(&rt_flush_lock);
+	del_timer(&rt_flush_timer);
+	spin_unlock_bh(&rt_flush_lock);
+
+	rt_deadline = 0;
+	get_random_bytes(&rt_hash_rnd, 4);
+
+	for (i = rt_hash_mask; i >= 0; i--) {
+		spin_lock_bh(rt_hash_lock_addr(i));
+		rth = rt_hash_table[i].chain;
+		if (rth)
+			rt_hash_table[i].chain = NULL;
+		spin_unlock_bh(rt_hash_lock_addr(i));
+
+		for (; rth; rth = next) {
+			next = rth->u.rt_next;
+			rt_free(rth);
+		}
+	}
+
 	mod_timer(&rt_secret_timer, now + ip_rt_secret_interval);
 }
 
@@ -1127,6 +1254,9 @@ void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 	u32  skeys[2] = { saddr, 0 };
 	int  ikeys[2] = { dev->ifindex, 0 };
 	struct netevent_redirect netevent;
+	struct ve_struct *ve;
+  
+	ve = get_exec_env();
 
 	if (!in_dev)
 		return;
@@ -1159,6 +1289,10 @@ void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 				if (rth->fl.fl4_dst != daddr ||
 				    rth->fl.fl4_src != skeys[i] ||
 				    rth->fl.oif != ikeys[k] ||
+#ifdef CONFIG_VE
+				    !ve_accessible_strict(rth->fl.owner_env,
+					    		  ve) ||
+#endif
 				    rth->fl.iif != 0) {
 					rthp = &rth->u.rt_next;
 					continue;
@@ -1197,6 +1331,9 @@ void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 				rt->u.dst.neighbour	= NULL;
 				rt->u.dst.hh		= NULL;
 				rt->u.dst.xfrm		= NULL;
+#ifdef CONFIG_VE
+				rt->fl.owner_env = ve;
+#endif
 
 				rt->rt_flags		|= RTCF_REDIRECTED;
 
@@ -1638,6 +1775,9 @@ static int ip_route_input_mc(struct sk_buff *skb, u32 daddr, u32 saddr,
 #ifdef CONFIG_IP_ROUTE_FWMARK
 	rth->fl.fl4_fwmark= skb->nfmark;
 #endif
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
+#endif
 	rth->fl.fl4_src	= saddr;
 	rth->rt_src	= saddr;
 #ifdef CONFIG_NET_CLS_ROUTE
@@ -1775,13 +1915,16 @@ static inline int __mkroute_input(struct sk_buff *skb,
 #endif
 	if (in_dev->cnf.no_policy)
 		rth->u.dst.flags |= DST_NOPOLICY;
-	if (in_dev->cnf.no_xfrm)
+	if (out_dev->cnf.no_xfrm)
 		rth->u.dst.flags |= DST_NOXFRM;
 	rth->fl.fl4_dst	= daddr;
 	rth->rt_dst	= daddr;
 	rth->fl.fl4_tos	= tos;
 #ifdef CONFIG_IP_ROUTE_FWMARK
 	rth->fl.fl4_fwmark= skb->nfmark;
+#endif
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
 #endif
 	rth->fl.fl4_src	= saddr;
 	rth->rt_src	= saddr;
@@ -2028,6 +2171,9 @@ local_input:
 #ifdef CONFIG_IP_ROUTE_FWMARK
 	rth->fl.fl4_fwmark= skb->nfmark;
 #endif
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
+#endif
 	rth->fl.fl4_src	= saddr;
 	rth->rt_src	= saddr;
 #ifdef CONFIG_NET_CLS_ROUTE
@@ -2106,6 +2252,9 @@ int ip_route_input(struct sk_buff *skb, u32 daddr, u32 saddr,
 		    rth->fl.oif == 0 &&
 #ifdef CONFIG_IP_ROUTE_FWMARK
 		    rth->fl.fl4_fwmark == skb->nfmark &&
+#endif
+#ifdef CONFIG_VE
+		    rth->fl.owner_env == get_exec_env() &&
 #endif
 		    rth->fl.fl4_tos == tos) {
 			rth->u.dst.lastuse = jiffies;
@@ -2232,6 +2381,9 @@ static inline int __mkroute_output(struct rtable **result,
 	rth->fl.oif	= oldflp->oif;
 #ifdef CONFIG_IP_ROUTE_FWMARK
 	rth->fl.fl4_fwmark= oldflp->fl4_fwmark;
+#endif
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
 #endif
 	rth->rt_dst	= fl->fl4_dst;
 	rth->rt_src	= fl->fl4_src;
@@ -2403,10 +2555,13 @@ static int ip_route_output_slow(struct rtable **rp, const struct flowi *oldflp)
 		    ZERONET(oldflp->fl4_src))
 			goto out;
 
-		/* It is equivalent to inet_addr_type(saddr) == RTN_LOCAL */
-		dev_out = ip_dev_find(oldflp->fl4_src);
-		if (dev_out == NULL)
-			goto out;
+		if (ip_rt_src_check) {
+			/* It is equivalent to
+			   inet_addr_type(saddr) == RTN_LOCAL */
+			dev_out = ip_dev_find(oldflp->fl4_src);
+			if (dev_out == NULL)
+				goto out;
+		}
 
 		/* I removed check for oif == dev_out->oif here.
 		   It was wrong for two reasons:
@@ -2432,6 +2587,12 @@ static int ip_route_output_slow(struct rtable **rp, const struct flowi *oldflp)
 			   will not leave this host and route is valid).
 			   Luckily, this hack is good workaround.
 			 */
+
+			if (dev_out == NULL) {
+				dev_out = ip_dev_find(oldflp->fl4_src);
+				if (dev_out == NULL)
+					goto out;
+			}
 
 			fl.oif = dev_out->ifindex;
 			goto make_route;
@@ -2579,6 +2740,7 @@ int __ip_route_output_key(struct rtable **rp, const struct flowi *flp)
 #ifdef CONFIG_IP_ROUTE_FWMARK
 		    rth->fl.fl4_fwmark == flp->fl4_fwmark &&
 #endif
+		    ve_accessible_strict(rth->fl.owner_env, get_exec_env()) &&
 		    !((rth->fl.fl4_tos ^ flp->fl4_tos) &
 			    (IPTOS_RT_MASK | RTO_ONLINK))) {
 
@@ -2709,7 +2871,7 @@ static int rt_fill_info(struct sk_buff *skb, u32 pid, u32 seq, int event,
 		u32 dst = rt->rt_dst;
 
 		if (MULTICAST(dst) && !LOCAL_MCAST(dst) &&
-		    ipv4_devconf.mc_forwarding) {
+		    ve_ipv4_devconf.mc_forwarding) {
 			int err = ipmr_get_route(skb, r, nowait);
 			if (err <= 0) {
 				if (!nowait) {
@@ -2860,22 +3022,22 @@ void ip_rt_multicast_event(struct in_device *in_dev)
 }
 
 #ifdef CONFIG_SYSCTL
-static int flush_delay;
+int ipv4_flush_delay;
 
-static int ipv4_sysctl_rtcache_flush(ctl_table *ctl, int write,
+int ipv4_sysctl_rtcache_flush(ctl_table *ctl, int write,
 					struct file *filp, void __user *buffer,
 					size_t *lenp, loff_t *ppos)
 {
 	if (write) {
 		proc_dointvec(ctl, write, filp, buffer, lenp, ppos);
-		rt_cache_flush(flush_delay);
+		rt_cache_flush(ipv4_flush_delay);
 		return 0;
 	} 
 
 	return -EINVAL;
 }
 
-static int ipv4_sysctl_rtcache_flush_strategy(ctl_table *table,
+int ipv4_sysctl_rtcache_flush_strategy(ctl_table *table,
 						int __user *name,
 						int nlen,
 						void __user *oldval,
@@ -2897,7 +3059,7 @@ ctl_table ipv4_route_table[] = {
         {
 		.ctl_name 	= NET_IPV4_ROUTE_FLUSH,
 		.procname	= "flush",
-		.data		= &flush_delay,
+		.data		= &ipv4_flush_delay,
 		.maxlen		= sizeof(int),
 		.mode		= 0200,
 		.proc_handler	= &ipv4_sysctl_rtcache_flush,
@@ -3191,15 +3353,18 @@ int __init ip_rt_init(void)
 #ifdef CONFIG_PROC_FS
 	{
 	struct proc_dir_entry *rtstat_pde = NULL; /* keep gcc happy */
-	if (!proc_net_fops_create("rt_cache", S_IRUGO, &rt_cache_seq_fops) ||
-	    !(rtstat_pde = create_proc_entry("rt_cache", S_IRUGO, 
-			    		     proc_net_stat))) {
+
+	if (!proc_glob_fops_create("net/rt_cache",
+				S_IRUGO, &rt_cache_seq_fops))
 		return -ENOMEM;
-	}
+
+	if (!(rtstat_pde = create_proc_glob_entry("net/stat/rt_cache",
+				S_IRUGO, NULL)))
+		return -ENOMEM;
 	rtstat_pde->proc_fops = &rt_cpu_seq_fops;
 	}
 #ifdef CONFIG_NET_CLS_ROUTE
-	create_proc_read_entry("rt_acct", 0, proc_net, ip_rt_acct_read, NULL);
+	create_proc_read_entry("net/rt_acct", 0, NULL, ip_rt_acct_read, NULL);
 #endif
 #endif
 #ifdef CONFIG_XFRM

@@ -23,6 +23,8 @@
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
 
+#include <ub/ub_vmpages.h>
+
 static pmd_t *get_old_pmd(struct mm_struct *mm, unsigned long addr)
 {
 	pgd_t *pgd;
@@ -166,17 +168,21 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 	unsigned long hiwater_vm;
 	int split = 0;
 
+	if (ub_memory_charge(mm, new_len, vm_flags,
+				vma->vm_file, UB_HARD))
+		goto err;
+
 	/*
 	 * We'd prefer to avoid failure later on in do_munmap:
 	 * which may split one vma into three before unmapping.
 	 */
 	if (mm->map_count >= sysctl_max_map_count - 3)
-		return -ENOMEM;
+		goto err_nomem;
 
 	new_pgoff = vma->vm_pgoff + ((old_addr - vma->vm_start) >> PAGE_SHIFT);
 	new_vma = copy_vma(&vma, new_addr, new_len, new_pgoff);
 	if (!new_vma)
-		return -ENOMEM;
+		goto err_nomem;
 
 	moved_len = move_page_tables(vma, old_addr, new_vma, new_addr, old_len);
 	if (moved_len < old_len) {
@@ -235,7 +241,13 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 					   new_addr + new_len);
 	}
 
-	return new_addr;
+	if (new_addr != -ENOMEM)
+		return new_addr;
+
+err_nomem:
+	ub_memory_uncharge(mm, new_len, vm_flags, vma->vm_file);
+err:
+	return -ENOMEM;
 }
 
 /*
@@ -359,7 +371,15 @@ unsigned long do_mremap(unsigned long addr,
 			max_addr = vma->vm_next->vm_start;
 		/* can we just expand the current mapping? */
 		if (max_addr - addr >= new_len) {
-			int pages = (new_len - old_len) >> PAGE_SHIFT;
+			unsigned long len;
+			int pages;
+
+			len = new_len - old_len;
+			pages = len >> PAGE_SHIFT;
+			ret = -ENOMEM;
+			if (ub_memory_charge(mm, len, vma->vm_flags,
+						vma->vm_file, UB_HARD))
+				goto out;
 
 			vma_adjust(vma, vma->vm_start,
 				addr + new_len, vma->vm_pgoff, NULL);

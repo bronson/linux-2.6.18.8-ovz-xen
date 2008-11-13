@@ -19,6 +19,7 @@
  */
 #define TIMEOUT	(20 * HZ)
 
+extern atomic_t global_suspend;
 
 static inline int freezeable(struct task_struct * p)
 {
@@ -26,32 +27,10 @@ static inline int freezeable(struct task_struct * p)
 	    (p->flags & PF_NOFREEZE) ||
 	    (p->exit_state == EXIT_ZOMBIE) ||
 	    (p->exit_state == EXIT_DEAD) ||
-	    (p->state == TASK_STOPPED))
+	    (p->state == TASK_STOPPED) ||
+	    (p->state == TASK_TRACED))
 		return 0;
 	return 1;
-}
-
-/* Refrigerator is place where frozen processes are stored :-). */
-void refrigerator(void)
-{
-	/* Hmm, should we be allowed to suspend when there are realtime
-	   processes around? */
-	long save;
-	save = current->state;
-	pr_debug("%s entered refrigerator\n", current->comm);
-	printk("=");
-
-	frozen_process(current);
-	spin_lock_irq(&current->sighand->siglock);
-	recalc_sigpending(); /* We sent fake signal, clean it up */
-	spin_unlock_irq(&current->sighand->siglock);
-
-	while (frozen(current)) {
-		current->state = TASK_UNINTERRUPTIBLE;
-		schedule();
-	}
-	pr_debug("%s left refrigerator\n", current->comm);
-	current->state = save;
 }
 
 static inline void freeze_process(struct task_struct *p)
@@ -86,13 +65,14 @@ int freeze_processes(void)
 	unsigned long start_time;
 	struct task_struct *g, *p;
 
+	atomic_inc(&global_suspend);
 	printk( "Stopping tasks: " );
 	start_time = jiffies;
 	user_frozen = 0;
 	do {
 		nr_user = todo = 0;
 		read_lock(&tasklist_lock);
-		do_each_thread(g, p) {
+		do_each_thread_all(g, p) {
 			if (!freezeable(p))
 				continue;
 			if (frozen(p))
@@ -115,7 +95,7 @@ int freeze_processes(void)
 					freeze_process(p);
 				todo++;
 			}
-		} while_each_thread(g, p);
+		} while_each_thread_all(g, p);
 		read_unlock(&tasklist_lock);
 		todo += nr_user;
 		if (!user_frozen && !nr_user) {
@@ -128,6 +108,8 @@ int freeze_processes(void)
 			break;
 	} while(todo);
 
+	atomic_dec(&global_suspend);
+
 	/* This does not unfreeze processes that are already frozen
 	 * (we have slightly ugly calling convention in that respect,
 	 * and caller must call thaw_processes() if something fails),
@@ -139,16 +121,16 @@ int freeze_processes(void)
 			"after %d seconds (%d tasks remaining):\n",
 			TIMEOUT / HZ, todo);
 		read_lock(&tasklist_lock);
-		do_each_thread(g, p) {
+		do_each_thread_all(g, p) {
 			if (freezeable(p) && !frozen(p))
 				printk(KERN_ERR "  %s\n", p->comm);
 			cancel_freezing(p);
-		} while_each_thread(g, p);
+		} while_each_thread_all(g, p);
 		read_unlock(&tasklist_lock);
 		return todo;
 	}
 
-	printk( "|\n" );
+	/* printk( "|\n" ); */
 	BUG_ON(in_atomic());
 	return 0;
 }
@@ -159,16 +141,14 @@ void thaw_processes(void)
 
 	printk( "Restarting tasks..." );
 	read_lock(&tasklist_lock);
-	do_each_thread(g, p) {
+	do_each_thread_all(g, p) {
 		if (!freezeable(p))
 			continue;
 		if (!thaw_process(p))
 			printk(KERN_INFO " Strange, %s not stopped\n", p->comm );
-	} while_each_thread(g, p);
+	} while_each_thread_all(g, p);
 
 	read_unlock(&tasklist_lock);
 	schedule();
 	printk( " done\n" );
 }
-
-EXPORT_SYMBOL(refrigerator);

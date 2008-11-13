@@ -75,27 +75,6 @@ static inline int notify_page_fault(enum die_val val, const char *str,
 }
 #endif
 
-void bust_spinlocks(int yes)
-{
-	int loglevel_save = console_loglevel;
-	if (yes) {
-		oops_in_progress = 1;
-	} else {
-#ifdef CONFIG_VT
-		unblank_screen();
-#endif
-		oops_in_progress = 0;
-		/*
-		 * OK, the message is on the console.  Now we call printk()
-		 * without oops_in_progress set so that printk will give klogd
-		 * a poke.  Hold onto your hats...
-		 */
-		console_loglevel = 15;		/* NMI oopser may have shut the console up */
-		printk(" ");
-		console_loglevel = loglevel_save;
-	}
-}
-
 /* Sometimes the CPU reports invalid exceptions on prefetch.
    Check that here and ignore.
    Opcode checker based on code by Richard Brunner */
@@ -329,7 +308,7 @@ static int vmalloc_fault(unsigned long address)
 }
 
 int page_fault_trace = 0;
-int exception_trace = 1;
+int exception_trace = 0;
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -400,7 +379,7 @@ asmlinkage void __kprobes do_page_fault(struct pt_regs *regs,
 		local_irq_enable();
 
 	if (unlikely(page_fault_trace))
-		printk("pagefault rip:%lx rsp:%lx cs:%lu ss:%lu address %lx error %lx\n",
+		ve_printk(VE_LOG, "pagefault rip:%lx rsp:%lx cs:%lu ss:%lu address %lx error %lx\n",
 		       regs->rip,regs->rsp,regs->cs,regs->ss,address,error_code); 
 
 	if (unlikely(error_code & PF_RSVD))
@@ -413,7 +392,6 @@ asmlinkage void __kprobes do_page_fault(struct pt_regs *regs,
 	if (unlikely(in_atomic() || !mm))
 		goto bad_area_nosemaphore;
 
- again:
 	/* When running in the kernel we expect faults to occur only to
 	 * addresses in user space.  All other faults represent errors in the
 	 * kernel and should generate an OOPS.  Unfortunatly, in the case of an
@@ -519,7 +497,7 @@ bad_area_nosemaphore:
 			return;
 
 		if (exception_trace && unhandled_signal(tsk, SIGSEGV)) {
-			printk(
+			ve_printk(VE_LOG, 
 		       "%s%s[%d]: segfault at %016lx rip %016lx rsp %016lx error %lx\n",
 					tsk->pid > 1 ? KERN_INFO : KERN_EMERG,
 					tsk->comm, tsk->pid, address, regs->rip,
@@ -569,7 +547,8 @@ no_context:
 	else
 		printk(KERN_ALERT "Unable to handle kernel paging request");
 	printk(" at %016lx RIP: \n" KERN_ALERT,address);
-	printk_address(regs->rip);
+	if (decode_call_traces)
+		printk_address(regs->rip);
 	dump_pagetable(address);
 	tsk->thread.cr2 = address;
 	tsk->thread.trap_no = 14;
@@ -586,13 +565,14 @@ no_context:
  */
 out_of_memory:
 	up_read(&mm->mmap_sem);
-	if (current->pid == 1) { 
-		yield();
-		goto again;
+	if (error_code & 4) {
+		/* 
+		 * 0-order allocation always success if something really 
+		 * fatal not happen: beancounter overdraft or OOM.
+		 */
+		force_sig(SIGKILL, tsk);
+		return;
 	}
-	printk("VM: killing process %s\n", tsk->comm);
-	if (error_code & 4)
-		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:

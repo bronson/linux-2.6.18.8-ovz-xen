@@ -29,6 +29,7 @@
 #include <linux/efi.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/sysctl.h>
 
 #include <asm/cpu.h>
 #include <asm/delay.h>
@@ -107,7 +108,8 @@ show_regs (struct pt_regs *regs)
 	unsigned long ip = regs->cr_iip + ia64_psr(regs)->ri;
 
 	print_modules();
-	printk("\nPid: %d, CPU %d, comm: %20s\n", current->pid, smp_processor_id(), current->comm);
+	printk("\nPid: %d, CPU %d, VCPU %d:%d, comm: %20s\n", current->pid, smp_processor_id(),
+			task_vsched_id(current), task_cpu(current), current->comm);
 	printk("psr : %016lx ifs : %016lx ip  : [<%016lx>]    %s\n",
 	       regs->cr_ipsr, regs->cr_ifs, ip, print_tainted());
 	print_symbol("ip is at %s\n", ip);
@@ -157,7 +159,7 @@ show_regs (struct pt_regs *regs)
 }
 
 void
-do_notify_resume_user (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
+do_notify_resume_user (sigset_t *unused, struct sigscratch *scr, long in_syscall)
 {
 	if (fsys_mode(current, &scr->pt)) {
 		/* defer signal-handling etc. until we return to privilege-level 0.  */
@@ -172,8 +174,8 @@ do_notify_resume_user (sigset_t *oldset, struct sigscratch *scr, long in_syscall
 #endif
 
 	/* deal with pending signal delivery */
-	if (test_thread_flag(TIF_SIGPENDING))
-		ia64_do_signal(oldset, scr, in_syscall);
+	if (test_thread_flag(TIF_SIGPENDING)||test_thread_flag(TIF_RESTORE_SIGMASK))
+		ia64_do_signal(scr, in_syscall);
 }
 
 static int pal_halt        = 1;
@@ -356,6 +358,9 @@ ia64_load_extra (struct task_struct *task)
 #endif
 }
 
+extern char ia64_ret_from_resume;
+EXPORT_SYMBOL(ia64_ret_from_resume);
+
 /*
  * Copy the state of an ia-64 thread.
  *
@@ -429,7 +434,6 @@ copy_thread (int nr, unsigned long clone_flags,
 			child_ptregs->r12 = user_stack_base + user_stack_size - 16;
 			child_ptregs->ar_bspstore = user_stack_base;
 			child_ptregs->ar_rnat = 0;
-			child_ptregs->loadrs = 0;
 		}
 	} else {
 		/*
@@ -669,15 +673,25 @@ out:
 	return error;
 }
 
+extern void start_kernel_thread (void);
+EXPORT_SYMBOL(start_kernel_thread);
+EXPORT_SYMBOL(execve);
+
 pid_t
 kernel_thread (int (*fn)(void *), void *arg, unsigned long flags)
 {
-	extern void start_kernel_thread (void);
 	unsigned long *helper_fptr = (unsigned long *) &start_kernel_thread;
 	struct {
 		struct switch_stack sw;
 		struct pt_regs pt;
 	} regs;
+
+	/* Don't allow kernel_thread() inside VE */
+	if (!ve_allow_kthreads && !ve_is_super(get_exec_env())) {
+		printk("kernel_thread call inside container\n");
+		dump_stack();
+		return -EPERM;
+	}
 
 	memset(&regs, 0, sizeof(regs));
 	regs.pt.cr_iip = helper_fptr[0];	/* set entry point (IP) */

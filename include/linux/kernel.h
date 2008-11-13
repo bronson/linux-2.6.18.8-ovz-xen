@@ -143,6 +143,11 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	__attribute__ ((format (printf, 1, 0)));
 asmlinkage int printk(const char * fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
+asmlinkage int ve_vprintk(int dst, const char *fmt, va_list args)
+	__attribute__ ((format (printf, 2, 0)));
+asmlinkage int ve_printk(int, const char * fmt, ...)
+	__attribute__ ((format (printf, 2, 3)));
+void prepare_printk(void);
 #else
 static inline int vprintk(const char *s, va_list args)
 	__attribute__ ((format (printf, 1, 0)));
@@ -150,7 +155,15 @@ static inline int vprintk(const char *s, va_list args) { return 0; }
 static inline int printk(const char *s, ...)
 	__attribute__ ((format (printf, 1, 2)));
 static inline int printk(const char *s, ...) { return 0; }
+static inline int ve_printk(int d, const char *s, ...)
+	__attribute__ ((format (printf, 2, 3)));
+static inline int ve_printk(int d, const char *s, ...) {return 0; }
+#define prepare_printk()	do { } while (0)
 #endif
+
+#define VE0_LOG		1
+#define VE_LOG		2
+#define VE_LOG_BOTH	(VE0_LOG | VE_LOG)
 
 unsigned long int_sqrt(unsigned long);
 
@@ -171,9 +184,14 @@ __attribute_const__ roundup_pow_of_two(unsigned long x)
 extern int printk_ratelimit(void);
 extern int __printk_ratelimit(int ratelimit_jiffies, int ratelimit_burst);
 
+extern int console_silence_loglevel;
+
 static inline void console_silent(void)
 {
-	console_loglevel = 0;
+	if (console_loglevel > console_silence_loglevel) {
+		printk(KERN_EMERG "console shuts up ...\n");
+		console_loglevel = 0;
+	}
 }
 
 static inline void console_verbose(void)
@@ -183,10 +201,13 @@ static inline void console_verbose(void)
 }
 
 extern void bust_spinlocks(int yes);
+extern void wake_up_klogd(void);
 extern int oops_in_progress;		/* If set, an oops, panic(), BUG() or die() is in progress */
 extern int panic_timeout;
 extern int panic_on_oops;
+extern int decode_call_traces;
 extern int tainted;
+extern int kernel_text_csum_broken;
 extern const char *print_tainted(void);
 extern void add_taint(unsigned);
 

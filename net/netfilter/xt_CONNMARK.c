@@ -97,11 +97,102 @@ checkentry(const char *tablename,
 	return 1;
 }
 
+#ifdef CONFIG_COMPAT
+static int connmark_reg_compat_to_user(void *target, void **dstptr,
+		int *size, int off)
+{
+	struct xt_entry_target *pt;
+	struct xt_connmark_target_info *pinfo;
+	struct compat_xt_connmark_target_info rinfo;
+	u_int16_t tsize;
+
+	pt = (struct xt_entry_target *)target;
+	tsize = pt->u.user.target_size;
+	if (__copy_to_user(*dstptr, pt, sizeof(struct compat_xt_entry_target)))
+		return -EFAULT;
+	pinfo = (struct xt_connmark_target_info *)pt->data;
+	memset(&rinfo, 0, sizeof(struct compat_xt_connmark_target_info));
+	/* mark & mask fit in 32bit due to check in checkentry() */
+	rinfo.mark = (compat_ulong_t)pinfo->mark;
+	rinfo.mask = (compat_ulong_t)pinfo->mask;
+	rinfo.mode = pinfo->mode;
+	if (__copy_to_user(*dstptr + sizeof(struct compat_xt_entry_target),
+			&rinfo, sizeof(struct compat_xt_connmark_target_info)))
+		return -EFAULT;
+	tsize -= off;
+	if (put_user(tsize, (u_int16_t *)*dstptr))
+		return -EFAULT;
+	*size -= off;
+	*dstptr += tsize;
+	return 0;
+}
+
+static int connmark_reg_compat_from_user(void *target, void **dstptr,
+		int *size, int off)
+{
+	struct compat_xt_entry_target *pt;
+	struct xt_entry_target *dstpt;
+	struct compat_xt_connmark_target_info *pinfo;
+	struct xt_connmark_target_info rinfo;
+	u_int16_t tsize;
+
+	pt = (struct compat_xt_entry_target *)target;
+	dstpt = (struct xt_entry_target *)*dstptr;
+	tsize = pt->u.user.target_size;
+	memset(*dstptr, 0, sizeof(struct xt_entry_target));
+	memcpy(*dstptr, pt, sizeof(struct compat_xt_entry_target));
+
+	pinfo = (struct compat_xt_connmark_target_info *)pt->data;
+	memset(&rinfo, 0, sizeof(struct xt_connmark_target_info));
+	rinfo.mark = pinfo->mark;
+	rinfo.mask = pinfo->mask;
+	rinfo.mode = pinfo->mode;
+
+	memcpy(*dstptr + sizeof(struct xt_entry_target),
+				&rinfo, sizeof(struct xt_connmark_target_info));
+	tsize += off;
+	dstpt->u.user.target_size = tsize;
+	*size += off;
+	*dstptr += tsize;
+	return 0;
+}
+
+static int connmark_reg_compat(void *target, void **dstptr,
+		int *size, int convert)
+{
+	int ret, off;
+
+	off = XT_ALIGN(sizeof(struct xt_connmark_target_info)) -
+		COMPAT_XT_ALIGN(sizeof(struct compat_xt_connmark_target_info));
+	switch (convert) {
+		case COMPAT_TO_USER:
+			ret = connmark_reg_compat_to_user(target,
+					dstptr, size, off);
+			break;
+		case COMPAT_FROM_USER:
+			ret = connmark_reg_compat_from_user(target,
+					dstptr, size, off);
+			break;
+		case COMPAT_CALC_SIZE:
+			*size += off;
+			ret = 0;
+			break;
+		default:
+			ret = -ENOPROTOOPT;
+			break;
+	}
+	return ret;
+}
+#endif /*CONFIG_COMPAT*/
+
 static struct xt_target connmark_reg = {
 	.name		= "CONNMARK",
 	.target		= target,
 	.targetsize	= sizeof(struct xt_connmark_target_info),
 	.checkentry	= checkentry,
+#ifdef CONFIG_COMPAT
+	.compat		= connmark_reg_compat,
+#endif
 	.family		= AF_INET,
 	.me		= THIS_MODULE
 };
@@ -111,6 +202,9 @@ static struct xt_target connmark6_reg = {
 	.target		= target,
 	.targetsize	= sizeof(struct xt_connmark_target_info),
 	.checkentry	= checkentry,
+#ifdef CONFIG_COMPAT
+	.compat		= connmark_reg_compat,
+#endif
 	.family		= AF_INET6,
 	.me		= THIS_MODULE
 };

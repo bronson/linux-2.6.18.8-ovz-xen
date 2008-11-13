@@ -120,14 +120,9 @@ do {									\
 	   int __delta_sec = (tv1).tv_sec - (tv2).tv_sec; \
 	   int __delta = (tv1).tv_usec - (tv2).tv_usec; \
 	   if (__delta_sec) { \
-	           switch (__delta_sec) { \
-		   default: \
-			   __delta = 0; \
-		   case 2: \
-			   __delta += USEC_PER_SEC; \
-		   case 1: \
-			   __delta += USEC_PER_SEC; \
-	           } \
+		   if (__delta_sec > ((0x7FFFFFFF/USEC_PER_SEC) - 1))	\
+			   __delta_sec = (0x7FFFFFFF/USEC_PER_SEC) - 1;	\
+		   __delta += __delta_sec * USEC_PER_SEC;		\
 	   } \
 	   __delta; \
 })
@@ -189,7 +184,7 @@ psched_tod_diff(int delta_sec, int bound)
 #define PSCHED_SET_PASTPERFECT(t)	((t).tv_sec = 0)
 #define PSCHED_IS_PASTPERFECT(t)	((t).tv_sec == 0)
 
-#define	PSCHED_AUDIT_TDIFF(t) ({ if ((t) > 2000000) (t) = 2000000; })
+#define	PSCHED_AUDIT_TDIFF(t)
 
 #else /* !CONFIG_NET_SCH_CLK_GETTIMEOFDAY */
 

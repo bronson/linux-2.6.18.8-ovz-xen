@@ -35,7 +35,8 @@ extern kmem_cache_t *pgtable_cache[];
 
 static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	return kmem_cache_alloc(pgtable_cache[PGD_CACHE_NUM], GFP_KERNEL);
+	return kmem_cache_alloc(pgtable_cache[PGD_CACHE_NUM],
+			GFP_KERNEL_UBC | __GFP_SOFT_UBC);
 }
 
 static inline void pgd_free(pgd_t *pgd)
@@ -50,7 +51,7 @@ static inline void pgd_free(pgd_t *pgd)
 static inline pud_t *pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
 	return kmem_cache_alloc(pgtable_cache[PUD_CACHE_NUM],
-				GFP_KERNEL|__GFP_REPEAT);
+				GFP_KERNEL_UBC|__GFP_SOFT_UBC|__GFP_REPEAT);
 }
 
 static inline void pud_free(pud_t *pud)
@@ -86,7 +87,7 @@ static inline void pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmd,
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
 	return kmem_cache_alloc(pgtable_cache[PMD_CACHE_NUM],
-				GFP_KERNEL|__GFP_REPEAT);
+				GFP_KERNEL_UBC|__GFP_SOFT_UBC|__GFP_REPEAT);
 }
 
 static inline void pmd_free(pmd_t *pmd)
@@ -94,17 +95,27 @@ static inline void pmd_free(pmd_t *pmd)
 	kmem_cache_free(pgtable_cache[PMD_CACHE_NUM], pmd);
 }
 
+static inline pte_t *do_pte_alloc(gfp_t flags)
+{
+	return kmem_cache_alloc(pgtable_cache[PTE_CACHE_NUM], flags);
+}
+
 static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm,
 					  unsigned long address)
 {
-	return kmem_cache_alloc(pgtable_cache[PTE_CACHE_NUM],
-				GFP_KERNEL|__GFP_REPEAT);
+	return do_pte_alloc(GFP_KERNEL | __GFP_REPEAT);
 }
 
 static inline struct page *pte_alloc_one(struct mm_struct *mm,
 					 unsigned long address)
 {
-	return virt_to_page(pte_alloc_one_kernel(mm, address));
+	pte_t *pte;
+
+	pte = do_pte_alloc(GFP_KERNEL_UBC | __GFP_SOFT_UBC);
+	if (pte == NULL)
+		return NULL;
+	else
+		return virt_to_page(pte);
 }
 		
 static inline void pte_free_kernel(pte_t *pte)

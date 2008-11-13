@@ -281,6 +281,8 @@ extern struct class_device *class_device_create(struct class *cls,
 					__attribute__((format(printf,5,6)));
 extern void class_device_destroy(struct class *cls, dev_t devt);
 
+extern struct class net_class;
+
 
 /* interface for exporting device attributes */
 struct device_attribute {

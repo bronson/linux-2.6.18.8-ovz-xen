@@ -38,6 +38,7 @@
 #include <linux/proc_fs.h>
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/rcupdate.h>
@@ -93,13 +94,91 @@ static struct fib_rule main_rule = {
 	.r_action =	RTN_UNICAST,
 };
 
-static struct fib_rule local_rule = {
+static struct fib_rule loc_rule = {
 	.r_clntref =	ATOMIC_INIT(2),
 	.r_table =	RT_TABLE_LOCAL,
 	.r_action =	RTN_UNICAST,
 };
 
+#ifdef CONFIG_VE
+#define local_rule (*(get_exec_env()->_local_rule))
+#define fib_rules (get_exec_env()->_fib_rules)
+#else
+#define local_rule	loc_rule
 static struct hlist_head fib_rules;
+#endif
+
+#if defined(CONFIG_VE_CALLS) || defined(CONFIG_VE_CALLS_MODULE)
+#ifdef CONFIG_VE
+static inline void init_rule_struct(struct fib_rule *r,
+		u32 pref, unsigned char table, unsigned char action)
+{
+	memset(r, 0, sizeof(struct fib_rule));
+	atomic_set(&r->r_clntref, 1);
+	r->r_preference = pref;
+	r->r_table = table;
+	r->r_action = action;
+}
+#endif
+
+int fib_rules_create(void)
+{
+#ifdef CONFIG_VE
+	struct fib_rule *default_rule, *main_rule, *loc_rule;
+
+	default_rule = kmalloc(sizeof(struct fib_rule), GFP_KERNEL_UBC);
+	if (default_rule == NULL)
+		goto out_def;
+
+	main_rule = kmalloc(sizeof(struct fib_rule), GFP_KERNEL_UBC);
+	if (main_rule == NULL)
+		goto out_main;
+
+	loc_rule = kmalloc(sizeof(struct fib_rule), GFP_KERNEL_UBC);
+	if (loc_rule == NULL)
+		goto out_loc;
+
+	init_rule_struct(default_rule, 0x7FFF, RT_TABLE_DEFAULT, RTN_UNICAST);
+	init_rule_struct(main_rule, 0x7FFE, RT_TABLE_MAIN, RTN_UNICAST);
+	init_rule_struct(loc_rule, 0, RT_TABLE_LOCAL, RTN_UNICAST);
+
+	INIT_HLIST_HEAD(&fib_rules);
+	hlist_add_head(&loc_rule->hlist, &fib_rules);
+	hlist_add_after(&loc_rule->hlist, &main_rule->hlist);
+	hlist_add_after(&main_rule->hlist, &default_rule->hlist);
+	get_exec_env()->_local_rule = loc_rule;
+
+	return 0;
+
+out_loc:
+	kfree(main_rule);
+out_main:
+	kfree(default_rule);
+out_def:
+	return -1;
+#else
+	return 0;
+#endif
+}
+
+void fib_rules_destroy(void)
+{
+#ifdef CONFIG_VE
+	struct fib_rule *r;
+	struct hlist_node *pos, *tmp;
+
+	rtnl_lock();
+	hlist_for_each_safe (pos, tmp, &fib_rules) {
+		r = hlist_entry(pos, struct fib_rule, hlist);
+
+		hlist_del_rcu(pos);
+		r->r_dead = 1;
+		fib_rule_put(r);
+	}
+	rtnl_unlock();
+#endif
+}
+#endif
 
 /* writer func called from netlink -- rtnl_sem hold*/
 
@@ -196,7 +275,7 @@ int inet_rtm_newrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 		}
 	}
 
-	new_r = kzalloc(sizeof(*new_r), GFP_KERNEL);
+	new_r = kzalloc(sizeof(*new_r), GFP_KERNEL_UBC);
 	if (!new_r)
 		return -ENOMEM;
 
@@ -252,7 +331,7 @@ int inet_rtm_newrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 	if (last)
 		hlist_add_after_rcu(&last->hlist, &new_r->hlist);
 	else
-		hlist_add_before_rcu(&new_r->hlist, &r->hlist);
+		hlist_add_head_rcu(&new_r->hlist, &fib_rules);
 
 	rtmsg_rule(RTM_NEWRULE, new_r);
 	return 0;
@@ -474,8 +553,9 @@ next:
 void __init fib_rules_init(void)
 {
 	INIT_HLIST_HEAD(&fib_rules);
-	hlist_add_head(&local_rule.hlist, &fib_rules);
-	hlist_add_after(&local_rule.hlist, &main_rule.hlist);
+	hlist_add_head(&loc_rule.hlist, &fib_rules);
+	hlist_add_after(&loc_rule.hlist, &main_rule.hlist);
 	hlist_add_after(&main_rule.hlist, &default_rule.hlist);
+
 	register_netdevice_notifier(&fib_rules_notifier);
 }

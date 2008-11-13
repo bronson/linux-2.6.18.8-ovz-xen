@@ -21,6 +21,9 @@
 /* From af_inet.c */
 extern int sysctl_ip_nonlocal_bind;
 
+int sysctl_tcp_use_sg = 1;
+EXPORT_SYMBOL(sysctl_tcp_use_sg);
+
 #ifdef CONFIG_SYSCTL
 static int zero;
 static int tcp_retr1_max = 255; 
@@ -32,22 +35,21 @@ struct ipv4_config ipv4_config;
 
 #ifdef CONFIG_SYSCTL
 
-static
 int ipv4_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 			void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	int val = ipv4_devconf.forwarding;
+	int val = ve_ipv4_devconf.forwarding;
 	int ret;
 
 	ret = proc_dointvec(ctl, write, filp, buffer, lenp, ppos);
 
-	if (write && ipv4_devconf.forwarding != val)
+	if (write && ve_ipv4_devconf.forwarding != val)
 		inet_forward_change();
 
 	return ret;
 }
 
-static int ipv4_sysctl_forward_strategy(ctl_table *table,
+int ipv4_sysctl_forward_strategy(ctl_table *table,
 			 int __user *name, int nlen,
 			 void __user *oldval, size_t __user *oldlenp,
 			 void __user *newval, size_t newlen, 
@@ -423,6 +425,14 @@ ctl_table ipv4_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
 	},
+	{
+		.ctl_name	= NET_TCP_USE_SG,
+		.procname	= "tcp_use_sg",
+		.data		= &sysctl_tcp_use_sg,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 
 #endif
 	{
@@ -614,6 +624,22 @@ ctl_table ipv4_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec_minmax,
 		.extra1		= &zero
+	},
+	{
+		.ctl_name       = NET_TCP_MAX_TW_KMEM_FRACTION,
+		.procname       = "tcp_max_tw_kmem_fraction",
+		.data           = &sysctl_tcp_max_tw_kmem_fraction,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = &proc_dointvec
+	},
+	{
+		.ctl_name       = NET_TCP_MAX_TW_BUCKETS_UB,
+		.procname       = "tcp_max_tw_buckets_ub",
+		.data           = &sysctl_tcp_max_tw_buckets_ub,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = &proc_dointvec
 	},
 	{
 		.ctl_name	= NET_TCP_NO_METRICS_SAVE,

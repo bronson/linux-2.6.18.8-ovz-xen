@@ -162,14 +162,14 @@ register struct thread_info *current_thread_info_reg asm("g6");
 	struct thread_info *ret;				\
 								\
 	ret = (struct thread_info *)				\
-	  __get_free_pages(GFP_KERNEL, __THREAD_INFO_ORDER);	\
+	  __get_free_pages(GFP_KERNEL_UBC, __THREAD_INFO_ORDER);\
 	if (ret)						\
 		memset(ret, 0, PAGE_SIZE<<__THREAD_INFO_ORDER);	\
 	ret;							\
 })
 #else
 #define alloc_thread_info(tsk) \
-	((struct thread_info *)__get_free_pages(GFP_KERNEL, __THREAD_INFO_ORDER))
+	((struct thread_info *)__get_free_pages(GFP_KERNEL_UBC, __THREAD_INFO_ORDER))
 #endif
 
 #define free_thread_info(ti) \
@@ -236,6 +236,7 @@ register struct thread_info *current_thread_info_reg asm("g6");
 #define TIF_ABI_PENDING		12
 #define TIF_MEMDIE		13
 #define TIF_POLLING_NRFLAG	14
+#define TIF_FREEZE		15	/* Freeze request (atomic PF_FREEZE) */
 
 #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
 #define _TIF_SIGPENDING		(1<<TIF_SIGPENDING)

@@ -14,6 +14,7 @@
 #include <linux/mempool.h>
 #include <linux/blkdev.h>
 #include <linux/writeback.h>
+#include <linux/kmem_cache.h>
 
 static void add_element(mempool_t *pool, void *element)
 {
@@ -78,6 +79,8 @@ mempool_t *mempool_create_node(int min_nr, mempool_alloc_t *alloc_fn,
 	init_waitqueue_head(&pool->wait);
 	pool->alloc = alloc_fn;
 	pool->free = free_fn;
+	if (alloc_fn == mempool_alloc_slab)
+		kmem_mark_nocharge((kmem_cache_t *)pool_data);
 
 	/*
 	 * First pre-allocate the guaranteed number of buffers.
@@ -119,6 +122,7 @@ int mempool_resize(mempool_t *pool, int new_min_nr, gfp_t gfp_mask)
 	unsigned long flags;
 
 	BUG_ON(new_min_nr <= 0);
+	gfp_mask &= ~__GFP_UBC;
 
 	spin_lock_irqsave(&pool->lock, flags);
 	if (new_min_nr <= pool->min_nr) {
@@ -212,6 +216,7 @@ void * mempool_alloc(mempool_t *pool, gfp_t gfp_mask)
 	gfp_mask |= __GFP_NOMEMALLOC;	/* don't allocate emergency reserves */
 	gfp_mask |= __GFP_NORETRY;	/* don't loop in __alloc_pages */
 	gfp_mask |= __GFP_NOWARN;	/* failures are OK */
+	gfp_mask &= ~__GFP_UBC;
 
 	gfp_temp = gfp_mask & ~(__GFP_WAIT|__GFP_IO);
 

@@ -35,12 +35,15 @@
 #include <linux/hash.h>
 #include <linux/suspend.h>
 #include <linux/buffer_head.h>
+#include <linux/task_io_accounting_ops.h>
 #include <linux/bio.h>
 #include <linux/notifier.h>
 #include <linux/cpu.h>
 #include <linux/bitops.h>
 #include <linux/mpage.h>
 #include <linux/bit_spinlock.h>
+
+#include <ub/beancounter.h>
 
 static int fsync_buffers_list(spinlock_t *lock, struct list_head *list);
 static void invalidate_bh_lrus(void);
@@ -77,6 +80,7 @@ EXPORT_SYMBOL(__lock_buffer);
 
 void fastcall unlock_buffer(struct buffer_head *bh)
 {
+	smp_mb__before_clear_bit();
 	clear_buffer_locked(bh);
 	smp_mb__after_clear_bit();
 	wake_up_bit(&bh->b_state, BH_Lock);
@@ -280,7 +284,14 @@ static void do_sync(unsigned long wait)
 
 asmlinkage long sys_sync(void)
 {
+	struct user_beancounter *ub;
+
+	ub = get_exec_ub();
+	ub_percpu_inc(ub, sync);
+
 	do_sync(1);
+
+	ub_percpu_inc(ub, sync_done);
 	return 0;
 }
 
@@ -323,12 +334,19 @@ long do_fsync(struct file *file, int datasync)
 	int ret;
 	int err;
 	struct address_space *mapping = file->f_mapping;
+	struct user_beancounter *ub;
 
 	if (!file->f_op || !file->f_op->fsync) {
 		/* Why?  We can still call filemap_fdatawrite */
 		ret = -EINVAL;
 		goto out;
 	}
+
+	ub = get_exec_ub();
+	if (datasync)
+		ub_percpu_inc(ub, fdsync);
+	else
+		ub_percpu_inc(ub, fsync);
 
 	ret = filemap_fdatawrite(mapping);
 
@@ -344,6 +362,11 @@ long do_fsync(struct file *file, int datasync)
 	err = filemap_fdatawait(mapping);
 	if (!ret)
 		ret = err;
+
+	if (datasync)
+		ub_percpu_inc(ub, fdsync_done);
+	else
+		ub_percpu_inc(ub, fsync_done);
 out:
 	return ret;
 }
@@ -838,7 +861,11 @@ EXPORT_SYMBOL(mark_buffer_dirty_inode);
  */
 int __set_page_dirty_buffers(struct page *page)
 {
-	struct address_space * const mapping = page->mapping;
+	int acct;
+	struct address_space * const mapping = page_mapping(page);
+
+	if (unlikely(!mapping))
+		return !TestSetPageDirty(page);
 
 	spin_lock(&mapping->private_lock);
 	if (page_has_buffers(page)) {
@@ -854,15 +881,20 @@ int __set_page_dirty_buffers(struct page *page)
 
 	if (!TestSetPageDirty(page)) {
 		write_lock_irq(&mapping->tree_lock);
+		acct = 0;
 		if (page->mapping) {	/* Race with truncate? */
-			if (mapping_cap_account_dirty(mapping))
+			if (mapping_cap_account_dirty(mapping)) {
 				__inc_zone_page_state(page, NR_FILE_DIRTY);
+				acct = 1;
+			}
 			radix_tree_tag_set(&mapping->page_tree,
 						page_index(page),
 						PAGECACHE_TAG_DIRTY);
 		}
 		write_unlock_irq(&mapping->tree_lock);
 		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
+		if (acct)
+			task_io_account_write(page, PAGE_CACHE_SIZE, 0);
 		return 1;
 	}
 	return 0;
@@ -1176,8 +1208,21 @@ grow_buffers(struct block_device *bdev, sector_t block, int size)
 	} while ((size << sizebits) < PAGE_SIZE);
 
 	index = block >> sizebits;
-	block = index << sizebits;
 
+	/*
+	 * Check for a block which wants to lie outside our maximum possible
+	 * pagecache index.  (this comparison is done using sector_t types).
+	 */
+	if (unlikely(index != block >> sizebits)) {
+		char b[BDEVNAME_SIZE];
+
+		printk(KERN_ERR "%s: requested out-of-range block %llu for "
+			"device %s\n",
+			__FUNCTION__, (unsigned long long)block,
+			bdevname(bdev, b));
+		return -EIO;
+	}
+	block = index << sizebits;
 	/* Create a page with the proper size buffers.. */
 	page = grow_dev_page(bdev, block, index, size);
 	if (!page)
@@ -1204,12 +1249,16 @@ __getblk_slow(struct block_device *bdev, sector_t block, int size)
 
 	for (;;) {
 		struct buffer_head * bh;
+		int ret;
 
 		bh = __find_get_block(bdev, block, size);
 		if (bh)
 			return bh;
 
-		if (!grow_buffers(bdev, block, size))
+		ret = grow_buffers(bdev, block, size);
+		if (ret < 0)
+			return NULL;
+		if (ret == 0)
 			free_more_memory();
 	}
 }
@@ -2995,8 +3044,13 @@ int try_to_free_buffers(struct page *page)
 		 * could encounter a non-uptodate page, which is unresolvable.
 		 * This only applies in the rare case where try_to_free_buffers
 		 * succeeds but the page is not freed.
+		 *
+		 * Also, during truncate, discard_buffer will have marked all
+		 * the page's buffers clean.  We discover that here and clean
+		 * the page also.
 		 */
-		clear_page_dirty(page);
+		if (test_clear_page_dirty(page))
+			task_io_account_cancelled_write(PAGE_CACHE_SIZE);
 	}
 	spin_unlock(&mapping->private_lock);
 out:
