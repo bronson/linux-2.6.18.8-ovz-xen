@@ -78,6 +78,15 @@ struct rt6_info
 	u8				rt6i_protocol;
 };
 
+struct fib6_table
+{
+	struct list_head	list;
+	struct fib6_node	root;
+	struct ve_struct	*owner_env;
+};
+
+extern struct list_head	fib6_table_list;
+
 struct fib6_walker_t
 {
 	struct fib6_walker_t *prev, *next;
@@ -143,7 +152,7 @@ struct rt6_statistics {
 
 typedef void			(*f_pnode)(struct fib6_node *fn, void *);
 
-extern struct fib6_node		ip6_routing_table;
+extern struct fib6_node		ve0_ip6_routing_table;
 
 /*
  *	exported functions

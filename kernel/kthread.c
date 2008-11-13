@@ -123,7 +123,7 @@ static void keventd_create_kthread(void *_create)
 	} else {
 		wait_for_completion(&create->started);
 		read_lock(&tasklist_lock);
-		create->result = find_task_by_pid(pid);
+		create->result = find_task_by_pid_all(pid);
 		read_unlock(&tasklist_lock);
 	}
 	complete(&create->done);

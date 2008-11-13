@@ -51,6 +51,8 @@ typedef unsigned int autofs_wqt_t;
 typedef unsigned long autofs_wqt_t;
 #endif
 
+typedef __u32 autofs_wqt_t_32bit;
+
 /* Packet types */
 #define autofs_ptype_missing	0	/* Missing entry (mount request) */
 #define autofs_ptype_expire	1	/* Expire entry (umount request) */
@@ -67,12 +69,26 @@ struct autofs_packet_missing {
 	char name[NAME_MAX+1];
 };	
 
+struct autofs_packet_missing_32bit {
+	struct autofs_packet_hdr hdr;
+	autofs_wqt_t_32bit wait_queue_token;
+	int len;
+	char name[NAME_MAX+1];
+} __attribute__ ((__packed__));
+
 /* v3 expire (via ioctl) */
 struct autofs_packet_expire {
 	struct autofs_packet_hdr hdr;
 	int len;
 	char name[NAME_MAX+1];
 };
+
+/* v3 expire (via ioctl) for 32 bit userspace daemon and x68_64 kernel */
+struct autofs_packet_expire_32bit {
+	struct autofs_packet_hdr hdr;
+	int len;
+	char name[NAME_MAX+1];
+} __attribute__ ((__packed__));
 
 #define AUTOFS_IOC_READY      _IO(0x93,0x60)
 #define AUTOFS_IOC_FAIL       _IO(0x93,0x61)

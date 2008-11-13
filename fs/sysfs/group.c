@@ -46,6 +46,9 @@ int sysfs_create_group(struct kobject * kobj,
 	struct dentry * dir;
 	int error;
 
+	if (!ve_sysfs_alowed())
+		return 0;
+
 	BUG_ON(!kobj || !kobj->dentry);
 
 	if (grp->name) {
@@ -67,6 +70,9 @@ void sysfs_remove_group(struct kobject * kobj,
 			const struct attribute_group * grp)
 {
 	struct dentry * dir;
+
+	if (!ve_sysfs_alowed())
+		return;
 
 	if (grp->name)
 		dir = lookup_one_len(grp->name, kobj->dentry,

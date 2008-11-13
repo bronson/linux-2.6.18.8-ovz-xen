@@ -28,6 +28,9 @@
 #include <net/inet_common.h>
 #include <net/xfrm.h>
 
+#include <ub/ub_net.h>
+#include <ub/ub_orphan.h>
+
 #ifdef CONFIG_SYSCTL
 #define SYNC_INIT 0 /* let the user enable it */
 #else
@@ -36,6 +39,11 @@
 
 int sysctl_tcp_syncookies = SYNC_INIT; 
 int sysctl_tcp_abort_on_overflow;
+int sysctl_tcp_max_tw_kmem_fraction = 384;
+int sysctl_tcp_max_tw_buckets_ub = 16536;
+
+EXPORT_SYMBOL(sysctl_tcp_max_tw_kmem_fraction);
+EXPORT_SYMBOL(sysctl_tcp_max_tw_buckets_ub);
 
 struct inet_timewait_death_row tcp_death_row = {
 	.sysctl_max_tw_buckets = NR_FILE * 2,
@@ -52,6 +60,7 @@ struct inet_timewait_death_row tcp_death_row = {
 	.twcal_hand	= -1,
 	.twcal_timer	= TIMER_INITIALIZER(inet_twdr_twcal_tick, 0,
 					    (unsigned long)&tcp_death_row),
+	.ub_managed	= 1,
 };
 
 EXPORT_SYMBOL_GPL(tcp_death_row);
@@ -280,7 +289,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 	if (tcp_death_row.sysctl_tw_recycle && tp->rx_opt.ts_recent_stamp)
 		recycle_ok = icsk->icsk_af_ops->remember_stamp(sk);
 
-	if (tcp_death_row.tw_count < tcp_death_row.sysctl_max_tw_buckets)
+	if (tcp_death_row.tw_count < tcp_death_row.sysctl_max_tw_buckets &&
+			ub_timewait_check(sk, &tcp_death_row))
 		tw = inet_twsk_alloc(sk, state);
 
 	if (tw != NULL) {
@@ -293,6 +303,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		tcptw->tw_rcv_wnd	= tcp_receive_window(tp);
 		tcptw->tw_ts_recent	= tp->rx_opt.ts_recent;
 		tcptw->tw_ts_recent_stamp = tp->rx_opt.ts_recent_stamp;
+		if (sk->sk_user_data != NULL)
+			tw->tw_rcv_wscale |= TW_WSCALE_SPEC;
 
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 		if (tw->tw_family == PF_INET6) {
@@ -306,6 +318,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 			tw->tw_ipv6only = np->ipv6only;
 		}
 #endif
+		tw->tw_owner_env = VEID(sk->owner_env);
+
 		/* Linkage updates. */
 		__inet_twsk_hashdance(tw, sk, &tcp_hashinfo);
 
@@ -329,8 +343,15 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		 * socket up.  We've got bigger problems than
 		 * non-graceful socket closings.
 		 */
-		if (net_ratelimit())
-			printk(KERN_INFO "TCP: time wait bucket table overflow\n");
+		if (net_ratelimit()) {
+			int ubid = 0;
+#ifdef CONFIG_USER_RESOURCE
+			ubid = sock_has_ubc(sk) ? 
+				top_beancounter(sock_bc(sk)->ub)->ub_uid : 0;
+#endif
+			printk(KERN_INFO "TCP: time wait bucket table "
+			       "overflow (CT%d)\n", ubid);
+		}
 	}
 
 	tcp_update_metrics(sk);
@@ -354,6 +375,8 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct request_sock *req,
 		struct tcp_sock *newtp;
 
 		/* Now setup tcp_sock */
+		newsk->owner_env = sk->owner_env;
+
 		newtp = tcp_sk(newsk);
 		newtp->pred_flags = 0;
 		newtp->rcv_nxt = treq->rcv_isn + 1;

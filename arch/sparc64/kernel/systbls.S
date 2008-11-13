@@ -79,7 +79,26 @@ sys_call_table32:
 	.word sys_mkdirat, sys_mknodat, sys_fchownat, compat_sys_futimesat, compat_sys_fstatat64
 /*290*/	.word sys_unlinkat, sys_renameat, sys_linkat, sys_symlinkat, sys_readlinkat
 	.word sys_fchmodat, sys_faccessat, compat_sys_pselect6, compat_sys_ppoll, sys_unshare
-/*300*/	.word compat_sys_set_robust_list, compat_sys_get_robust_list
+/*300*/	.word compat_sys_set_robust_list, compat_sys_get_robust_list, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall
+	.word sys_ni_syscall, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall
+/*310*/	.word compat_sys_utimensat
+	.rept 500-311
+	.word sys_nis_syscall
+	.endr
+	.word sys_fairsched_mknod	/* 500 */
+	.word sys_fairsched_rmnod
+	.word sys_fairsched_chwt
+	.word sys_fairsched_mvpr
+	.word sys_fairsched_rate
+	.word sys_nis_syscall		/* 505 */
+	.word sys_nis_syscall
+	.word sys_nis_syscall
+	.word sys_nis_syscall
+	.word sys_nis_syscall
+	.word sys_getluid		/* 510 */
+	.word sys_setluid
+	.word compat_sys_setublimit
+	.word compat_sys_ubstat
 
 #endif /* CONFIG_COMPAT */
 
@@ -149,7 +168,28 @@ sys_call_table:
 	.word sys_mkdirat, sys_mknodat, sys_fchownat, sys_futimesat, sys_fstatat64
 /*290*/	.word sys_unlinkat, sys_renameat, sys_linkat, sys_symlinkat, sys_readlinkat
 	.word sys_fchmodat, sys_faccessat, sys_pselect6, sys_ppoll, sys_unshare
-/*300*/	.word sys_set_robust_list, sys_get_robust_list
+/*300*/	.word sys_set_robust_list, sys_get_robust_list, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall
+	.word sys_ni_syscall, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall
+/*310*/	.word sys_utimensat
+
+	.rept 500-311
+	.word sys_nis_syscall
+	.endr
+	.word sys_fairsched_mknod	/* 500 */
+	.word sys_fairsched_rmnod
+	.word sys_fairsched_chwt
+	.word sys_fairsched_mvpr
+	.word sys_fairsched_rate
+	.word sys_nis_syscall		/* 505 */
+	.word sys_nis_syscall
+	.word sys_nis_syscall
+	.word sys_nis_syscall
+	.word sys_nis_syscall
+	.word sys_getluid		/* 510 */
+	.word sys_setluid
+	.word sys_setublimit
+	.word sys_ubstat
+
 
 #if defined(CONFIG_SUNOS_EMUL) || defined(CONFIG_SOLARIS_EMUL) || \
     defined(CONFIG_SOLARIS_EMUL_MODULE)
@@ -263,4 +303,7 @@ sunos_sys_table:
 	.word sunos_nosys, sunos_nosys, sunos_nosys
 	.word sunos_nosys, sunos_nosys, sunos_nosys
 	.word sunos_nosys, sunos_nosys, sunos_nosys
+	.rept 520-302
+	.word sunos_nosys
+	.endr
 #endif

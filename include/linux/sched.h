@@ -24,6 +24,11 @@
 #define CLONE_UNTRACED		0x00800000	/* set if the tracing process can't force CLONE_PTRACE on this clone */
 #define CLONE_CHILD_SETTID	0x01000000	/* set the TID in the child */
 #define CLONE_STOPPED		0x02000000	/* Start in stopped state */
+#define CLONE_NEWUTS		0x04000000	/* New utsname group? */
+#define CLONE_NEWIPC		0x08000000	/* New ipcs */
+
+/* mask of clones which are disabled in OpenVZ VEs */
+#define CLONE_NAMESPACES_MASK	(CLONE_NEWUTS | CLONE_NEWIPC)
 
 /*
  * Scheduling policies
@@ -80,10 +85,14 @@ struct sched_param {
 #include <linux/resource.h>
 #include <linux/timer.h>
 #include <linux/hrtimer.h>
+#include <linux/task_io_accounting.h>
 
 #include <asm/processor.h>
 
+#include <ub/ub_task.h>
+
 struct exec_domain;
+struct ve_struct;
 struct futex_pi_state;
 
 /*
@@ -116,17 +125,34 @@ extern unsigned long avenrun[];		/* Load averages */
 	load += n*(FIXED_1-exp); \
 	load >>= FSHIFT;
 
+#define LOAD_INT(x) ((x) >> FSHIFT)
+#define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
+
 extern unsigned long total_forks;
 extern int nr_threads;
 extern int last_pid;
 DECLARE_PER_CPU(unsigned long, process_counts);
 extern int nr_processes(void);
+
+extern unsigned long nr_sleeping(void);
+extern unsigned long nr_stopped(void);
+extern unsigned long nr_zombie;
+extern atomic_t nr_dead;
 extern unsigned long nr_running(void);
 extern unsigned long nr_uninterruptible(void);
 extern unsigned long nr_active(void);
 extern unsigned long nr_iowait(void);
-extern unsigned long weighted_cpuload(const int cpu);
 
+#ifdef CONFIG_VE
+struct ve_struct;
+extern unsigned long nr_running_ve(struct ve_struct *);
+extern unsigned long nr_iowait_ve(void);
+extern unsigned long nr_uninterruptible_ve(struct ve_struct *);
+#else
+#define nr_running_ve(ve)		0
+#define nr_iowait_ve()			0
+#define nr_uninterruptible_ve(ve)	0
+#endif
 
 /*
  * Task state bitmask. NOTE! These bits are also
@@ -194,6 +220,8 @@ extern cpumask_t nohz_cpu_mask;
 
 extern void show_state(void);
 extern void show_regs(struct pt_regs *);
+extern void smp_show_regs(struct pt_regs *, void *);
+extern void show_vsched(void);
 
 /*
  * TASK is a pointer to the task whose backtrace we want to see (or NULL for current
@@ -238,7 +266,7 @@ extern signed long schedule_timeout_interruptible(signed long timeout);
 extern signed long schedule_timeout_uninterruptible(signed long timeout);
 asmlinkage void schedule(void);
 
-struct namespace;
+struct nsproxy;
 
 /* Maximum number of active map areas.. This is a random (large) number */
 #define DEFAULT_MAX_MAP_COUNT	65536
@@ -337,6 +365,8 @@ struct mm_struct {
 	unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
 
 	unsigned dumpable:2;
+	unsigned vps_dumpable:2;
+	unsigned oom_killed:1;
 	cpumask_t cpu_vm_mask;
 
 	/* Architecture-specific MM context */
@@ -353,6 +383,9 @@ struct mm_struct {
 	/* aio bits */
 	rwlock_t		ioctx_list_lock;
 	struct kioctx		*ioctx_list;
+#ifdef CONFIG_USER_RESOURCE
+	struct user_beancounter *mm_ub;
+#endif
 };
 
 struct sighand_struct {
@@ -368,6 +401,8 @@ struct pacct_struct {
 	cputime_t		ac_utime, ac_stime;
 	unsigned long		ac_minflt, ac_majflt;
 };
+
+#include <linux/ve_task.h>
 
 /*
  * NOTE! "signal_struct" does not have it's own
@@ -420,6 +455,10 @@ struct signal_struct {
 	pid_t session;
 	/* boolean value for session group leader */
 	int leader;
+#ifdef CONFIG_VE
+	pid_t vpgrp;
+	pid_t vsession;
+#endif
 
 	struct tty_struct *tty; /* NULL if no tty */
 
@@ -754,6 +793,9 @@ static inline void prefetch_stack(struct task_struct *t) { }
 struct audit_context;		/* See audit.c */
 struct mempolicy;
 struct pipe_inode_info;
+struct uts_namespace;
+struct vcpu_scheduler;
+struct vcpu_struct;
 
 enum sleep_type {
 	SLEEP_NORMAL,
@@ -777,6 +819,14 @@ struct task_struct {
 #ifdef __ARCH_WANT_UNLOCKED_CTXSW
 	int oncpu;
 #endif
+#endif
+#ifdef CONFIG_SCHED_VCPU
+	struct vcpu_scheduler *vsched;
+	struct vcpu_struct *vcpu;
+
+	/* id's are saved to avoid locking (e.g. on vsched->id access) */
+	int vsched_id;
+	int vcpu_id;
 #endif
 	int load_weight;	/* for niceness load balancing purposes */
 	int prio, static_prio, normal_prio;
@@ -819,6 +869,10 @@ struct task_struct {
 	unsigned did_exec:1;
 	pid_t pid;
 	pid_t tgid;
+#ifdef CONFIG_VE
+	pid_t vpid;
+	pid_t vtgid;
+#endif
 	/* 
 	 * pointers to (original) parent process, youngest child, younger sibling,
 	 * older sibling, respectively.  (p->father can be replaced with 
@@ -880,8 +934,8 @@ struct task_struct {
 	struct fs_struct *fs;
 /* open file information */
 	struct files_struct *files;
-/* namespace */
-	struct namespace *namespace;
+/* namespaces */
+	struct nsproxy *nsproxy;
 /* signal handlers */
 	struct signal_struct *signal;
 	struct sighand_struct *sighand;
@@ -955,6 +1009,11 @@ struct task_struct {
 
 	unsigned long ptrace_message;
 	siginfo_t *last_siginfo; /* For ptrace use.  */
+
+/* state tracking for suspend */
+	__u8	 pn_state;
+	__u8	 stopped_state:1;
+
 /*
  * current io wait handle: wait queue entry to use for io waits
  * If this thread is processing aio, this points at the waitqueue
@@ -964,6 +1023,7 @@ struct task_struct {
 	wait_queue_t *io_wait;
 /* i/o counters(bytes read/written, #syscalls */
 	u64 rchar, wchar, syscr, syscw;
+	struct task_io_accounting ioac;
 #if defined(CONFIG_BSD_PROCESS_ACCT)
 	u64 acct_rss_mem1;	/* accumulated rss usage */
 	u64 acct_vm_mem1;	/* accumulated virtual memory usage */
@@ -996,6 +1056,16 @@ struct task_struct {
 #ifdef	CONFIG_TASK_DELAY_ACCT
 	struct task_delay_info *delays;
 #endif
+#ifdef CONFIG_USER_RESOURCE
+	struct task_beancounter task_bc;
+#endif
+#ifdef CONFIG_VE
+	struct ve_task_info ve_task_info;
+#endif
+#if defined(CONFIG_VZ_QUOTA) || defined(CONFIG_VZ_QUOTA_MODULE)
+	unsigned long	magic;
+	struct inode	*ino;
+#endif
 };
 
 static inline pid_t process_group(struct task_struct *tsk)
@@ -1027,6 +1097,43 @@ static inline void put_task_struct(struct task_struct *t)
 		__put_task_struct(t);
 }
 
+#ifndef CONFIG_VE
+#define set_pn_state(tsk, state)	do { } while(0)
+#define clear_pn_state(tsk)		do { } while(0)
+#define set_stop_state(tsk)		do { } while(0)
+#define clear_stop_state(tsk)		do { } while(0)
+#else
+#define PN_STOP_TF	1	/* was not in 2.6.8 */
+#define PN_STOP_TF_RT	2	/* was not in 2.6.8 */ 
+#define PN_STOP_ENTRY	3
+#define PN_STOP_FORK	4
+#define PN_STOP_VFORK	5
+#define PN_STOP_SIGNAL	6
+#define PN_STOP_EXIT	7
+#define PN_STOP_EXEC	8
+#define PN_STOP_LEAVE	9
+
+static inline void set_pn_state(struct task_struct *tsk, int state)
+{
+	tsk->pn_state = state;
+}
+
+static inline void clear_pn_state(struct task_struct *tsk)
+{
+	tsk->pn_state = 0;
+}
+
+static inline void set_stop_state(struct task_struct *tsk)
+{
+	tsk->stopped_state = 1;
+}
+
+static inline void clear_stop_state(struct task_struct *tsk)
+{
+	tsk->stopped_state = 0;
+}
+#endif
+
 /*
  * Per process flags
  */
@@ -1042,7 +1149,7 @@ static inline void put_task_struct(struct task_struct *t)
 #define PF_MEMALLOC	0x00000800	/* Allocating memory */
 #define PF_FLUSHER	0x00001000	/* responsible for disk writeback */
 #define PF_USED_MATH	0x00002000	/* if unset the fpu must be initialized before use */
-#define PF_FREEZE	0x00004000	/* this task is being frozen for suspend now */
+#define PF_EXIT_RESTART	0x00004000	/* do_exit() restarted, see do_exit() */
 #define PF_NOFREEZE	0x00008000	/* this thread should not be frozen */
 #define PF_FROZEN	0x00010000	/* frozen for system suspend */
 #define PF_FSTRANS	0x00020000	/* inside a filesystem transaction */
@@ -1096,6 +1203,21 @@ static inline int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
 extern unsigned long long sched_clock(void);
 extern unsigned long long
 current_sched_time(const struct task_struct *current_task);
+
+static inline unsigned long cycles_to_clocks(cycles_t cycles)
+{
+	extern unsigned long cycles_per_clock;
+	do_div(cycles, cycles_per_clock);
+	return cycles;
+}
+
+static inline u64 cycles_to_jiffies(cycles_t cycles)
+{
+	extern unsigned long cycles_per_jiffy;
+	do_div(cycles, cycles_per_jiffy);
+	return cycles;
+}
+
 
 /* sched_exec is called by processes performing an exec */
 #ifdef CONFIG_SMP
@@ -1164,10 +1286,223 @@ extern struct   mm_struct init_mm;
 
 #define find_task_by_pid(nr)	find_task_by_pid_type(PIDTYPE_PID, nr)
 extern struct task_struct *find_task_by_pid_type(int type, int pid);
+
+#define find_task_by_pid_all(nr)	\
+		find_task_by_pid_type_all(PIDTYPE_PID, nr)
+extern struct task_struct *find_task_by_pid_type_all(int type, int pid);
 extern void set_special_pids(pid_t session, pid_t pgrp);
 extern void __set_special_pids(pid_t session, pid_t pgrp);
 
+#ifndef CONFIG_VE
+#define find_task_by_pid_ve find_task_by_pid_all
+
+#define ve_is_super(env)			1
+#define ve_accessible(target, owner)		1
+#define ve_accessible_strict(target, owner)	1
+#define ve_accessible_veid(target, owner)		1
+#define ve_accessible_strict_veid(target, owner)	1
+
+#define VEID(envid)				0
+
+static inline pid_t virt_pid(struct task_struct *tsk)
+{
+	return tsk->pid;
+}
+
+static inline pid_t virt_tgid(struct task_struct *tsk)
+{
+	return tsk->tgid;
+}
+
+static inline pid_t virt_pgid(struct task_struct *tsk)
+{
+	return tsk->signal->pgrp;
+}
+
+static inline pid_t virt_sid(struct task_struct *tsk)
+{
+	return tsk->signal->session;
+}
+
+#define get_task_pid_ve(tsk, ve)	get_task_pid(tsk)
+
+static inline pid_t get_task_pid(struct task_struct *tsk)
+{
+	return tsk->pid;
+}
+
+static inline pid_t get_task_tgid(struct task_struct *tsk)
+{
+	return tsk->tgid;
+}
+
+static inline pid_t get_task_pgid(struct task_struct *tsk)
+{
+	return tsk->signal->pgrp;
+}
+
+static inline pid_t get_task_sid(struct task_struct *tsk)
+{
+	return tsk->signal->session;
+}
+
+static inline void set_virt_pid(struct task_struct *tsk, pid_t pid)
+{
+}
+
+static inline void set_virt_tgid(struct task_struct *tsk, pid_t pid)
+{
+}
+
+static inline void set_virt_pgid(struct task_struct *tsk, pid_t pid)
+{
+}
+
+static inline void set_virt_sid(struct task_struct *tsk, pid_t pid)
+{
+}
+
+static inline pid_t get_task_ppid(struct task_struct *p)
+{
+	return pid_alive(p) ? p->group_leader->real_parent->tgid : 0;
+}
+
+#else	/* CONFIG_VE */
+
+#include <asm/current.h>
+#include <linux/ve.h>
+
+#define find_task_by_pid_ve(nr)	\
+		find_task_by_pid_type_ve(PIDTYPE_PID, nr)
+
+extern struct task_struct *find_task_by_pid_type_ve(int type, int pid);
+
+#define VEID(envid)	((envid)->veid)
+
+#define ve_is_super(env) ((env) == get_ve0())
+#define ve_accessible_strict(target, owner)	((target) == (owner))
+static inline int ve_accessible(struct ve_struct *target,
+				struct ve_struct *owner) {
+	return ve_is_super(owner) || ve_accessible_strict(target, owner);
+}
+
+#define ve_accessible_strict_veid(target, owner) ((target) == (owner))
+static inline int ve_accessible_veid(envid_t target, envid_t owner)
+{
+	return get_ve0()->veid == owner ||
+	       ve_accessible_strict_veid(target, owner);
+}
+
+static inline pid_t virt_pid(struct task_struct *tsk)
+{
+	return tsk->vpid;
+}
+
+static inline pid_t virt_tgid(struct task_struct *tsk)
+{
+	return tsk->vtgid;
+}
+
+static inline pid_t virt_pgid(struct task_struct *tsk)
+{
+	return tsk->signal->vpgrp;
+}
+
+static inline pid_t virt_sid(struct task_struct *tsk)
+{
+	return tsk->signal->vsession;
+}
+
+static inline pid_t get_task_pid_ve(struct task_struct *tsk, struct ve_struct *env)
+{
+	return ve_is_super(env) ? tsk->pid : virt_pid(tsk);
+}
+
+static inline pid_t get_task_pid(struct task_struct *tsk)
+{
+	return get_task_pid_ve(tsk, get_exec_env());
+}
+
+static inline pid_t get_task_tgid(struct task_struct *tsk)
+{
+	return ve_is_super(get_exec_env()) ? tsk->tgid : virt_tgid(tsk);
+}
+
+static inline pid_t get_task_pgid(struct task_struct *tsk)
+{
+	return ve_is_super(get_exec_env()) ? tsk->signal->pgrp : virt_pgid(tsk);
+}
+
+static inline pid_t get_task_sid(struct task_struct *tsk)
+{
+	return ve_is_super(get_exec_env()) ? tsk->signal->session : virt_sid(tsk);
+}
+
+static inline void set_virt_pid(struct task_struct *tsk, pid_t pid)
+{
+	tsk->vpid = pid;
+}
+
+static inline void set_virt_tgid(struct task_struct *tsk, pid_t pid)
+{
+	tsk->vtgid = pid;
+}
+
+static inline void set_virt_pgid(struct task_struct *tsk, pid_t pid)
+{
+	tsk->signal->vpgrp = pid;
+}
+
+static inline void set_virt_sid(struct task_struct *tsk, pid_t pid)
+{
+	tsk->signal->vsession = pid;
+}
+
+static inline pid_t get_task_ppid(struct task_struct *p)
+{
+	struct task_struct *parent;
+	struct ve_struct *env;
+
+	if (!pid_alive(p))
+		return 0;
+	env = get_exec_env();
+	if (get_task_pid_ve(p, env) == 1)
+		return 0;
+	parent = p->group_leader->real_parent;
+	return ve_accessible(VE_TASK_INFO(parent)->owner_env, env) ?
+		get_task_tgid(parent) : 1;
+}
+
+void ve_sched_get_cpu_stat(struct ve_struct *envid, cycles_t *idle,
+				cycles_t *strv, unsigned int cpu);
+void ve_sched_attach(struct ve_struct *envid);
+
+#endif	/* CONFIG_VE */
+
+
+#ifdef CONFIG_VE
+extern cycles_t __ve_sched_get_idle_time(struct ve_struct *ve, int cpu);
+extern cycles_t ve_sched_get_iowait_time(int cpu);
+#else
+#define __ve_sched_get_idle_time(ve, cpu)	 0
+#define ve_sched_get_iowait_time(cpu)		0
+#endif
+
+#define ve_sched_get_idle_time(cpu)	\
+	__ve_sched_get_idle_time(get_exec_env(), cpu)
+
+#ifdef CONFIG_SCHED_VCPU
+struct vcpu_scheduler;
+extern void fastcall vsched_cpu_online_map(struct vcpu_scheduler *sched,
+		cpumask_t *mask);
+#else
+#define vsched_cpu_online_map(vsched, mask)     do {    \
+			*mask = cpu_online_map;         \
+	} while (0)
+#endif
+
 /* per-UID process charging. */
+extern int set_user(uid_t new_ruid, int dumpclear);
 extern struct user_struct * alloc_uid(uid_t);
 static inline struct user_struct *get_uid(struct user_struct *u)
 {
@@ -1185,7 +1520,7 @@ extern int FASTCALL(wake_up_state(struct task_struct * tsk, unsigned int state))
 extern int FASTCALL(wake_up_process(struct task_struct * tsk));
 extern void FASTCALL(wake_up_new_task(struct task_struct * tsk,
 						unsigned long clone_flags));
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) || defined (CONFIG_SCHED_VCPU)
  extern void kick_process(struct task_struct *tsk);
 #else
  static inline void kick_process(struct task_struct *tsk) { }
@@ -1300,12 +1635,19 @@ extern struct task_struct *child_reaper;
 
 extern int do_execve(char *, char __user * __user *, char __user * __user *, struct pt_regs *);
 extern long do_fork(unsigned long, unsigned long, struct pt_regs *, unsigned long, int __user *, int __user *);
+extern long do_fork_pid(unsigned long clone_flags,
+			unsigned long stack_start,
+			struct pt_regs *regs,
+			unsigned long stack_size,
+			int __user *parent_tidptr,
+			int __user *child_tidptr,
+			long pid0);
 struct task_struct *fork_idle(int);
 
 extern void set_task_comm(struct task_struct *tsk, char *from);
 extern void get_task_comm(char *to, struct task_struct *tsk);
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) || defined (CONFIG_SCHED_VCPU)
 extern void wait_task_inactive(struct task_struct * p);
 #else
 #define wait_task_inactive(p)	do { } while (0)
@@ -1314,28 +1656,99 @@ extern void wait_task_inactive(struct task_struct * p);
 #define remove_parent(p)	list_del_init(&(p)->sibling)
 #define add_parent(p)		list_add_tail(&(p)->sibling,&(p)->parent->children)
 
-#define next_task(p)	list_entry(rcu_dereference((p)->tasks.next), struct task_struct, tasks)
+#define next_task_all(p)	list_entry(rcu_dereference((p)->tasks.next), struct task_struct, tasks)
 
-#define for_each_process(p) \
-	for (p = &init_task ; (p = next_task(p)) != &init_task ; )
+#define for_each_process_all(p) \
+	for (p = &init_task ; (p = next_task_all(p)) != &init_task ; )
 
 /*
  * Careful: do_each_thread/while_each_thread is a double loop so
  *          'break' will not work as expected - use goto instead.
  */
-#define do_each_thread(g, t) \
-	for (g = t = &init_task ; (g = t = next_task(g)) != &init_task ; ) do
+#define do_each_thread_all(g, t) \
+	for (g = t = &init_task ; (g = t = next_task_all(g)) != &init_task ; ) do
 
-#define while_each_thread(g, t) \
+#define while_each_thread_all(g, t) \
 	while ((t = next_thread(t)) != g)
+
+#ifndef CONFIG_VE
+
+#define for_each_process_ve(p)		for_each_process_all(p)
+#define do_each_thread_ve(g, t)		do_each_thread_all(g, t)
+#define while_each_thread_ve(g, t)	while_each_thread_all(g, t)
+#define first_task_ve()			next_task_ve(&init_task)
+#define __first_task_ve(owner)		next_task_ve(&init_task)
+#define __next_task_ve(owner, p)	next_task_ve(p)
+#define next_task_ve(p)			\
+		(next_task_all(p) != &init_task ? next_task_all(p) : NULL)
+
+#else	/* CONFIG_VE */
+
+static inline struct task_struct *ve_lh2task(struct ve_struct *ve,
+		struct list_head *lh)
+{
+	return lh == &ve->vetask_lh ? NULL :
+		list_entry(lh, struct task_struct, ve_task_info.vetask_list);
+}
+
+static inline struct task_struct *__first_task_ve(struct ve_struct *ve)
+{
+	struct task_struct *tsk;
+
+	if (unlikely(ve_is_super(ve))) {
+		tsk = next_task_all(&init_task);
+		if (tsk == &init_task)
+			tsk = NULL;
+	} else {
+		tsk = ve_lh2task(ve, rcu_dereference(ve->vetask_lh.next));
+	}
+	return tsk;
+}
+
+static inline struct task_struct *__next_task_ve(struct ve_struct *ve,
+		struct task_struct *tsk)
+{
+	if (unlikely(ve_is_super(ve))) {
+		tsk = next_task_all(tsk);
+		if (tsk == &init_task)
+			tsk = NULL;
+	} else {
+		BUG_ON(tsk->ve_task_info.owner_env != ve);
+		tsk = ve_lh2task(ve, rcu_dereference(tsk->
+					ve_task_info.vetask_list.next));
+	}
+	return tsk;
+}
+
+#define first_task_ve()	__first_task_ve(get_exec_env())
+#define next_task_ve(p)	__next_task_ve(get_exec_env(), p)
+/* no one uses prev_task_ve(), copy next_task_ve() if needed */
+
+#define for_each_process_ve(p) \
+	for (p = first_task_ve(); p != NULL ; p = next_task_ve(p))
+
+#define do_each_thread_ve(g, t) \
+	for (g = t = first_task_ve() ; g != NULL; g = t = next_task_ve(g)) do
+
+#define while_each_thread_ve(g, t) \
+	while ((t = next_thread(t)) != g)
+
+#endif	/* CONFIG_VE */
 
 /* de_thread depends on thread_group_leader not being a pid based check */
 #define thread_group_leader(p)	(p == p->group_leader)
 
 static inline struct task_struct *next_thread(const struct task_struct *p)
 {
-	return list_entry(rcu_dereference(p->thread_group.next),
+	struct task_struct *tsk;
+
+	tsk = list_entry(rcu_dereference(p->thread_group.next),
 			  struct task_struct, thread_group);
+#ifdef CONFIG_VE
+	/* all threads should belong to ONE ve! */
+	BUG_ON(VE_TASK_INFO(tsk)->owner_env != VE_TASK_INFO(p)->owner_env);
+#endif
+	return tsk;
 }
 
 static inline int thread_group_empty(struct task_struct *p)
@@ -1486,28 +1899,63 @@ extern void signal_wake_up(struct task_struct *t, int resume_stopped);
  */
 #ifdef CONFIG_SMP
 
-static inline unsigned int task_cpu(const struct task_struct *p)
+static inline unsigned int task_pcpu(const struct task_struct *p)
 {
 	return task_thread_info(p)->cpu;
 }
 
-static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
+static inline void set_task_pcpu(struct task_struct *p, unsigned int cpu)
 {
 	task_thread_info(p)->cpu = cpu;
 }
 
 #else
 
-static inline unsigned int task_cpu(const struct task_struct *p)
+static inline unsigned int task_pcpu(const struct task_struct *p)
 {
 	return 0;
 }
 
-static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
+static inline void set_task_pcpu(struct task_struct *p, unsigned int cpu)
 {
 }
 
 #endif /* CONFIG_SMP */
+
+#ifdef CONFIG_SCHED_VCPU
+
+static inline unsigned int task_vsched_id(const struct task_struct *p)
+{
+	return p->vsched_id;
+}
+
+static inline unsigned int task_cpu(const struct task_struct *p)
+{
+	return p->vcpu_id;
+}
+
+extern void set_task_cpu(struct task_struct *p, unsigned int vcpu);
+extern int vcpu_online(int cpu);
+
+#else
+
+static inline unsigned int task_vsched_id(const struct task_struct *p)
+{
+	return 0;
+}
+
+static inline unsigned int task_cpu(const struct task_struct *p)
+{
+	return task_pcpu(p);
+}
+
+static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
+{
+	set_task_pcpu(p, cpu);
+}
+
+#define vcpu_online(cpu)	cpu_online(cpu)
+#endif /* CONFIG_SCHED_VCPU */
 
 #ifdef HAVE_ARCH_PICK_MMAP_LAYOUT
 extern void arch_pick_mmap_layout(struct mm_struct *mm);
@@ -1540,20 +1988,12 @@ static inline int frozen(struct task_struct *p)
 }
 
 /*
- * Check if there is a request to freeze a process
- */
-static inline int freezing(struct task_struct *p)
-{
-	return p->flags & PF_FREEZE;
-}
-
-/*
  * Request that a process be frozen
  * FIXME: SMP problem. We may not modify other process' flags!
  */
 static inline void freeze(struct task_struct *p)
 {
-	p->flags |= PF_FREEZE;
+	set_tsk_thread_flag(p, TIF_FREEZE);
 }
 
 /*
@@ -1561,7 +2001,7 @@ static inline void freeze(struct task_struct *p)
  */
 static inline void do_not_freeze(struct task_struct *p)
 {
-	p->flags &= ~PF_FREEZE;
+	clear_tsk_thread_flag(p, TIF_FREEZE);
 }
 
 /*
@@ -1582,12 +2022,33 @@ static inline int thaw_process(struct task_struct *p)
  */
 static inline void frozen_process(struct task_struct *p)
 {
-	p->flags = (p->flags & ~PF_FREEZE) | PF_FROZEN;
+	clear_tsk_thread_flag(p, TIF_FREEZE);
+	p->flags |= PF_FROZEN;
 }
 
-extern void refrigerator(void);
 extern int freeze_processes(void);
 extern void thaw_processes(void);
+
+#else
+static inline int frozen(struct task_struct *p) { return 0; }
+static inline void freeze(struct task_struct *p) { BUG(); }
+static inline int thaw_process(struct task_struct *p) { return 1; }
+static inline void frozen_process(struct task_struct *p) { BUG(); }
+
+static inline int freeze_processes(void) { BUG(); return 0; }
+static inline void thaw_processes(void) {}
+
+#endif /* CONFIG_PM */
+
+extern void refrigerator(void);
+
+/*
+ * Check if there is a request to freeze a process
+ */
+static inline int freezing(struct task_struct *p)
+{
+	return test_tsk_thread_flag(p, TIF_FREEZE);
+}
 
 static inline int try_to_freeze(void)
 {
@@ -1597,20 +2058,8 @@ static inline int try_to_freeze(void)
 	} else
 		return 0;
 }
-#else
-static inline int frozen(struct task_struct *p) { return 0; }
-static inline int freezing(struct task_struct *p) { return 0; }
-static inline void freeze(struct task_struct *p) { BUG(); }
-static inline int thaw_process(struct task_struct *p) { return 1; }
-static inline void frozen_process(struct task_struct *p) { BUG(); }
 
-static inline void refrigerator(void) {}
-static inline int freeze_processes(void) { BUG(); return 0; }
-static inline void thaw_processes(void) {}
 
-static inline int try_to_freeze(void) { return 0; }
-
-#endif /* CONFIG_PM */
 #endif /* __KERNEL__ */
 
 #endif

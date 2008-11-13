@@ -1,6 +1,8 @@
 #ifndef _IPT_HASHLIMIT_H
 #define _IPT_HASHLIMIT_H
 
+#include <net/compat.h>
+
 /* timings are in milliseconds. */
 #define IPT_HASHLIMIT_SCALE 10000
 /* 1/10,000 sec period => max of 10,000/sec.  Min rate is then 429490
@@ -36,5 +38,24 @@ struct ipt_hashlimit_info {
 		void *ptr;
 		struct ipt_hashlimit_info *master;
 	} u;
+};
+
+#ifdef CONFIG_COMPAT
+struct compat_ipt_hashlimit_info {
+	char name [IFNAMSIZ];		/* name */
+	struct hashlimit_cfg cfg;
+	compat_uptr_t hinfo;
+
+	/* Used internally by the kernel */
+	union {
+		compat_uptr_t ptr;
+		compat_uptr_t master;
+	} u;
+};
+#endif /*CONFIG_COMPAT*/
+
+struct ve_ipt_hashlimit {
+	struct hlist_head	hashlimit_htables;
+	struct proc_dir_entry	*hashlimit_procdir;
 };
 #endif /*_IPT_HASHLIMIT_H*/

@@ -151,7 +151,12 @@ ENTRY(ret_from_fork)
 	popf				# reset kernel eflags
 	CFI_ADJUST_CFA_OFFSET -4
 	call schedule_tail
+ret_from_fork_tail:
 	GET_THREAD_INFO(%rcx)
+	btr $TIF_RESUME,threadinfo_flags(%rcx)
+	jc  x86_64_ret_from_resume
+
+ret_from_fork_check:
 	testl $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT),threadinfo_flags(%rcx)
 	jnz rff_trace
 rff_action:	
@@ -167,6 +172,19 @@ rff_trace:
 	call syscall_trace_leave
 	GET_THREAD_INFO(%rcx)	
 	jmp rff_action
+
+x86_64_ret_from_resume:
+	movq (%rsp),%rax
+	testq %rax,%rax
+	jz 1f
+	movq  %rsp,%rdi
+	call  *%rax
+1:
+	addq $256,%rsp
+	cmpq $0,ORIG_RAX(%rsp)
+	jge  ret_from_fork_tail
+	RESTORE_REST
+	jmp  int_ret_from_sys_call
 	CFI_ENDPROC
 END(ret_from_fork)
 
@@ -274,7 +292,7 @@ sysret_careful:
 sysret_signal:
 	TRACE_IRQS_ON
 	sti
-	testl $(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME|_TIF_SINGLESTEP),%edx
+	testl $(_TIF_SIGPENDING|_TIF_RESTORE_SIGMASK|_TIF_NOTIFY_RESUME|_TIF_SINGLESTEP),%edx
 	jz    1f
 
 	/* Really a signal */
@@ -305,6 +323,8 @@ tracesys:
 	LOAD_ARGS ARGOFFSET  /* reload args from stack in case ptrace changed it */
 	RESTORE_REST
 	cmpq $__NR_syscall_max,%rax
+	movq $-ENOSYS,%rcx
+	cmova %rcx,%rax
 	ja  1f
 	movq %r10,%rcx	/* fixup for C */
 	call *sys_call_table(,%rax,8)
@@ -386,7 +406,7 @@ int_very_careful:
 	jmp int_restore_rest
 	
 int_signal:
-	testl $(_TIF_NOTIFY_RESUME|_TIF_SIGPENDING|_TIF_SINGLESTEP),%edx
+	testl $(_TIF_NOTIFY_RESUME|_TIF_RESTORE_SIGMASK|_TIF_SIGPENDING|_TIF_SINGLESTEP),%edx
 	jz 1f
 	movq %rsp,%rdi		# &ptregs -> arg1
 	xorl %esi,%esi		# oldset -> arg2
@@ -604,7 +624,7 @@ retint_careful:
 	jmp retint_check
 	
 retint_signal:
-	testl $(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME|_TIF_SINGLESTEP),%edx
+	testl $(_TIF_SIGPENDING|_TIF_RESTORE_SIGMASK|_TIF_NOTIFY_RESUME|_TIF_SINGLESTEP),%edx
 	jz    retint_swapgs
 	TRACE_IRQS_ON
 	sti
@@ -959,7 +979,7 @@ ENTRY(kernel_thread)
 	xorl %r9d,%r9d
 	
 	# clone now
-	call do_fork
+	call do_fork_kthread
 	movq %rax,RAX(%rsp)
 	xorl %edi,%edi
 

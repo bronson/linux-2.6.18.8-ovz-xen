@@ -77,7 +77,7 @@ wakeup_code:
 
 	.byte 0x66, 0xea			# prefix + jmpi-opcode
 	.long	wakeup_32 - __START_KERNEL_map
-	.word	__KERNEL_CS
+	.word	__BOOT_CS
 
 	.code32
 wakeup_32:
@@ -96,13 +96,13 @@ wakeup_32:
 	jnc	bogus_cpu
 	movl	%edx,%edi
 	
-	movw	$__KERNEL_DS, %ax
+	movw	$__BOOT_DS, %ax
 	movw	%ax, %ds
 	movw	%ax, %es
 	movw	%ax, %fs
 	movw	%ax, %gs
 
-	movw	$__KERNEL_DS, %ax	
+	movw	$__BOOT_DS, %ax	
 	movw	%ax, %ss
 
 	mov	$(wakeup_stack - __START_KERNEL_map), %esp
@@ -187,7 +187,7 @@ reach_compatibility_mode:
 
 wakeup_jumpvector:
 	.long	wakeup_long64 - __START_KERNEL_map
-	.word	__KERNEL_CS
+	.word	__BOOT_CS
 
 .code64
 

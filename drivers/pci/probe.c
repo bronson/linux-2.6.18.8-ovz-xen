@@ -21,6 +21,7 @@ LIST_HEAD(pci_root_buses);
 EXPORT_SYMBOL(pci_root_buses);
 
 LIST_HEAD(pci_devices);
+EXPORT_SYMBOL(pci_devices);
 
 #ifdef HAVE_PCI_LEGACY
 /**

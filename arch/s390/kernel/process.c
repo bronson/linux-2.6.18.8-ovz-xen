@@ -165,9 +165,10 @@ void show_regs(struct pt_regs *regs)
 	struct task_struct *tsk = current;
 
         printk("CPU:    %d    %s\n", task_thread_info(tsk)->cpu, print_tainted());
-        printk("Process %s (pid: %d, task: %p, ksp: %p)\n",
-	       current->comm, current->pid, (void *) tsk,
-	       (void *) tsk->thread.ksp);
+        printk("Process %s (pid: %d, veid: %d, task: %p, ksp: %p)\n",
+	       current->comm, current->pid,
+	       VEID(VE_TASK_INFO(current)->owner_env),
+	       (void *) tsk, (void *) tsk->thread.ksp);
 
 	show_registers(regs);
 	/* Show stack backtrace if pt_regs is from kernel mode */
@@ -187,6 +188,13 @@ __asm__(".align 4\n"
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	struct pt_regs regs;
+
+	if (!ve_is_super(get_exec_env())) {
+		/* Don't allow kernel_thread() inside VE */
+		printk("kernel_thread call inside container\n");
+		dump_stack();
+		return -EPERM;
+	}
 
 	memset(&regs, 0, sizeof(regs));
 	regs.psw.mask = PSW_KERNEL_BITS | PSW_MASK_IO | PSW_MASK_EXT;

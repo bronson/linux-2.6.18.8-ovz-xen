@@ -189,6 +189,7 @@ out_fput:
 	fput(file);
 	goto out;
 }
+EXPORT_SYMBOL_GPL(sys_dup2);
 
 asmlinkage long sys_dup(unsigned int fildes)
 {
@@ -206,6 +207,9 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 {
 	struct inode * inode = filp->f_dentry->d_inode;
 	int error = 0;
+
+	if (!capable(CAP_SYS_RAWIO) && !odirect_enable)
+		arg &= ~O_DIRECT;
 
 	/*
 	 * O_APPEND cannot be cleared if the file is marked as append-only
@@ -253,6 +257,7 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 static void f_modown(struct file *filp, unsigned long pid,
                      uid_t uid, uid_t euid, int force)
 {
+	pid = comb_vpid_to_pid(pid);
 	write_lock_irq(&filp->f_owner.lock);
 	if (force || !filp->f_owner.pid) {
 		filp->f_owner.pid = pid;
@@ -319,7 +324,7 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		 * current syscall conventions, the only way
 		 * to fix this will be in libc.
 		 */
-		err = filp->f_owner.pid;
+		err = comb_pid_to_vpid(filp->f_owner.pid);
 		force_successful_syscall_return();
 		break;
 	case F_SETOWN:
@@ -470,23 +475,29 @@ static void send_sigio_to_task(struct task_struct *p,
 void send_sigio(struct fown_struct *fown, int fd, int band)
 {
 	struct task_struct *p;
+	struct file *f;
+	struct ve_struct *ve;
 	int pid;
 	
 	read_lock(&fown->lock);
 	pid = fown->pid;
 	if (!pid)
 		goto out_unlock_fown;
+
+	/* hack: fown's are always embedded in struct file */
+	f = container_of(fown, struct file, f_owner);
+	ve = f->owner_env;
 	
 	read_lock(&tasklist_lock);
 	if (pid > 0) {
-		p = find_task_by_pid(pid);
-		if (p) {
+		p = find_task_by_pid_all(pid);
+		if (p && ve_accessible(VE_TASK_INFO(p)->owner_env, ve)) {
 			send_sigio_to_task(p, fown, fd, band);
 		}
 	} else {
-		do_each_task_pid(-pid, PIDTYPE_PGID, p) {
+		__do_each_task_pid_ve(-pid, PIDTYPE_PGID, p, ve) {
 			send_sigio_to_task(p, fown, fd, band);
-		} while_each_task_pid(-pid, PIDTYPE_PGID, p);
+		} __while_each_task_pid_ve(-pid, PIDTYPE_PGID, p, ve);
 	}
 	read_unlock(&tasklist_lock);
  out_unlock_fown:
@@ -503,6 +514,8 @@ static void send_sigurg_to_task(struct task_struct *p,
 int send_sigurg(struct fown_struct *fown)
 {
 	struct task_struct *p;
+	struct file *f;
+	struct ve_struct *ve;
 	int pid, ret = 0;
 	
 	read_lock(&fown->lock);
@@ -511,17 +524,19 @@ int send_sigurg(struct fown_struct *fown)
 		goto out_unlock_fown;
 
 	ret = 1;
+	f = container_of(fown, struct file, f_owner);
+	ve = f->owner_env;
 	
 	read_lock(&tasklist_lock);
 	if (pid > 0) {
-		p = find_task_by_pid(pid);
-		if (p) {
+		p = find_task_by_pid_all(pid);
+		if (p && ve_accessible(VE_TASK_INFO(p)->owner_env, ve)) {
 			send_sigurg_to_task(p, fown);
 		}
 	} else {
-		do_each_task_pid(-pid, PIDTYPE_PGID, p) {
+		__do_each_task_pid_ve(-pid, PIDTYPE_PGID, p, ve) {
 			send_sigurg_to_task(p, fown);
-		} while_each_task_pid(-pid, PIDTYPE_PGID, p);
+		} __while_each_task_pid_ve(-pid, PIDTYPE_PGID, p, ve);
 	}
 	read_unlock(&tasklist_lock);
  out_unlock_fown:

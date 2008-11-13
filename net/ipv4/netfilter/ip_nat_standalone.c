@@ -29,6 +29,7 @@
 #include <net/ip.h>
 #include <net/checksum.h>
 #include <linux/spinlock.h>
+#include <linux/nfcalls.h>
 
 #define ASSERT_READ_LOCK(x)
 #define ASSERT_WRITE_LOCK(x)
@@ -353,21 +354,19 @@ static struct nf_hook_ops ip_nat_ops[] = {
 	},
 };
 
-static int __init ip_nat_standalone_init(void)
+int init_iptable_nat(void)
 {
 	int ret = 0;
 
-	need_conntrack();
+	if (!ve_is_super(get_exec_env()))
+		__module_get(THIS_MODULE);
 
-#ifdef CONFIG_XFRM
-	BUG_ON(ip_nat_decode_session != NULL);
-	ip_nat_decode_session = nat_decode_session;
-#endif
 	ret = ip_nat_rule_init();
 	if (ret < 0) {
 		printk("ip_nat_init: can't setup rules.\n");
-		goto cleanup_decode_session;
+ 		goto out_modput;
 	}
+
 	ret = nf_register_hooks(ip_nat_ops, ARRAY_SIZE(ip_nat_ops));
 	if (ret < 0) {
 		printk("ip_nat_init: can't register hooks.\n");
@@ -377,25 +376,64 @@ static int __init ip_nat_standalone_init(void)
 
  cleanup_rule_init:
 	ip_nat_rule_cleanup();
- cleanup_decode_session:
-#ifdef CONFIG_XFRM
-	ip_nat_decode_session = NULL;
-	synchronize_net();
-#endif
+ out_modput:
+	if (!ve_is_super(get_exec_env()))
+		module_put(THIS_MODULE);
 	return ret;
+}
+
+void fini_iptable_nat(void)
+{
+	nf_unregister_hooks(ip_nat_ops, ARRAY_SIZE(ip_nat_ops));
+	ip_nat_rule_cleanup();
+	if (!ve_is_super(get_exec_env()))
+		module_put(THIS_MODULE);
+}
+
+static int __init ip_nat_standalone_init(void)
+{
+	int err;
+
+	need_conntrack();
+
+#ifdef CONFIG_XFRM
+	BUG_ON(ip_nat_decode_session != NULL);
+	ip_nat_decode_session = nat_decode_session;
+#endif
+	if (!ip_conntrack_disable_ve0)
+		err = init_iptable_nat();
+	else
+		err = ip_nat_rule_init();
+	if (err < 0) {
+#ifdef CONFIG_XFRM
+		ip_nat_decode_session = NULL;
+		synchronize_net();
+#endif
+		return err;
+	}
+
+	KSYMRESOLVE(init_iptable_nat);
+	KSYMRESOLVE(fini_iptable_nat);
+	KSYMMODRESOLVE(iptable_nat);
+	return 0;
 }
 
 static void __exit ip_nat_standalone_fini(void)
 {
-	nf_unregister_hooks(ip_nat_ops, ARRAY_SIZE(ip_nat_ops));
-	ip_nat_rule_cleanup();
+	KSYMMODUNRESOLVE(iptable_nat);
+	KSYMUNRESOLVE(init_iptable_nat);
+	KSYMUNRESOLVE(fini_iptable_nat);
+	if (!ip_conntrack_disable_ve0)
+		fini_iptable_nat();
+	else
+		ip_nat_rule_cleanup();
 #ifdef CONFIG_XFRM
 	ip_nat_decode_session = NULL;
 	synchronize_net();
 #endif
 }
 
-module_init(ip_nat_standalone_init);
+fs_initcall(ip_nat_standalone_init);
 module_exit(ip_nat_standalone_fini);
 
 MODULE_LICENSE("GPL");

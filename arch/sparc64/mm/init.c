@@ -418,6 +418,7 @@ void show_mem(void)
 	printk("%ld pages of RAM\n", num_physpages);
 	printk("%d free pages\n", nr_free_pages());
 }
+EXPORT_SYMBOL(show_mem);
 
 void mmu_info(struct seq_file *m)
 {

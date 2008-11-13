@@ -44,8 +44,6 @@
 typedef __kernel_uid32_t qid_t; /* Type in which we store ids in memory */
 typedef __u64 qsize_t;          /* Type in which we store sizes */
 
-extern spinlock_t dq_data_lock;
-
 /* Size of blocks in which are counted size limits */
 #define QUOTABLOCK_BITS 10
 #define QUOTABLOCK_SIZE (1 << QUOTABLOCK_BITS)
@@ -133,6 +131,10 @@ struct if_dqinfo {
 #ifdef __KERNEL__
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
+
+#include <linux/spinlock.h>
+
+extern spinlock_t dq_data_lock;
 
 #include <linux/dqblk_xfs.h>
 #include <linux/dqblk_v1.h>
@@ -242,6 +244,8 @@ struct quota_format_ops {
 	int (*release_dqblk)(struct dquot *dquot);	/* Called when last reference to dquot is being dropped */
 };
 
+struct inode;
+struct iattr;
 /* Operations working with dquots */
 struct dquot_operations {
 	int (*initialize) (struct inode *, int);
@@ -256,9 +260,11 @@ struct dquot_operations {
 	int (*release_dquot) (struct dquot *);		/* Quota is going to be deleted from disk */
 	int (*mark_dirty) (struct dquot *);		/* Dquot is marked dirty */
 	int (*write_info) (struct super_block *, int);	/* Write of quota "superblock" */
+	int (*rename) (struct inode *, struct inode *, struct inode *);
 };
 
 /* Operations handling requests from userspace */
+struct v2_disk_dqblk;
 struct quotactl_ops {
 	int (*quota_on)(struct super_block *, int, int, char *);
 	int (*quota_off)(struct super_block *, int);
@@ -271,6 +277,10 @@ struct quotactl_ops {
 	int (*set_xstate)(struct super_block *, unsigned int, int);
 	int (*get_xquota)(struct super_block *, int, qid_t, struct fs_disk_quota *);
 	int (*set_xquota)(struct super_block *, int, qid_t, struct fs_disk_quota *);
+#ifdef CONFIG_QUOTA_COMPAT
+	int (*get_quoti)(struct super_block *, int, unsigned int,
+			struct v2_disk_dqblk __user *);
+#endif
 };
 
 struct quota_format_type {
@@ -291,6 +301,10 @@ struct quota_info {
 	struct inode *files[MAXQUOTAS];		/* inodes of quotafiles */
 	struct mem_dqinfo info[MAXQUOTAS];	/* Information for each quota type */
 	struct quota_format_ops *ops[MAXQUOTAS];	/* Operations for each type */
+#if defined(CONFIG_VZ_QUOTA) || defined(CONFIG_VZ_QUOTA_MODULE)
+	struct vz_quota_master *vzdq_master;
+	int vzdq_count;
+#endif
 };
 
 /* Inline would be better but we need to dereference super_block which is not defined yet */
@@ -306,6 +320,53 @@ int mark_dquot_dirty(struct dquot *dquot);
 
 int register_quota_format(struct quota_format_type *fmt);
 void unregister_quota_format(struct quota_format_type *fmt);
+
+#ifdef CONFIG_QUOTA_COMPAT
+#include <linux/compat.h>
+
+#define QC_QUOTAON  0x0100	/* enable quotas */
+#define QC_QUOTAOFF 0x0200	/* disable quotas */
+
+/* GETQUOTA, SETQUOTA and SETUSE which were at 0x0300-0x0500 has now
+ * other parameteres
+ */
+#define QC_SYNC     0x0600	/* sync disk copy of a filesystems quotas */
+#define QC_SETQLIM  0x0700	/* set limits */
+/* GETSTATS at 0x0800 is now longer... */
+#define QC_GETINFO  0x0900	/* get info about quotas - graces, flags... */
+#define QC_SETINFO  0x0A00	/* set info about quotas */
+#define QC_SETGRACE 0x0B00	/* set inode and block grace */
+#define QC_SETFLAGS 0x0C00	/* set flags for quota */
+#define QC_GETQUOTA 0x0D00	/* get limits and usage */
+#define QC_SETQUOTA 0x0E00	/* set limits and usage */
+#define QC_SETUSE   0x0F00	/* set usage */
+/* 0x1000 used by old RSQUASH */
+#define QC_GETSTATS 0x1100	/* get collected stats */
+
+struct compat_v2_dqblk {
+	unsigned int dqb_ihardlimit;
+	unsigned int dqb_isoftlimit;
+	unsigned int dqb_curinodes;
+	unsigned int dqb_bhardlimit;
+	unsigned int dqb_bsoftlimit;
+	qsize_t dqb_curspace;
+	__kernel_time_t dqb_btime;
+	__kernel_time_t dqb_itime;
+};
+
+#ifdef CONFIG_COMPAT
+struct compat_v2_dqblk_32 {
+	unsigned int dqb_ihardlimit;
+	unsigned int dqb_isoftlimit;
+	unsigned int dqb_curinodes;
+	unsigned int dqb_bhardlimit;
+	unsigned int dqb_bsoftlimit;
+	qsize_t dqb_curspace;
+	compat_time_t dqb_btime;
+	compat_time_t dqb_itime;
+} __attribute__ ((packed));
+#endif
+#endif
 
 struct quota_module_name {
 	int qm_fmt_id;

@@ -526,6 +526,17 @@ int __devinit start_secondary(void *cpuvoid)
 {
         /* Setup the cpu */
         cpu_init();
+
+#ifdef CONFIG_VE
+	/* TSC reset. kill whatever might rely on old values */
+	VE_TASK_INFO(current)->wakeup_stamp = 0;
+	/*
+	 * Cosmetic: sleep_time won't be changed afterwards for the idle
+	 * thread;  keep it 0 rather than -cycles.
+	 */
+	VE_TASK_INFO(idle)->sleep_time = 0;
+#endif
+
 	preempt_disable();
         /* init per CPU timer */
         init_cpu_timer();
@@ -834,6 +845,11 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	for_each_possible_cpu(cpu)
 		if (cpu != smp_processor_id())
 			smp_create_idle(cpu);
+
+#ifdef CONFIG_VE
+	/* TSC reset. kill whatever might rely on old values */
+	VE_TASK_INFO(current)->wakeup_stamp = 0;
+#endif
 }
 
 void __devinit smp_prepare_boot_cpu(void)

@@ -41,6 +41,14 @@ extern unsigned int xprt_max_resvport;
 #define RPC_DEF_MAX_RESVPORT	(1023U)
 
 /*
+ * Grand abort timeout (stop the client if occures)
+ */
+extern int xprt_abort_timeout;
+
+#define RPC_MIN_ABORT_TIMEOUT	300
+#define RPC_MAX_ABORT_TIMEOUT	INT_MAX
+
+/*
  * This describes a timeout strategy
  */
 struct rpc_timeout {
@@ -122,6 +130,7 @@ struct rpc_xprt {
 	struct rpc_xprt_ops *	ops;		/* transport methods */
 	struct socket *		sock;		/* BSD socket layer */
 	struct sock *		inet;		/* INET layer */
+	struct ve_struct *	owner_env;	/* VE owner of mount */
 
 	struct rpc_timeout	timeout;	/* timeout parms */
 	struct sockaddr_in	addr;		/* server address */

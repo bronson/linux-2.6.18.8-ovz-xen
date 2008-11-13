@@ -24,6 +24,8 @@
 #include <linux/fs.h>
 #include <linux/rcupdate.h>
 
+#include <ub/ub_mem.h>
+
 #include <asm/uaccess.h>
 
 #define ROUND_UP(x,y) (((x)+(y)-1)/(y))
@@ -339,7 +341,8 @@ static int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
 	if (size > sizeof(stack_fds) / 6) {
 		/* Not enough space in on-stack array; must use kmalloc */
 		ret = -ENOMEM;
-		bits = kmalloc(6 * size, GFP_KERNEL);
+		bits = kmalloc(6 * size, size > PAGE_SIZE / 6 ?
+				GFP_KERNEL_UBC : GFP_KERNEL);
 		if (!bits)
 			goto out_nofds;
 	}
@@ -658,6 +661,7 @@ int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds, s64 *timeout)
  	unsigned int i;
 	struct poll_list *head;
  	struct poll_list *walk;
+	int flags;
 	struct fdtable *fdt;
 	int max_fdset;
 	/* Allocate small arguments on the stack to save memory and be
@@ -680,9 +684,14 @@ int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds, s64 *timeout)
 	walk = NULL;
 	i = nfds;
 	err = -ENOMEM;
+
+	flags = GFP_KERNEL_UBC;
 	while(i!=0) {
 		struct poll_list *pp;
 		int num, size;
+		if (i <= POLLFD_PER_PAGE)
+			flags = GFP_KERNEL;
+
 		if (stack_pp == NULL)
 			num = N_STACK_PPS;
 		else
@@ -693,7 +702,7 @@ int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds, s64 *timeout)
 		if (!stack_pp)
 			stack_pp = pp = (struct poll_list *)stack_pps;
 		else {
-			pp = kmalloc(size, GFP_KERNEL);
+			pp = kmalloc(size, flags);
 			if (!pp)
 				goto out_fds;
 		}

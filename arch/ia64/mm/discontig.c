@@ -46,6 +46,7 @@ static struct early_node_data mem_data[MAX_NUMNODES] __initdata;
 static nodemask_t memory_less_mask __initdata;
 
 static pg_data_t *pgdat_list[MAX_NUMNODES];
+EXPORT_SYMBOL(pgdat_list);
 
 /*
  * To prevent cache aliasing effects, align per-node structures so that they
@@ -592,6 +593,7 @@ void show_mem(void)
 		pgtable_quicklist_total_size());
 	printk("%d free buffer pages\n", nr_free_buffer_pages());
 }
+EXPORT_SYMBOL(show_mem);
 
 /**
  * call_pernode_memory - use SRAT to call callback functions with node info

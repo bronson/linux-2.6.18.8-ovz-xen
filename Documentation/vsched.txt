@@ -1,0 +1,83 @@
+Copyright (C) 2005 SWsoft. All rights reserved.
+Licensing governed by "linux/COPYING.SWsoft" file.
+
+Hierarchical CPU schedulers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Hierarchical CPU scheduler is a stack of CPU schedulers which allows
+to organize different policies of scheduling in the system and/or between
+groups of processes.
+
+Virtuozzo uses a hierarchical Fair CPU scheduler organized as a 2-stage
+CPU scheduler, where the scheduling decisions are made in 2 steps:
+1. On the first step Fair CPU scheduler selects a group of processes
+  which should get some CPU time.
+2. Then standard Linux scheduler chooses a process inside the group.
+Such scheduler efficiently allows to isolate one group of processes
+from another and still allows a group to use more than 1 CPU on SMP systems.
+
+This document describes a new middle layer of Virtuozzo hierarchical CPU
+scheduler which makes decisions after Fair scheduler, but before Linux
+scheduler and which is called VCPU scheduler.
+
+
+Where VCPU scheduler comes from?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Existing hierarchical CPU scheduler uses isolated algorithms on each stage
+of decision making, i.e. every scheduler makes its decisions without
+taking into account the details of other schedulers. This can lead to a number
+of problems described below.
+
+On SMP systems there are possible situations when the first CPU scheduler
+in the hierarchy (e.g. Fair scheduler) wants to schedule some group of
+processes on the physical CPU, but the underlying process scheduler
+(e.g. Linux O(1) CPU scheduler) is unable to schedule any processes
+on this physical CPU. Usually this happens due to the fact that Linux
+kernel scheduler uses per-physical CPU runqueues.
+
+Another problem is that Linux scheduler also knows nothing about
+Fair scheduler and can't balance efficiently without taking into account
+statistics about process groups from Fair scheduler. Without such
+statistics Linux scheduler can concentrate all processes on one physical
+CPU, thus making CPU consuming highly inefficient.
+
+VCPU scheduler solves these problems by adding a new layer between
+Fair schedule and Linux scheduler.
+
+VCPU scheduler
+~~~~~~~~~~~~~~
+
+VCPU scheduler is a CPU scheduler which splits notion of
+physical and virtual CPUs (VCPU and PCPU). This means that tasks are
+running on virtual CPU runqueues, while VCPUs are running on PCPUs.
+
+The Virtuozzo hierarchical fair scheduler becomes 3 stage CPU scheduler:
+1. First, Fair CPU scheduler select a group of processes.
+2. Then VCPU scheduler select a virtual CPU to run (this is actually
+  a runqueue).
+3. Standard Linux scheduler chooses a process from the runqueue.
+
+For example on the picture below PCPU0 executes tasks from
+VCPU1 runqueue and PCPU1 is idle:
+
+   virtual          |         physical       |          virtual
+  idle CPUs         |           CPUs         |           CPUS
+--------------------|------------------------|--------------------------
+                    |                        |     -----------------
+                    |                        |    | virtual sched X |
+                    |                        |    |   -----------   |
+                    |                        |    |  |   VCPU0   |  |
+                    |                        |    |   -----------   |
+ ------------       |        -----------          |   -----------   |
+| idle VCPU0 |      |       |   PCPU0   |  <--->  |  |   VCPU1   |  |
+ ------------       |        -----------          |   -----------   |
+                    |                        |     -----------------
+                    |                        |
+                    |                        |     -----------------
+                    |                        |    | virtual sched Y |
+ ------------                -----------     |    |   -----------   |
+| idle VCPU1 |    <--->     |   PCPU1   |    |    |  |   VCPU0   |  |
+ ------------                -----------     |    |   -----------   |
+                    |                        |     -----------------
+                    |                        |

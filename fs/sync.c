@@ -11,6 +11,8 @@
 #include <linux/linkage.h>
 #include <linux/pagemap.h>
 
+#include <ub/beancounter.h>
+
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
 
@@ -130,12 +132,16 @@ int do_sync_file_range(struct file *file, loff_t offset, loff_t endbyte,
 {
 	int ret;
 	struct address_space *mapping;
+	struct user_beancounter *ub;
 
 	mapping = file->f_mapping;
 	if (!mapping) {
 		ret = -EINVAL;
-		goto out;
+		goto out_noacct;
 	}
+
+	ub = get_exec_ub();
+	ub_percpu_inc(ub, frsync);
 
 	ret = 0;
 	if (flags & SYNC_FILE_RANGE_WAIT_BEFORE) {
@@ -159,6 +165,8 @@ int do_sync_file_range(struct file *file, loff_t offset, loff_t endbyte,
 					endbyte >> PAGE_CACHE_SHIFT);
 	}
 out:
+	ub_percpu_inc(ub, frsync_done);
+out_noacct:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(do_sync_file_range);

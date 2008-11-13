@@ -22,6 +22,10 @@ struct vm_area_struct;
 #define IOREMAP_MAX_ORDER	(7 + PAGE_SHIFT)	/* 128 pages */
 #endif
 
+/* align size to 2^n page boundary */
+#define POWER2_PAGE_ALIGN(size) \
+	((typeof(size))(1UL << (PAGE_SHIFT + get_order(size))))
+
 struct vm_struct {
 	void			*addr;
 	unsigned long		size;
@@ -36,12 +40,16 @@ struct vm_struct {
  *	Highlevel APIs for driver use
  */
 extern void *vmalloc(unsigned long size);
+extern void *ub_vmalloc(unsigned long size);
 extern void *vmalloc_user(unsigned long size);
 extern void *vmalloc_node(unsigned long size, int node);
+extern void *ub_vmalloc_node(unsigned long size, int node);
 extern void *vmalloc_exec(unsigned long size);
 extern void *vmalloc_32(unsigned long size);
 extern void *vmalloc_32_user(unsigned long size);
 extern void *__vmalloc(unsigned long size, gfp_t gfp_mask, pgprot_t prot);
+extern void *vmalloc_best(unsigned long size);
+extern void *ub_vmalloc_best(unsigned long size);
 extern void *__vmalloc_area(struct vm_struct *area, gfp_t gfp_mask,
 				pgprot_t prot);
 extern void *__vmalloc_node(unsigned long size, gfp_t gfp_mask,
@@ -61,6 +69,9 @@ extern int remap_vmalloc_range(struct vm_area_struct *vma, void *addr,
 extern struct vm_struct *get_vm_area(unsigned long size, unsigned long flags);
 extern struct vm_struct *__get_vm_area(unsigned long size, unsigned long flags,
 					unsigned long start, unsigned long end);
+extern struct vm_struct * get_vm_area_best(unsigned long size,
+					   unsigned long flags);
+extern void vprintstat(void);
 extern struct vm_struct *get_vm_area_node(unsigned long size,
 					unsigned long flags, int node);
 extern struct vm_struct *remove_vm_area(void *addr);

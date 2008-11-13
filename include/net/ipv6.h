@@ -112,39 +112,48 @@ extern int sysctl_mld_max_msf;
 
 /* MIBs */
 DECLARE_SNMP_STAT(struct ipstats_mib, ipv6_statistics);
-#define IP6_INC_STATS(field)		SNMP_INC_STATS(ipv6_statistics, field)
-#define IP6_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ipv6_statistics, field)
-#define IP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ipv6_statistics, field)
+#ifdef CONFIG_VE
+#define ve_ipv6_statistics (get_exec_env()->_ipv6_statistics)
+#define ve_icmpv6_statistics (get_exec_env()->_icmpv6_statistics)
+#define ve_udp_stats_in6 (get_exec_env()->_udp_stats_in6)
+#else
+#define ve_ipv6_statistics ipv6_statistics
+#define ve_icmpv6_statistics icmpv6_statistics
+#define ve_udp_stats_in6 udp_stats_in6
+#endif
+#define IP6_INC_STATS(field)		SNMP_INC_STATS(ve_ipv6_statistics, field)
+#define IP6_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ve_ipv6_statistics, field)
+#define IP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ve_ipv6_statistics, field)
 DECLARE_SNMP_STAT(struct icmpv6_mib, icmpv6_statistics);
 #define ICMP6_INC_STATS(idev, field)		({			\
 	struct inet6_dev *_idev = (idev);				\
 	if (likely(_idev != NULL))					\
 		SNMP_INC_STATS(idev->stats.icmpv6, field); 		\
-	SNMP_INC_STATS(icmpv6_statistics, field);			\
+	SNMP_INC_STATS(ve_icmpv6_statistics, field);			\
 })
 #define ICMP6_INC_STATS_BH(idev, field)		({			\
 	struct inet6_dev *_idev = (idev);				\
 	if (likely(_idev != NULL))					\
 		SNMP_INC_STATS_BH((_idev)->stats.icmpv6, field);	\
-	SNMP_INC_STATS_BH(icmpv6_statistics, field);			\
+	SNMP_INC_STATS_BH(ve_icmpv6_statistics, field);			\
 })
 #define ICMP6_INC_STATS_USER(idev, field) 	({			\
 	struct inet6_dev *_idev = (idev);				\
 	if (likely(_idev != NULL))					\
 		SNMP_INC_STATS_USER(_idev->stats.icmpv6, field);	\
-	SNMP_INC_STATS_USER(icmpv6_statistics, field);			\
+	SNMP_INC_STATS_USER(ve_icmpv6_statistics, field);			\
 })
 #define ICMP6_INC_STATS_OFFSET_BH(idev, field, offset)	({			\
 	struct inet6_dev *_idev = idev;						\
 	__typeof__(offset) _offset = (offset);					\
 	if (likely(_idev != NULL))						\
 		SNMP_INC_STATS_OFFSET_BH(_idev->stats.icmpv6, field, _offset);	\
-	SNMP_INC_STATS_OFFSET_BH(icmpv6_statistics, field, _offset);    	\
+	SNMP_INC_STATS_OFFSET_BH(ve_icmpv6_statistics, field, _offset);    	\
 })
 DECLARE_SNMP_STAT(struct udp_mib, udp_stats_in6);
-#define UDP6_INC_STATS(field)		SNMP_INC_STATS(udp_stats_in6, field)
-#define UDP6_INC_STATS_BH(field)	SNMP_INC_STATS_BH(udp_stats_in6, field)
-#define UDP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(udp_stats_in6, field)
+#define UDP6_INC_STATS(field)		SNMP_INC_STATS(ve_udp_stats_in6, field)
+#define UDP6_INC_STATS_BH(field)	SNMP_INC_STATS_BH(ve_udp_stats_in6, field)
+#define UDP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ve_udp_stats_in6, field)
 
 int snmp6_register_dev(struct inet6_dev *idev);
 int snmp6_unregister_dev(struct inet6_dev *idev);
@@ -152,6 +161,14 @@ int snmp6_alloc_dev(struct inet6_dev *idev);
 int snmp6_free_dev(struct inet6_dev *idev);
 int snmp6_mib_init(void *ptr[2], size_t mibsize, size_t mibalign);
 void snmp6_mib_free(void *ptr[2]);
+
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+int ve_snmp_proc_init(void);
+void ve_snmp_proc_fini(void);
+#else
+#define ve_snmp_proc_init(void)	(0)
+#define ve_snmp_proc_fini(void)	do { } while (0)
+#endif
 
 struct ip6_ra_chain
 {

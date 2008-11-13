@@ -21,6 +21,8 @@
 #include <linux/icmp.h>
 #include <linux/udp.h>
 #include <linux/jhash.h>
+#include <linux/nfcalls.h>
+#include <ub/ub_mem.h>
 
 #define ASSERT_READ_LOCK(x)
 #define ASSERT_WRITE_LOCK(x)
@@ -46,15 +48,24 @@ DEFINE_RWLOCK(ip_nat_lock);
 /* Calculated at init based on memory size */
 static unsigned int ip_nat_htable_size;
 
-static struct list_head *bysource;
-
 #define MAX_IP_NAT_PROTO 256
+
+#ifdef CONFIG_VE_IPTABLES
+#define ve_ip_nat_bysource	\
+	(get_exec_env()->_ip_conntrack->_ip_nat_bysource)
+#define ve_ip_nat_protos	\
+	(get_exec_env()->_ip_conntrack->_ip_nat_protos)
+#else
+static struct list_head *bysource;
+#define ve_ip_nat_bysource	bysource
 static struct ip_nat_protocol *ip_nat_protos[MAX_IP_NAT_PROTO];
+#define ve_ip_nat_protos	ip_nat_protos
+#endif
 
 static inline struct ip_nat_protocol *
 __ip_nat_proto_find(u_int8_t protonum)
 {
-	return ip_nat_protos[protonum];
+	return ve_ip_nat_protos[protonum];
 }
 
 struct ip_nat_protocol *
@@ -177,7 +188,7 @@ find_appropriate_src(const struct ip_conntrack_tuple *tuple,
 	struct ip_conntrack *ct;
 
 	read_lock_bh(&ip_nat_lock);
-	list_for_each_entry(ct, &bysource[h], nat.info.bysource) {
+	list_for_each_entry(ct, &ve_ip_nat_bysource[h], nat.info.bysource) {
 		if (same_src(ct, tuple)) {
 			/* Copy source part from reply tuple. */
 			invert_tuplepr(result,
@@ -291,13 +302,22 @@ get_unique_tuple(struct ip_conntrack_tuple *tuple,
 	ip_nat_proto_put(proto);
 }
 
+void ip_nat_hash_conntrack(struct ip_conntrack *conntrack)
+{
+	unsigned int srchash
+		= hash_by_src(&conntrack->tuplehash[IP_CT_DIR_ORIGINAL].tuple);
+	write_lock_bh(&ip_nat_lock);
+	list_add(&conntrack->nat.info.bysource, &ve_ip_nat_bysource[srchash]);
+	write_unlock_bh(&ip_nat_lock);
+}
+EXPORT_SYMBOL_GPL(ip_nat_hash_conntrack);
+
 unsigned int
 ip_nat_setup_info(struct ip_conntrack *conntrack,
 		  const struct ip_nat_range *range,
 		  unsigned int hooknum)
 {
 	struct ip_conntrack_tuple curr_tuple, new_tuple;
-	struct ip_nat_info *info = &conntrack->nat.info;
 	int have_to_hash = !(conntrack->status & IPS_NAT_DONE_MASK);
 	enum ip_nat_manip_type maniptype = HOOK2MANIP(hooknum);
 
@@ -332,14 +352,8 @@ ip_nat_setup_info(struct ip_conntrack *conntrack,
 	}
 
 	/* Place in source hash if this is the first time. */
-	if (have_to_hash) {
-		unsigned int srchash
-			= hash_by_src(&conntrack->tuplehash[IP_CT_DIR_ORIGINAL]
-				      .tuple);
-		write_lock_bh(&ip_nat_lock);
-		list_add(&info->bysource, &bysource[srchash]);
-		write_unlock_bh(&ip_nat_lock);
-	}
+	if (have_to_hash)
+		ip_nat_hash_conntrack(conntrack);
 
 	/* It's done. */
 	if (maniptype == IP_NAT_MANIP_DST)
@@ -521,11 +535,11 @@ int ip_nat_protocol_register(struct ip_nat_protocol *proto)
 	int ret = 0;
 
 	write_lock_bh(&ip_nat_lock);
-	if (ip_nat_protos[proto->protonum] != &ip_nat_unknown_protocol) {
+	if (ve_ip_nat_protos[proto->protonum] != &ip_nat_unknown_protocol) {
 		ret = -EBUSY;
 		goto out;
 	}
-	ip_nat_protos[proto->protonum] = proto;
+	ve_ip_nat_protos[proto->protonum] = proto;
  out:
 	write_unlock_bh(&ip_nat_lock);
 	return ret;
@@ -536,7 +550,7 @@ EXPORT_SYMBOL(ip_nat_protocol_register);
 void ip_nat_protocol_unregister(struct ip_nat_protocol *proto)
 {
 	write_lock_bh(&ip_nat_lock);
-	ip_nat_protos[proto->protonum] = &ip_nat_unknown_protocol;
+	ve_ip_nat_protos[proto->protonum] = &ip_nat_unknown_protocol;
 	write_unlock_bh(&ip_nat_lock);
 
 	/* Someone could be still looking at the proto in a bh. */
@@ -589,38 +603,55 @@ EXPORT_SYMBOL_GPL(ip_nat_port_nfattr_to_range);
 EXPORT_SYMBOL_GPL(ip_nat_port_range_to_nfattr);
 #endif
 
-static int __init ip_nat_init(void)
+static int ip_nat_init(void)
 {
 	size_t i;
+	int ret;
 
-	/* Leave them the same for the moment. */
-	ip_nat_htable_size = ip_conntrack_htable_size;
+	if (ve_is_super(get_exec_env()))
+		ip_nat_htable_size = ip_conntrack_htable_size;
 
 	/* One vmalloc for both hash tables */
-	bysource = vmalloc(sizeof(struct list_head) * ip_nat_htable_size);
-	if (!bysource)
-		return -ENOMEM;
+	ret = -ENOMEM;
+	ve_ip_nat_bysource =
+		ub_vmalloc(sizeof(struct list_head)*ip_nat_htable_size*2);
+	if (!ve_ip_nat_bysource)
+		goto nomem;
+
+#ifdef CONFIG_VE_IPTABLES
+	ve_ip_nat_protos =
+		ub_kmalloc(sizeof(void *)*MAX_IP_NAT_PROTO, GFP_KERNEL);
+	if (!ve_ip_nat_protos)
+		goto nomem2;
+#endif
 
 	/* Sew in builtin protocols. */
 	write_lock_bh(&ip_nat_lock);
 	for (i = 0; i < MAX_IP_NAT_PROTO; i++)
-		ip_nat_protos[i] = &ip_nat_unknown_protocol;
-	ip_nat_protos[IPPROTO_TCP] = &ip_nat_protocol_tcp;
-	ip_nat_protos[IPPROTO_UDP] = &ip_nat_protocol_udp;
-	ip_nat_protos[IPPROTO_ICMP] = &ip_nat_protocol_icmp;
+		ve_ip_nat_protos[i] = &ip_nat_unknown_protocol;
+	ve_ip_nat_protos[IPPROTO_TCP] = &ip_nat_protocol_tcp;
+	ve_ip_nat_protos[IPPROTO_UDP] = &ip_nat_protocol_udp;
+	ve_ip_nat_protos[IPPROTO_ICMP] = &ip_nat_protocol_icmp;
 	write_unlock_bh(&ip_nat_lock);
 
 	for (i = 0; i < ip_nat_htable_size; i++) {
-		INIT_LIST_HEAD(&bysource[i]);
+		INIT_LIST_HEAD(&ve_ip_nat_bysource[i]);
 	}
 
 	/* FIXME: Man, this is a hack.  <SIGH> */
-	IP_NF_ASSERT(ip_conntrack_destroyed == NULL);
-	ip_conntrack_destroyed = &ip_nat_cleanup_conntrack;
+	IP_NF_ASSERT(ve_ip_conntrack_destroyed == NULL);
+	ve_ip_conntrack_destroyed = &ip_nat_cleanup_conntrack;
 
-	/* Initialize fake conntrack so that NAT will skip it */
-	ip_conntrack_untracked.status |= IPS_NAT_DONE_MASK;
+	if (ve_is_super(get_exec_env()))
+		/* Initialize fake conntrack so that NAT will skip it */
+		ip_conntrack_untracked.status |= IPS_NAT_DONE_MASK;
 	return 0;
+#ifdef CONFIG_VE_IPTABLES
+nomem2:
+#endif
+	vfree(ve_ip_nat_bysource);
+nomem:
+	return ret;
 }
 
 /* Clear NAT section of all conntracks, in case we're loaded again. */
@@ -631,14 +662,41 @@ static int clean_nat(struct ip_conntrack *i, void *data)
 	return 0;
 }
 
-static void __exit ip_nat_cleanup(void)
+static void ip_nat_cleanup(void)
 {
 	ip_ct_iterate_cleanup(&clean_nat, NULL);
-	ip_conntrack_destroyed = NULL;
-	vfree(bysource);
+	ve_ip_conntrack_destroyed = NULL;
+	vfree(ve_ip_nat_bysource);
+	ve_ip_nat_bysource = NULL;
+#ifdef CONFIG_VE_IPTABLES
+	kfree(ve_ip_nat_protos);
+	ve_ip_nat_protos = NULL;
+#endif
+}
+
+static int __init init(void)
+{
+	int err;
+
+	err = ip_nat_init();
+	if (err < 0)
+		return err;
+
+	KSYMRESOLVE(ip_nat_init);
+	KSYMRESOLVE(ip_nat_cleanup);
+	KSYMMODRESOLVE(ip_nat);
+	return 0;
+}
+
+static void __exit fini(void)
+{
+	KSYMMODUNRESOLVE(ip_nat);
+	KSYMUNRESOLVE(ip_nat_cleanup);
+	KSYMUNRESOLVE(ip_nat_init);
+	ip_nat_cleanup();
 }
 
 MODULE_LICENSE("GPL");
 
-module_init(ip_nat_init);
-module_exit(ip_nat_cleanup);
+fs_initcall(init);
+module_exit(fini);

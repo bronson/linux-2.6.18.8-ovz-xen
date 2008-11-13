@@ -31,6 +31,7 @@
  */
 
 #include <linux/pagemap.h>
+#include <linux/quotaops.h>
 #include "ext2.h"
 #include "xattr.h"
 #include "acl.h"
@@ -257,6 +258,8 @@ static int ext2_unlink(struct inode * dir, struct dentry *dentry)
 	struct page * page;
 	int err = -ENOENT;
 
+	DQUOT_INIT(inode);
+
 	de = ext2_find_entry (dir, dentry, &page);
 	if (!de)
 		goto out;
@@ -298,6 +301,9 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
 	struct page * old_page;
 	struct ext2_dir_entry_2 * old_de;
 	int err = -ENOENT;
+
+	if (new_inode)
+		DQUOT_INIT(new_inode);
 
 	old_de = ext2_find_entry (old_dir, old_dentry, &old_page);
 	if (!old_de)

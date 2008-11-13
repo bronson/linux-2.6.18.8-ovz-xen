@@ -417,6 +417,7 @@ static inline struct block_device *bdget_disk(struct gendisk *disk, int index)
 	return bdget(MKDEV(disk->major, disk->first_minor) + index);
 }
 
+extern struct subsystem block_subsys;
 #endif
 
 #endif

@@ -10,6 +10,7 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/ve_proto.h>
 
 #define FUSE_CTL_SUPER_MAGIC 0x65735543
 
@@ -17,7 +18,11 @@
  * This is non-NULL when the single instance of the control filesystem
  * exists.  Protected by fuse_mutex
  */
+#ifdef CONFIG_VE
+#define fuse_control_sb	(get_exec_env()->_fuse_control_sb)
+#else
 static struct super_block *fuse_control_sb;
+#endif
 
 static struct fuse_conn *fuse_ctl_file_conn_get(struct file *file)
 {
@@ -207,12 +212,51 @@ static struct file_system_type fuse_ctl_fs_type = {
 	.kill_sb	= fuse_ctl_kill_sb,
 };
 
+#ifdef CONFIG_VE
+static int fuse_ctl_start(void *data)
+{
+	struct ve_struct *ve;
+
+	ve = (struct ve_struct *)data;
+	if (ve->fuse_ctl_fs_type != NULL)
+		return -EBUSY;
+
+	return register_ve_fs_type(ve, &fuse_ctl_fs_type,
+			&ve->fuse_ctl_fs_type, NULL);
+}
+
+static void fuse_ctl_stop(void *data)
+{
+	struct ve_struct *ve;
+
+	ve = (struct ve_struct *)data;
+	if (ve->fuse_ctl_fs_type == NULL)
+		return;
+
+	unregister_ve_fs_type(ve->fuse_ctl_fs_type, NULL);
+	ve->fuse_ctl_fs_type = NULL;
+}
+
+static struct ve_hook fuse_ctl_ve_hook = {
+	.init		= fuse_ctl_start,
+	.fini		= fuse_ctl_stop,
+	.owner		= THIS_MODULE,
+	.priority	= HOOK_PRIO_FS,
+};
+#endif
+
 int __init fuse_ctl_init(void)
 {
-	return register_filesystem(&fuse_ctl_fs_type);
+	int err;
+	
+	err = register_filesystem(&fuse_ctl_fs_type);
+	if (err == 0)
+		ve_hook_register(VE_SS_CHAIN, &fuse_ctl_ve_hook);
+	return err;
 }
 
 void fuse_ctl_cleanup(void)
 {
+	ve_hook_unregister(&fuse_ctl_ve_hook);
 	unregister_filesystem(&fuse_ctl_fs_type);
 }

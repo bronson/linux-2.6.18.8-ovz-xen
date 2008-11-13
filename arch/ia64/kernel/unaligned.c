@@ -1290,7 +1290,7 @@ within_logging_rate_limit (void)
 {
 	static unsigned long count, last_time;
 
-	if (jiffies - last_time > 5*HZ)
+	if (jiffies - last_time > 60 * HZ)
 		count = 0;
 	if (count < 5) {
 		last_time = jiffies;

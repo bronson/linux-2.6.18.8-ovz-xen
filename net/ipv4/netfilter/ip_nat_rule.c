@@ -23,6 +23,7 @@
 #define ASSERT_WRITE_LOCK(x)
 
 #include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/netfilter_ipv4/ip_conntrack.h>
 #include <linux/netfilter_ipv4/ip_nat.h>
 #include <linux/netfilter_ipv4/ip_nat_core.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
@@ -34,6 +35,13 @@
 #define DEBUGP(format, args...)
 #endif
 
+#ifdef CONFIG_VE_IPTABLES
+#define ve_ip_nat_table		\
+	(get_exec_env()->_ip_conntrack->_ip_nat_table)
+#else
+#define ve_ip_nat_table		&nat_table
+#endif
+
 #define NAT_VALID_HOOKS ((1<<NF_IP_PRE_ROUTING) | (1<<NF_IP_POST_ROUTING) | (1<<NF_IP_LOCAL_OUT))
 
 static struct
@@ -41,7 +49,7 @@ static struct
 	struct ipt_replace repl;
 	struct ipt_standard entries[3];
 	struct ipt_error term;
-} nat_initial_table __initdata
+} nat_initial_table
 = { { "nat", NAT_VALID_HOOKS, 4,
       sizeof(struct ipt_standard) * 3 + sizeof(struct ipt_error),
       { [NF_IP_PRE_ROUTING] = 0,
@@ -255,7 +263,7 @@ int ip_nat_rule_find(struct sk_buff **pskb,
 {
 	int ret;
 
-	ret = ipt_do_table(pskb, hooknum, in, out, &nat_table, NULL);
+	ret = ipt_do_table(pskb, hooknum, in, out, ve_ip_nat_table, NULL);
 
 	if (ret == NF_ACCEPT) {
 		if (!ip_nat_initialized(ct, HOOK2MANIP(hooknum)))
@@ -283,34 +291,58 @@ static struct ipt_target ipt_dnat_reg = {
 	.checkentry	= ipt_dnat_checkentry,
 };
 
-int __init ip_nat_rule_init(void)
+int ip_nat_rule_init(void)
 {
 	int ret;
 
-	ret = ipt_register_table(&nat_table, &nat_initial_table.repl);
-	if (ret != 0)
-		return ret;
-	ret = ipt_register_target(&ipt_snat_reg);
-	if (ret != 0)
-		goto unregister_table;
+	if (!ve_is_super(get_exec_env()) ||
+			!ip_conntrack_disable_ve0) {
+		struct ipt_table *tmp_table;
 
-	ret = ipt_register_target(&ipt_dnat_reg);
-	if (ret != 0)
-		goto unregister_snat;
+		tmp_table = ipt_register_table(&nat_table,
+					&nat_initial_table.repl);
+		if (IS_ERR(tmp_table))
+			return PTR_ERR(tmp_table);
+#ifdef CONFIG_VE_IPTABLES
+		ve_ip_nat_table = tmp_table;
+#endif
+	}
 
-	return ret;
+	if (ve_is_super(get_exec_env())) {
+		ret = ipt_register_target(&ipt_snat_reg);
+		if (ret != 0)
+			goto unregister_table;
+
+		ret = ipt_register_target(&ipt_dnat_reg);
+		if (ret != 0)
+			goto unregister_snat;
+	}
+	return 0;
 
  unregister_snat:
 	ipt_unregister_target(&ipt_snat_reg);
  unregister_table:
-	ipt_unregister_table(&nat_table);
+	if (!ip_conntrack_disable_ve0) {
+		ipt_unregister_table(ve_ip_nat_table);
+#ifdef CONFIG_VE_IPTABLES
+		ve_ip_nat_table = NULL;
+#endif
+	}
 
 	return ret;
 }
 
 void ip_nat_rule_cleanup(void)
 {
-	ipt_unregister_target(&ipt_dnat_reg);
-	ipt_unregister_target(&ipt_snat_reg);
-	ipt_unregister_table(&nat_table);
+	if (ve_is_super(get_exec_env())) {
+		ipt_unregister_target(&ipt_dnat_reg);
+		ipt_unregister_target(&ipt_snat_reg);
+	}
+	if (!ve_is_super(get_exec_env()) ||
+			!ip_conntrack_disable_ve0) {
+		ipt_unregister_table(ve_ip_nat_table);
+#ifdef CONFIG_VE_IPTABLES
+		ve_ip_nat_table = NULL;
+#endif
+	}
 }

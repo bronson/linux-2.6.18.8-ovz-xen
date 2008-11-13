@@ -72,6 +72,7 @@ ENTRY(fsys_getpid)
 	FSYS_RETURN
 END(fsys_getpid)
 
+#ifndef CONFIG_VE
 ENTRY(fsys_getppid)
 	.prologue
 	.altrp b6
@@ -118,6 +119,7 @@ ENTRY(fsys_getppid)
 #endif
 	FSYS_RETURN
 END(fsys_getppid)
+#endif
 
 ENTRY(fsys_set_tid_address)
 	.prologue
@@ -665,7 +667,11 @@ fsyscall_table:
 	data8 0				// chown
 	data8 0				// lseek		// 1040
 	data8 fsys_getpid		// getpid
+#ifdef CONFIG_VE
+	data8 0
+#else
 	data8 fsys_getppid		// getppid
+#endif
 	data8 0				// mount
 	data8 0				// umount
 	data8 0				// setuid		// 1045

@@ -191,7 +191,14 @@ struct inet6_dev
 	unsigned long		tstamp; /* ipv6InterfaceTable update timestamp */
 };
 
-extern struct ipv6_devconf ipv6_devconf;
+extern struct ipv6_devconf global_ipv6_devconf;
+extern struct ipv6_devconf global_ipv6_devconf_dflt;
+
+#ifdef CONFIG_VE
+#define ve_ipv6_devconf	(*(get_exec_env()->_ipv6_devconf))
+#else
+#define ve_ipv6_devconf	global_ipv6_devconf
+#endif
 
 static inline void ipv6_eth_mc_map(struct in6_addr *addr, char *buf)
 {

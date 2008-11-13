@@ -1340,12 +1340,13 @@ void ip_send_reply(struct sock *sk, struct sk_buff *skb, struct ip_reply_arg *ar
 		char			data[40];
 	} replyopts;
 	struct ipcm_cookie ipc;
-	u32 daddr;
+	u32 saddr, daddr;
 	struct rtable *rt = (struct rtable*)skb->dst;
 
 	if (ip_options_echo(&replyopts.opt, skb))
 		return;
 
+	saddr = skb->nh.iph->daddr;
 	daddr = ipc.addr = rt->rt_src;
 	ipc.opt = NULL;
 
@@ -1359,7 +1360,7 @@ void ip_send_reply(struct sock *sk, struct sk_buff *skb, struct ip_reply_arg *ar
 	{
 		struct flowi fl = { .nl_u = { .ip4_u =
 					      { .daddr = daddr,
-						.saddr = rt->rt_spec_dst,
+						.saddr = saddr,
 						.tos = RT_TOS(skb->nh.iph->tos) } },
 				    /* Not quite clean, but right. */
 				    .uli_u = { .ports =

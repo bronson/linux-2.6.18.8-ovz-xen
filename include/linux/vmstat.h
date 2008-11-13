@@ -61,6 +61,7 @@ static inline void count_vm_events(enum vm_event_item item, long delta)
 	put_cpu();
 }
 
+extern unsigned long vm_events(enum vm_event_item i);
 extern void all_vm_events(unsigned long *);
 extern void vm_events_fold_cpu(int cpu);
 

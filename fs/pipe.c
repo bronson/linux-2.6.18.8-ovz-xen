@@ -20,6 +20,8 @@
 #include <asm/uaccess.h>
 #include <asm/ioctls.h>
 
+#include <ub/ub_mem.h>
+
 /*
  * We use a start+len construction, which provides full use of the 
  * allocated memory.
@@ -423,7 +425,7 @@ redo1:
 			int error, atomic = 1;
 
 			if (!page) {
-				page = alloc_page(GFP_HIGHUSER);
+				page = alloc_page(GFP_HIGHUSER | __GFP_UBC);
 				if (unlikely(!page)) {
 					ret = ret ? : -ENOMEM;
 					break;
@@ -812,7 +814,7 @@ struct pipe_inode_info * alloc_pipe_info(struct inode *inode)
 {
 	struct pipe_inode_info *pipe;
 
-	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL);
+	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL_UBC);
 	if (pipe) {
 		init_waitqueue_head(&pipe->wait);
 		pipe->r_counter = pipe->w_counter = 1;
@@ -972,6 +974,7 @@ close_f1:
 no_files:
 	return error;	
 }
+EXPORT_SYMBOL_GPL(do_pipe);
 
 /*
  * pipefs should _never_ be mounted by userland - too much of security hassle,

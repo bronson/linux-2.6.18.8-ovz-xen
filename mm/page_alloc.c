@@ -42,6 +42,9 @@
 #include <asm/div64.h>
 #include "internal.h"
 
+#include <ub/ub_mem.h>
+#include <ub/io_acct.h>
+
 /*
  * MCD - HACK: Find somewhere to initialize this EARLY, or make this
  * initializer cleaner
@@ -71,6 +74,7 @@ static void __free_pages_ok(struct page *page, unsigned int order);
  */
 int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES-1] = { 256, 256, 32 };
 
+EXPORT_SYMBOL(nr_swap_pages);
 EXPORT_SYMBOL(totalram_pages);
 
 /*
@@ -391,8 +395,11 @@ static inline int free_pages_check(struct page *page)
 			1 << PG_reserved |
 			1 << PG_buddy ))))
 		bad_page(page);
-	if (PageDirty(page))
+	if (PageDirty(page)) {
+		ub_io_release_context(page, 0);
 		__ClearPageDirty(page);
+	} else
+		ub_io_release_debug(page);
 	/*
 	 * For now, we report if PG_reserved was found set, but do not
 	 * clear it, and do not free the page.  But we shall soon need
@@ -454,6 +461,7 @@ static void __free_pages_ok(struct page *page, unsigned int order)
 		return;
 
 	kernel_map_pages(page, 1 << order, 0);
+	ub_page_uncharge(page, order);
 	local_irq_save(flags);
 	__count_vm_events(PGFREE, 1 << order);
 	free_one_page(page_zone(page), page, order);
@@ -550,7 +558,8 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
 
 	page->flags &= ~(1 << PG_uptodate | 1 << PG_error |
 			1 << PG_referenced | 1 << PG_arch_1 |
-			1 << PG_checked | 1 << PG_mappedtodisk);
+			1 << PG_checked | 1 << PG_mappedtodisk |
+			1 << PG_checkpointed);
 	set_page_private(page, 0);
 	set_page_refcounted(page);
 	kernel_map_pages(page, 1 << order, 1);
@@ -727,6 +736,7 @@ static void fastcall free_hot_cold_page(struct page *page, int cold)
 	kernel_map_pages(page, 1, 0);
 
 	pcp = &zone_pcp(zone, get_cpu())->pcp[cold];
+	ub_page_uncharge(page, 0);
 	local_irq_save(flags);
 	__count_vm_event(PGFREE);
 	list_add(&page->lru, &pcp->list);
@@ -903,6 +913,28 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order,
 	return page;
 }
 
+static void __alloc_collect_stats(gfp_t gfp_mask, unsigned int order,
+		struct page *page, cycles_t time)
+{
+	int ind;
+	unsigned long flags;
+
+	time = (jiffies - time) * cycles_per_jiffy;
+	if (!(gfp_mask & __GFP_WAIT))
+		ind = 0;
+	else if (!(gfp_mask & __GFP_HIGHMEM))
+		ind = (order > 0 ? 2 : 1);
+	else
+		ind = (order > 0 ? 4 : 3);
+	spin_lock_irqsave(&kstat_glb_lock, flags);
+	KSTAT_LAT_ADD(&kstat_glob.alloc_lat[ind], time);
+	if (!page)
+		kstat_glob.alloc_fails[ind]++;
+	spin_unlock_irqrestore(&kstat_glb_lock, flags);
+}
+
+int alloc_fail_warn;
+
 /*
  * This is the 'heart' of the zoned buddy allocator.
  */
@@ -918,6 +950,7 @@ __alloc_pages(gfp_t gfp_mask, unsigned int order,
 	int do_retry;
 	int alloc_flags;
 	int did_some_progress;
+	cycles_t start;
 
 	might_sleep_if(wait);
 
@@ -929,6 +962,7 @@ restart:
 		return NULL;
 	}
 
+	start = jiffies;
 	page = get_page_from_freelist(gfp_mask|__GFP_HARDWALL, order,
 				zonelist, ALLOC_WMARK_LOW|ALLOC_CPUSET);
 	if (page)
@@ -968,6 +1002,7 @@ restart:
 	if (page)
 		goto got_pg;
 
+rebalance:
 	/* This allocation should allow future memory freeing. */
 
 	if (((p->flags & PF_MEMALLOC) || unlikely(test_thread_flag(TIF_MEMDIE)))
@@ -991,7 +1026,6 @@ nofail_alloc:
 	if (!wait)
 		goto nopage;
 
-rebalance:
 	cond_resched();
 
 	/* We now go into synchronous reclaim */
@@ -1043,19 +1077,32 @@ rebalance:
 			do_retry = 1;
 	}
 	if (do_retry) {
+		if (total_swap_pages > 0 && nr_swap_pages == 0) {
+			out_of_memory(zonelist, gfp_mask, order);
+			goto restart;
+		}
 		blk_congestion_wait(WRITE, HZ/50);
 		goto rebalance;
 	}
 
 nopage:
-	if (!(gfp_mask & __GFP_NOWARN) && printk_ratelimit()) {
+	__alloc_collect_stats(gfp_mask, order, NULL, start);
+	if (alloc_fail_warn && !(gfp_mask & __GFP_NOWARN) && 
+			printk_ratelimit()) {
 		printk(KERN_WARNING "%s: page allocation failure."
 			" order:%d, mode:0x%x\n",
 			p->comm, order, gfp_mask);
 		dump_stack();
 		show_mem();
 	}
+	return NULL;
+
 got_pg:
+	__alloc_collect_stats(gfp_mask, order, page, start);
+	if (ub_page_charge(page, order, gfp_mask)) {
+		__free_pages(page, order);
+		page = NULL;
+	}
 	return page;
 }
 
@@ -1138,6 +1185,19 @@ unsigned int nr_free_pages(void)
 }
 
 EXPORT_SYMBOL(nr_free_pages);
+
+unsigned int nr_free_lowpages (void)
+{
+	pg_data_t *pgdat;
+	unsigned int pages = 0;
+
+	for_each_online_pgdat(pgdat)
+		pages += pgdat->node_zones[ZONE_NORMAL].free_pages;
+
+	return pages;
+}
+EXPORT_SYMBOL(nr_free_lowpages);
+
 
 #ifdef CONFIG_NUMA
 unsigned int nr_free_pages_pgdat(pg_data_t *pgdat)

@@ -41,5 +41,8 @@
 #define sys_old_getrlimit sys_ni_syscall
 #endif
 
+#define SYS_SKIP(from, to)	.rept (to - from)
+#define SYS_SKIP_END()		.endr
+
 _GLOBAL(sys_call_table)
 #include <asm/systbl.h>

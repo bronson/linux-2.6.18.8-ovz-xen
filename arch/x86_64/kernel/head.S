@@ -41,7 +41,7 @@ startup_32:
 	 */
 
 	/* Initialize the %ds segment register */
-	movl $__KERNEL_DS,%eax
+	movl $__BOOT_DS,%eax
 	movl %eax,%ds
 
 	/* Load new GDT with the 64bit segments using 32bit descriptor */
@@ -184,7 +184,14 @@ startup_64:
 	/* esi is pointer to real mode structure with interesting info.
 	   pass it to C */
 	movl	%esi, %edi
-	
+
+	/* Switch to __KERNEL_CS. The segment is the same, but selector
+	 * is different. */
+	pushq	$__KERNEL_CS
+	pushq	$switch_cs
+	lretq
+switch_cs:
+
 	/* Finally jump to run C code and to be on real kernel address
 	 * Since we are running on identity-mapped space we have to jump
 	 * to the full 64bit address , this is only possible as indirect
@@ -246,7 +253,7 @@ pGDT32:
 .org 0xf10	
 ljumpvector:
 	.long	startup_64-__START_KERNEL_map
-	.word	__KERNEL_CS
+	.word	__BOOT_CS
 
 ENTRY(stext)
 ENTRY(_stext)
@@ -357,21 +364,30 @@ gdt:
 	.align PAGE_SIZE
 
 /* The TLS descriptors are currently at a different place compared to i386.
-   Hopefully nobody expects them at a fixed place (Wine?) */
+   Hopefully nobody expects them at a fixed place (Wine?)
+   Descriptors rearranged to plase 32bit and TLS selectors in the same
+   places, because it is really necessary. sysret/exit mandates order
+   of kernel/user cs/ds, so we have to extend gdt.
+*/
 	
 ENTRY(cpu_gdt_table)
-	.quad	0x0000000000000000	/* NULL descriptor */
-	.quad	0x0			/* unused */
-	.quad	0x00af9a000000ffff	/* __KERNEL_CS */
-	.quad	0x00cf92000000ffff	/* __KERNEL_DS */
-	.quad	0x00cffa000000ffff	/* __USER32_CS */
-	.quad	0x00cff2000000ffff	/* __USER_DS, __USER32_DS  */		
-	.quad	0x00affa000000ffff	/* __USER_CS */
-	.quad	0x00cf9a000000ffff	/* __KERNEL32_CS */
-	.quad	0,0			/* TSS */
-	.quad	0,0			/* LDT */
-	.quad   0,0,0			/* three TLS descriptors */ 
-	.quad	0			/* unused */
+	.quad	0x0000000000000000	/* 0 NULL descriptor */
+	.quad	0x0			/* 1 unused */	
+	.quad	0x00af9a000000ffff	/* 2 __BOOT_CS */
+	.quad	0x00cf92000000ffff	/* 3 __BOOT_DS */
+	.quad	0,0			/* 4,5 TSS */
+	.quad   0,0,0			/* 6-8 three TLS descriptors */ 
+	.quad	0,0			/* 9,10 LDT */
+	.quad	0x00cf9a000000ffff	/* 11 __KERNEL32_CS */
+	.quad	0x00af9a000000ffff	/* 12 __KERNEL_CS */
+	.quad	0x00cf92000000ffff	/* 13 __KERNEL_DS */
+	.quad	0x00cffa000000ffff	/* 14 __USER32_CS */
+	.quad	0x00cff2000000ffff	/* 15 __USER_DS, __USER32_DS  */		
+	.quad	0x00affa000000ffff	/* 16 __USER_CS */
+	.quad	0x0			/* 17 unused */
+	.quad	0,0,0,0,0,0
+	.quad	0,0,0,0,0,0,0,0
+	
 gdt_end:	
 	/* asm/segment.h:GDT_ENTRIES must match this */	
 	/* This should be a multiple of the cache line size */

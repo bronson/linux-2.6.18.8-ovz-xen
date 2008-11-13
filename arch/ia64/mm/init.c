@@ -36,6 +36,8 @@
 #include <asm/unistd.h>
 #include <asm/mca.h>
 
+#include <ub/ub_vmpages.h>
+
 DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 DEFINE_PER_CPU(unsigned long *, __pgtable_quicklist);
@@ -95,7 +97,7 @@ check_pgt_cache(void)
 	preempt_disable();
 	while (unlikely((pages_to_free = min_pages_to_free()) > 0)) {
 		while (pages_to_free--) {
-			free_page((unsigned long)pgtable_quicklist_alloc());
+			free_page((unsigned long)pgtable_quicklist_alloc(0));
 		}
 		preempt_enable();
 		preempt_disable();
@@ -151,6 +153,10 @@ ia64_init_addr_space (void)
 
 	ia64_set_rbs_bot();
 
+	if (ub_memory_charge(current->mm, PAGE_SIZE, VM_DATA_DEFAULT_FLAGS,
+				NULL, UB_SOFT))
+		goto skip;
+
 	/*
 	 * If we're out of memory and kmem_cache_alloc() returns NULL, we simply ignore
 	 * the problem.  When the process attempts to write to the register backing store
@@ -168,11 +174,16 @@ ia64_init_addr_space (void)
 		if (insert_vm_struct(current->mm, vma)) {
 			up_write(&current->mm->mmap_sem);
 			kmem_cache_free(vm_area_cachep, vma);
+			ub_memory_uncharge(current->mm, PAGE_SIZE,
+					VM_DATA_DEFAULT_FLAGS, NULL);
 			return;
 		}
 		up_write(&current->mm->mmap_sem);
-	}
+	} else
+		ub_memory_uncharge(current->mm, PAGE_SIZE,
+				VM_DATA_DEFAULT_FLAGS, NULL);
 
+skip:
 	/* map NaT-page at address zero to speed up speculative dereferencing of NULL: */
 	if (!(current->personality & MMAP_PAGE_ZERO)) {
 		vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);

@@ -23,6 +23,7 @@
 #include <linux/netfilter_ipv4/ip_conntrack_irc.h>
 #include <linux/netfilter_ipv4/ip_conntrack_helper.h>
 #include <linux/moduleparam.h>
+#include <linux/nfcalls.h>
 
 #if 0
 #define DEBUGP printk
@@ -96,18 +97,44 @@ static unsigned int help(struct sk_buff **pskb,
 	return ret;
 }
 
-static void __exit ip_nat_irc_fini(void)
+#ifdef CONFIG_VE_IPTABLES
+#undef ve_ip_nat_irc_hook
+#define ve_ip_nat_irc_hook \
+		(get_exec_env()->_ip_conntrack->_ip_nat_irc_hook)
+#endif
+
+int init_iptable_nat_irc(void)
 {
-	ip_nat_irc_hook = NULL;
+	BUG_ON(ve_ip_nat_irc_hook);
+#ifdef CONFIG_VE_IPTABLES
+	ve_ip_nat_irc_hook = (ip_nat_helper_func)help;
+#else
+	ve_ip_nat_irc_hook = help;
+#endif
+	return 0;
+}
+
+void fini_iptable_nat_irc(void)
+{
+	ve_ip_nat_irc_hook = NULL;
 	/* Make sure noone calls it, meanwhile. */
 	synchronize_net();
 }
 
+static void __exit ip_nat_irc_fini(void)
+{
+	KSYMMODUNRESOLVE(ip_nat_irc);
+	KSYMUNRESOLVE(init_iptable_nat_irc);
+	KSYMUNRESOLVE(fini_iptable_nat_irc);
+	fini_iptable_nat_irc();
+}
+
 static int __init ip_nat_irc_init(void)
 {
-	BUG_ON(ip_nat_irc_hook);
-	ip_nat_irc_hook = help;
-	return 0;
+	KSYMRESOLVE(init_iptable_nat_irc);
+	KSYMRESOLVE(fini_iptable_nat_irc);
+	KSYMMODRESOLVE(ip_nat_irc);
+	return init_iptable_nat_irc();
 }
 
 /* Prior to 2.6.11, we had a ports param.  No longer, but don't break users. */

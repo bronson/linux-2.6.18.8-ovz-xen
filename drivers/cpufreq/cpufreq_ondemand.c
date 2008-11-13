@@ -303,7 +303,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 
 static void do_dbs_timer(void *data)
 {
-	unsigned int cpu = smp_processor_id();
+	unsigned int cpu = (ulong)data;
 	struct cpu_dbs_info_s *dbs_info = &per_cpu(cpu_dbs_info, cpu);
 
 	if (!dbs_info->enable)
@@ -320,7 +320,7 @@ static inline void dbs_timer_init(unsigned int cpu)
 {
 	struct cpu_dbs_info_s *dbs_info = &per_cpu(cpu_dbs_info, cpu);
 
-	INIT_WORK(&dbs_info->work, do_dbs_timer, 0);
+	INIT_WORK(&dbs_info->work, do_dbs_timer, (void*)(ulong)cpu);
 	queue_delayed_work_on(cpu, kondemand_wq, &dbs_info->work,
 			usecs_to_jiffies(dbs_tuners_ins.sampling_rate));
 	return;

@@ -40,6 +40,13 @@
 #include <net/tcp_states.h>
 
 #include <linux/seq_file.h>
+#include <ub/ub_net.h>
+
+#define TCP_PAGE(sk)	(sk->sk_sndmsg_page)
+#define TCP_OFF(sk)	(sk->sk_sndmsg_off)
+
+#define TW_WSCALE_MASK		0x0f
+#define TW_WSCALE_SPEC		0x10
 
 extern struct inet_hashinfo tcp_hashinfo;
 
@@ -214,7 +221,9 @@ extern int sysctl_tcp_mem[3];
 extern int sysctl_tcp_wmem[3];
 extern int sysctl_tcp_rmem[3];
 extern int sysctl_tcp_app_win;
+#ifndef sysctl_tcp_adv_win_scale
 extern int sysctl_tcp_adv_win_scale;
+#endif
 extern int sysctl_tcp_tw_reuse;
 extern int sysctl_tcp_frto;
 extern int sysctl_tcp_low_latency;
@@ -227,6 +236,10 @@ extern int sysctl_tcp_mtu_probing;
 extern int sysctl_tcp_base_mss;
 extern int sysctl_tcp_workaround_signed_windows;
 extern int sysctl_tcp_slow_start_after_idle;
+extern int sysctl_tcp_use_sg;
+extern int sysctl_tcp_max_tw_kmem_fraction;
+extern int sysctl_tcp_max_tw_buckets_ub;
+
 
 extern atomic_t tcp_memory_allocated;
 extern atomic_t tcp_sockets_allocated;
@@ -258,12 +271,17 @@ static inline int between(__u32 seq1, __u32 seq2, __u32 seq3)
 extern struct proto tcp_prot;
 
 DECLARE_SNMP_STAT(struct tcp_mib, tcp_statistics);
-#define TCP_INC_STATS(field)		SNMP_INC_STATS(tcp_statistics, field)
-#define TCP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(tcp_statistics, field)
-#define TCP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(tcp_statistics, field)
-#define TCP_DEC_STATS(field)		SNMP_DEC_STATS(tcp_statistics, field)
-#define TCP_ADD_STATS_BH(field, val)	SNMP_ADD_STATS_BH(tcp_statistics, field, val)
-#define TCP_ADD_STATS_USER(field, val)	SNMP_ADD_STATS_USER(tcp_statistics, field, val)
+#if defined(CONFIG_VE) && defined(CONFIG_INET)
+#define ve_tcp_statistics (get_exec_env()->_tcp_statistics)
+#else
+#define ve_tcp_statistics tcp_statistics
+#endif
+#define TCP_INC_STATS(field)		SNMP_INC_STATS(ve_tcp_statistics, field)
+#define TCP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ve_tcp_statistics, field)
+#define TCP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ve_tcp_statistics, field)
+#define TCP_DEC_STATS(field)		SNMP_DEC_STATS(ve_tcp_statistics, field)
+#define TCP_ADD_STATS_BH(field, val)	SNMP_ADD_STATS_BH(ve_tcp_statistics, field, val)
+#define TCP_ADD_STATS_USER(field, val)	SNMP_ADD_STATS_USER(ve_tcp_statistics, field, val)
 
 extern void			tcp_v4_err(struct sk_buff *skb, u32);
 
@@ -510,7 +528,7 @@ extern u32	__tcp_select_window(struct sock *sk);
  * to use only the low 32-bits of jiffies and hide the ugly
  * casts with the following macro.
  */
-#define tcp_time_stamp		((__u32)(jiffies))
+#define tcp_time_stamp		((__u32)(jiffies + get_exec_env()->jiffies_fixup))
 
 /* This is what the send packet queuing engine uses to pass
  * TCP per-packet control information to the transmission

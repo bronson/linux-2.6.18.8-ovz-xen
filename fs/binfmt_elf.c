@@ -361,7 +361,7 @@ static unsigned long load_elf_interp(struct elfhdr *interp_elf_ex,
 	eppnt = elf_phdata;
 	for (i = 0; i < interp_elf_ex->e_phnum; i++, eppnt++) {
 		if (eppnt->p_type == PT_LOAD) {
-			int elf_type = MAP_PRIVATE | MAP_DENYWRITE;
+			int elf_type = MAP_PRIVATE|MAP_DENYWRITE|MAP_EXECPRIO;
 			int elf_prot = 0;
 			unsigned long vaddr = 0;
 			unsigned long k, map_addr;
@@ -683,6 +683,15 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 			retval = PTR_ERR(interpreter);
 			if (IS_ERR(interpreter))
 				goto out_free_interp;
+
+			/*
+			 * If the binary is not readable than enforce
+			 * mm->dumpable = 0 regardless of the interpreter's
+			 * permissions.
+			 */
+			if (file_permission(interpreter, MAY_READ) < 0)
+				bprm->interp_flags |= BINPRM_FLAGS_ENFORCE_NONDUMP;
+
 			retval = kernel_read(interpreter, 0, bprm->buf,
 					     BINPRM_BUF_SIZE);
 			if (retval != BINPRM_BUF_SIZE) {
@@ -846,7 +855,8 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 		if (elf_ppnt->p_flags & PF_X)
 			elf_prot |= PROT_EXEC;
 
-		elf_flags = MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE;
+		elf_flags = MAP_PRIVATE | MAP_DENYWRITE |
+				MAP_EXECUTABLE | MAP_EXECPRIO;
 
 		vaddr = elf_ppnt->p_vaddr;
 		if (loc->elf_ex.e_type == ET_EXEC || load_addr_set) {
@@ -863,6 +873,8 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 				elf_prot, elf_flags);
 		if (BAD_ADDR(error)) {
 			send_sig(SIGKILL, current, 0);
+			retval = IS_ERR((void *)error) ?
+				PTR_ERR((void*)error) : -EINVAL;
 			goto out_free_dentry;
 		}
 
@@ -892,6 +904,7 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 		    TASK_SIZE - elf_ppnt->p_memsz < k) {
 			/* set_brk can never work. Avoid overflows. */
 			send_sig(SIGKILL, current, 0);
+			retval = -EINVAL;
 			goto out_free_dentry;
 		}
 
@@ -1016,9 +1029,11 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 
 	start_thread(regs, elf_entry, bprm->p);
 	if (unlikely(current->ptrace & PT_PTRACED)) {
-		if (current->ptrace & PT_TRACE_EXEC)
+		if (current->ptrace & PT_TRACE_EXEC) {
+			set_pn_state(current, PN_STOP_EXEC);
 			ptrace_notify ((PTRACE_EVENT_EXEC << 8) | SIGTRAP);
-		else
+			clear_pn_state(current);
+		} else
 			send_sig(SIGTRAP, current, 0);
 	}
 	retval = 0;
@@ -1037,10 +1052,8 @@ out_free_interp:
 out_free_file:
 	sys_close(elf_exec_fileno);
 out_free_fh:
-	if (files) {
-		put_files_struct(current->files);
-		current->files = files;
-	}
+	if (files)
+		reset_files_struct(current, files);
 out_free_ph:
 	kfree(elf_phdata);
 	goto out;
@@ -1295,10 +1308,10 @@ static void fill_prstatus(struct elf_prstatus *prstatus,
 	prstatus->pr_info.si_signo = prstatus->pr_cursig = signr;
 	prstatus->pr_sigpend = p->pending.signal.sig[0];
 	prstatus->pr_sighold = p->blocked.sig[0];
-	prstatus->pr_pid = p->pid;
-	prstatus->pr_ppid = p->parent->pid;
-	prstatus->pr_pgrp = process_group(p);
-	prstatus->pr_sid = p->signal->session;
+	prstatus->pr_pid = virt_pid(p);
+	prstatus->pr_ppid = virt_pid(p->parent);
+	prstatus->pr_pgrp = virt_pgid(p);
+	prstatus->pr_sid = virt_sid(p);
 	if (thread_group_leader(p)) {
 		/*
 		 * This is the record for the group leader.  Add in the
@@ -1341,10 +1354,10 @@ static int fill_psinfo(struct elf_prpsinfo *psinfo, struct task_struct *p,
 			psinfo->pr_psargs[i] = ' ';
 	psinfo->pr_psargs[len] = 0;
 
-	psinfo->pr_pid = p->pid;
-	psinfo->pr_ppid = p->parent->pid;
-	psinfo->pr_pgrp = process_group(p);
-	psinfo->pr_sid = p->signal->session;
+	psinfo->pr_pid = virt_pid(p);
+	psinfo->pr_ppid = virt_pid(p->parent);
+	psinfo->pr_pgrp = virt_pgid(p);
+	psinfo->pr_sid = virt_sid(p);
 
 	i = p->state ? ffz(~p->state) + 1 : 0;
 	psinfo->pr_state = i;
@@ -1481,7 +1494,7 @@ static int elf_core_dump(long signr, struct pt_regs *regs, struct file *file)
 	if (signr) {
 		struct elf_thread_status *tmp;
 		read_lock(&tasklist_lock);
-		do_each_thread(g,p)
+		do_each_thread_ve(g,p)
 			if (current->mm == p->mm && current != p) {
 				tmp = kzalloc(sizeof(*tmp), GFP_ATOMIC);
 				if (!tmp) {
@@ -1492,7 +1505,7 @@ static int elf_core_dump(long signr, struct pt_regs *regs, struct file *file)
 				tmp->thread = p;
 				list_add(&tmp->list, &thread_list);
 			}
-		while_each_thread(g,p);
+		while_each_thread_ve(g,p);
 		read_unlock(&tasklist_lock);
 		list_for_each(t, &thread_list) {
 			struct elf_thread_status *tmp;

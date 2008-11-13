@@ -137,4 +137,22 @@ extern void resume_console(void);
 #define VESA_HSYNC_SUSPEND      2
 #define VESA_POWERDOWN          3
 
+
+#include <linux/preempt.h>
+#include <linux/cache.h>
+#include <linux/threads.h>
+
+struct printk_aligned {
+	int v;
+} ____cacheline_aligned;
+extern struct printk_aligned printk_no_wake_var[NR_CPUS];
+#define __printk_no_wake (printk_no_wake_var[smp_processor_id()].v)
+#define printk_no_wake ({ \
+			int v; \
+			preempt_disable(); \
+			v = __printk_no_wake; \
+			preempt_enable_no_resched(); \
+			v; \
+			})
+
 #endif /* _LINUX_CONSOLE_H */

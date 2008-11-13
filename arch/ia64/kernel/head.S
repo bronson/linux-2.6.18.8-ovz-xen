@@ -1009,7 +1009,7 @@ GLOBAL_ENTRY(start_kernel_thread)
 	mov out1 = r11;;
 	br.call.sptk.many rp = kernel_thread_helper;;
 	mov out0 = r8
-	br.call.sptk.many rp = sys_exit;;
+	br.call.sptk.many rp = do_exit;;
 1:	br.sptk.few 1b				// not reached
 END(start_kernel_thread)
 

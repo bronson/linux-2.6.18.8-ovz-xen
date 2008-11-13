@@ -21,6 +21,16 @@ int devpts_pty_new(struct tty_struct *tty);      /* mknod in devpts */
 struct tty_struct *devpts_get_tty(int number);	 /* get tty structure */
 void devpts_pty_kill(int number);		 /* unlink */
 
+struct devpts_config {
+	int setuid;
+	int setgid;
+	uid_t   uid;
+	gid_t   gid;
+	umode_t mode;
+};
+
+extern struct devpts_config devpts_config;
+extern struct file_system_type devpts_fs_type;
 #else
 
 /* Dummy stubs in the no-pty case */

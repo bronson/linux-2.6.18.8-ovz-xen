@@ -174,7 +174,7 @@ struct neigh_ops arp_broken_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-struct neigh_table arp_tbl = {
+struct neigh_table global_arp_tbl = {
 	.family =	AF_INET,
 	.entry_size =	sizeof(struct neighbour) + 4,
 	.key_len =	4,
@@ -183,7 +183,7 @@ struct neigh_table arp_tbl = {
 	.proxy_redo =	parp_redo,
 	.id =		"arp_cache",
 	.parms = {
-		.tbl =			&arp_tbl,
+		.tbl =			&global_arp_tbl,
 		.base_reachable_time =	30 * HZ,
 		.retrans_time =	1 * HZ,
 		.gc_staletime =	60 * HZ,
@@ -919,6 +919,9 @@ out:
 
 static void parp_redo(struct sk_buff *skb)
 {
+#if defined(CONFIG_NETFILTER) && defined(CONFIG_NETFILTER_DEBUG)
+	skb->nf_debug = 0;
+#endif
 	arp_process(skb);
 }
 
@@ -988,7 +991,7 @@ static int arp_req_set(struct arpreq *r, struct net_device * dev)
 			return 0;
 		}
 		if (dev == NULL) {
-			ipv4_devconf.proxy_arp = 1;
+			ve_ipv4_devconf.proxy_arp = 1;
 			return 0;
 		}
 		if (__in_dev_get_rtnl(dev)) {
@@ -1094,7 +1097,7 @@ static int arp_req_delete(struct arpreq *r, struct net_device * dev)
 			return pneigh_delete(&arp_tbl, &ip, dev);
 		if (mask == 0) {
 			if (dev == NULL) {
-				ipv4_devconf.proxy_arp = 0;
+				ve_ipv4_devconf.proxy_arp = 0;
 				return 0;
 			}
 			if (__in_dev_get_rtnl(dev)) {
@@ -1142,7 +1145,8 @@ int arp_ioctl(unsigned int cmd, void __user *arg)
 	switch (cmd) {
 		case SIOCDARP:
 		case SIOCSARP:
-			if (!capable(CAP_NET_ADMIN))
+			if (!capable(CAP_NET_ADMIN) &&
+					!capable(CAP_VE_NET_ADMIN))
 				return -EPERM;
 		case SIOCGARP:
 			err = copy_from_user(&r, arg, sizeof(struct arpreq));
@@ -1240,7 +1244,9 @@ static int arp_proc_init(void);
 
 void __init arp_init(void)
 {
-	neigh_table_init(&arp_tbl);
+	get_ve0()->ve_arp_tbl = &global_arp_tbl;
+	if (neigh_table_init(&arp_tbl))
+		panic("cannot initialize ARP tables\n");
 
 	dev_add_pack(&arp_packet_type);
 	arp_proc_init();
@@ -1372,8 +1378,9 @@ static int arp_seq_open(struct inode *inode, struct file *file)
 {
 	struct seq_file *seq;
 	int rc = -ENOMEM;
-	struct neigh_seq_state *s = kzalloc(sizeof(*s), GFP_KERNEL);
-       
+	struct neigh_seq_state *s;
+
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
 		goto out;
 
@@ -1400,7 +1407,7 @@ static struct file_operations arp_seq_fops = {
 
 static int __init arp_proc_init(void)
 {
-	if (!proc_net_fops_create("arp", S_IRUGO, &arp_seq_fops))
+	if (!proc_glob_fops_create("net/arp", S_IRUGO, &arp_seq_fops))
 		return -ENOMEM;
 	return 0;
 }
@@ -1419,8 +1426,55 @@ EXPORT_SYMBOL(arp_find);
 EXPORT_SYMBOL(arp_create);
 EXPORT_SYMBOL(arp_xmit);
 EXPORT_SYMBOL(arp_send);
-EXPORT_SYMBOL(arp_tbl);
+EXPORT_SYMBOL(global_arp_tbl);
 
 #if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
 EXPORT_SYMBOL(clip_tbl_hook);
 #endif
+
+#ifdef CONFIG_VE
+int ve_arp_init(struct ve_struct *ve)
+{
+	struct ve_struct *old_env;
+	int err;
+
+	ve->ve_arp_tbl = kmalloc(sizeof(struct neigh_table), GFP_KERNEL);
+	if (ve->ve_arp_tbl == NULL)
+		return -ENOMEM;
+
+	*(ve->ve_arp_tbl) = global_arp_tbl;
+	ve->ve_arp_tbl->parms.tbl = ve->ve_arp_tbl;
+	old_env = set_exec_env(ve);
+	err = neigh_table_init(ve->ve_arp_tbl);
+	if (err)
+		goto out_free;
+#ifdef CONFIG_SYSCTL
+	neigh_sysctl_register(NULL, &arp_tbl.parms, NET_IPV4,
+			      NET_IPV4_NEIGH, "ipv4", NULL, NULL);
+#endif
+	err = 0;
+
+out:
+	set_exec_env(old_env);
+	return err;
+
+out_free:
+	kfree(ve->ve_arp_tbl);
+	ve->ve_arp_tbl = NULL;
+	goto out;
+}
+EXPORT_SYMBOL(ve_arp_init);
+
+void ve_arp_fini(struct ve_struct *ve)
+{
+	if (ve->ve_arp_tbl) {
+#ifdef CONFIG_SYSCTL
+		neigh_sysctl_unregister(&ve->ve_arp_tbl->parms);
+#endif
+		neigh_table_clear(ve->ve_arp_tbl);
+		kfree(ve->ve_arp_tbl);
+		ve->ve_arp_tbl = NULL;
+	}
+}
+EXPORT_SYMBOL(ve_arp_fini);
+#endif /* CONFIG_VE */

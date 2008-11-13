@@ -120,6 +120,9 @@ static int open(struct inode * inode, struct file * file)
 	struct bin_attribute * attr = to_bin_attr(file->f_dentry);
 	int error = -EINVAL;
 
+	if (!ve_sysfs_alowed())
+		return 0;
+
 	if (!kobj || !attr)
 		goto Done;
 
@@ -196,6 +199,9 @@ int sysfs_create_bin_file(struct kobject * kobj, struct bin_attribute * attr)
 
 int sysfs_remove_bin_file(struct kobject * kobj, struct bin_attribute * attr)
 {
+	if (!ve_sysfs_alowed())
+		return 0;
+
 	sysfs_hash_and_remove(kobj->dentry,attr->attr.name);
 	return 0;
 }

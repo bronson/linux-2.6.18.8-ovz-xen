@@ -54,7 +54,7 @@ static __inline__ int scm_send(struct socket *sock, struct msghdr *msg,
 	struct task_struct *p = current;
 	scm->creds.uid = p->uid;
 	scm->creds.gid = p->gid;
-	scm->creds.pid = p->tgid;
+	scm->creds.pid = virt_tgid(p);
 	scm->fp = NULL;
 	scm->seq = 0;
 	unix_get_peersec_dgram(sock, scm);

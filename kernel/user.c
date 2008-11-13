@@ -14,6 +14,7 @@
 #include <linux/bitops.h>
 #include <linux/key.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 
 /*
  * UID task count cache, to get fast user lookup in "alloc_uid"
@@ -24,7 +25,20 @@
 #define UIDHASH_SZ		(1 << UIDHASH_BITS)
 #define UIDHASH_MASK		(UIDHASH_SZ - 1)
 #define __uidhashfn(uid)	(((uid >> UIDHASH_BITS) + uid) & UIDHASH_MASK)
-#define uidhashentry(uid)	(uidhash_table + __uidhashfn((uid)))
+#define __uidhashentry(uid)	(uidhash_table + __uidhashfn((uid)))
+
+#ifdef CONFIG_VE
+#define UIDHASH_MASK_VE			(UIDHASH_SZ_VE - 1)
+#define __uidhashfn_ve(uid)		(((uid >> UIDHASH_BITS_VE) ^ uid) & \
+						UIDHASH_MASK_VE)
+#define __uidhashentry_ve(uid, envid)	((envid)->uidhash_table + \
+						__uidhashfn_ve(uid))
+#define uidhashentry_ve(uid)		(ve_is_super(get_exec_env()) ?	\
+						__uidhashentry(uid) :	\
+						__uidhashentry_ve(uid, get_exec_env()))
+#else
+#define uidhashentry_ve(uid)		__uidhashentry(uid)
+#endif
 
 static kmem_cache_t *uid_cachep;
 static struct list_head uidhash_table[UIDHASH_SZ];
@@ -96,7 +110,7 @@ struct user_struct *find_user(uid_t uid)
 	unsigned long flags;
 
 	spin_lock_irqsave(&uidhash_lock, flags);
-	ret = uid_hash_find(uid, uidhashentry(uid));
+	ret = uid_hash_find(uid, uidhashentry_ve(uid));
 	spin_unlock_irqrestore(&uidhash_lock, flags);
 	return ret;
 }
@@ -119,10 +133,11 @@ void free_uid(struct user_struct *up)
 		local_irq_restore(flags);
 	}
 }
+EXPORT_SYMBOL_GPL(free_uid);
 
 struct user_struct * alloc_uid(uid_t uid)
 {
-	struct list_head *hashent = uidhashentry(uid);
+	struct list_head *hashent = uidhashentry_ve(uid);
 	struct user_struct *up;
 
 	spin_lock_irq(&uidhash_lock);
@@ -172,6 +187,7 @@ struct user_struct * alloc_uid(uid_t uid)
 	}
 	return up;
 }
+EXPORT_SYMBOL_GPL(alloc_uid);
 
 void switch_uid(struct user_struct *new_user)
 {
@@ -190,21 +206,21 @@ void switch_uid(struct user_struct *new_user)
 	free_uid(old_user);
 	suid_keys(current);
 }
-
+EXPORT_SYMBOL_GPL(switch_uid);
 
 static int __init uid_cache_init(void)
 {
 	int n;
 
 	uid_cachep = kmem_cache_create("uid_cache", sizeof(struct user_struct),
-			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL, NULL);
+			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_UBC, NULL, NULL);
 
 	for(n = 0; n < UIDHASH_SZ; ++n)
 		INIT_LIST_HEAD(uidhash_table + n);
 
 	/* Insert the root user immediately (init already runs as root) */
 	spin_lock_irq(&uidhash_lock);
-	uid_hash_insert(&root_user, uidhashentry(0));
+	uid_hash_insert(&root_user, __uidhashentry(0));
 	spin_unlock_irq(&uidhash_lock);
 
 	return 0;

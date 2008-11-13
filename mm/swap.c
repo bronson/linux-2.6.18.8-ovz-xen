@@ -178,6 +178,8 @@ void fastcall lru_cache_add_active(struct page *page)
 	put_cpu_var(lru_add_active_pvecs);
 }
 
+EXPORT_SYMBOL(lru_cache_add_active);
+
 static void __lru_add_drain(int cpu)
 {
 	struct pagevec *pvec = &per_cpu(lru_add_pvecs, cpu);
@@ -195,6 +197,8 @@ void lru_add_drain(void)
 	__lru_add_drain(get_cpu());
 	put_cpu();
 }
+
+EXPORT_SYMBOL(lru_add_drain);
 
 #ifdef CONFIG_NUMA
 static void lru_add_drain_per_cpu(void *dummy)

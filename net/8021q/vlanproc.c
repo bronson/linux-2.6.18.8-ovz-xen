@@ -114,13 +114,21 @@ static struct file_operations vlandev_fops = {
  *	/proc/net/vlan 
  */
 
+#ifdef CONFIG_VE
+#define proc_vlan_dir	(get_exec_env()->_proc_vlan_dir)
+#else
 static struct proc_dir_entry *proc_vlan_dir;
+#endif
 
 /*
  *	/proc/net/vlan/config 
  */
 
+#ifdef CONFIG_VE
+#define proc_vlan_conf	(get_exec_env()->_proc_vlan_conf)
+#else
 static struct proc_dir_entry *proc_vlan_conf;
+#endif
 
 /* Strings */
 static const char *vlan_name_type_str[VLAN_NAME_TYPE_HIGHEST] = {
@@ -154,7 +162,7 @@ void vlan_proc_cleanup(void)
  *	Create /proc/net/vlan entries
  */
 
-int __init vlan_proc_init(void)
+int vlan_proc_init(void)
 {
 	proc_vlan_dir = proc_mkdir(name_root, proc_net);
 	if (proc_vlan_dir) {

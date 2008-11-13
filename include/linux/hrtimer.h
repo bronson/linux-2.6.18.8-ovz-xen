@@ -148,4 +148,9 @@ extern void hrtimer_run_queues(void);
 /* Bootup initialization: */
 extern void __init hrtimers_init(void);
 
+extern long nanosleep_restart(struct restart_block *restart);
+
+extern ktime_t schedule_hrtimer(struct hrtimer *timer,
+				const enum hrtimer_mode mode);
+
 #endif

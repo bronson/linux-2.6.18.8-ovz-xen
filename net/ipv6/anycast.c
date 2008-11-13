@@ -82,7 +82,7 @@ int ipv6_sock_ac_join(struct sock *sk, int ifindex, struct in6_addr *addr)
 	struct net_device *dev = NULL;
 	struct inet6_dev *idev;
 	struct ipv6_ac_socklist *pac;
-	int	ishost = !ipv6_devconf.forwarding;
+	int	ishost = !ve_ipv6_devconf.forwarding;
 	int	err = 0;
 
 	if (!capable(CAP_NET_ADMIN))
@@ -334,9 +334,7 @@ int ipv6_dev_ac_inc(struct net_device *dev, struct in6_addr *addr)
 	idev->ac_list = aca;
 	write_unlock_bh(&idev->lock);
 
-	dst_hold(&rt->u.dst);
-	if (ip6_ins_rt(rt, NULL, NULL, NULL))
-		dst_release(&rt->u.dst);
+	ip6_ins_rt(rt, NULL, NULL, NULL);
 
 	addrconf_join_solict(dev, &aca->aca_addr);
 
@@ -378,10 +376,7 @@ int __ipv6_dev_ac_dec(struct inet6_dev *idev, struct in6_addr *addr)
 	addrconf_leave_solict(idev, &aca->aca_addr);
 
 	dst_hold(&aca->aca_rt->u.dst);
-	if (ip6_del_rt(aca->aca_rt, NULL, NULL, NULL))
-		dst_free(&aca->aca_rt->u.dst);
-	else
-		dst_release(&aca->aca_rt->u.dst);
+	ip6_del_rt(aca->aca_rt, NULL, NULL, NULL);
 
 	aca_put(aca);
 	return 0;
@@ -452,6 +447,8 @@ static inline struct ifacaddr6 *ac6_get_first(struct seq_file *seq)
 	     state->dev;
 	     state->dev = state->dev->next) {
 		struct inet6_dev *idev;
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		idev = in6_dev_get(state->dev);
 		if (!idev)
 			continue;
@@ -462,6 +459,7 @@ static inline struct ifacaddr6 *ac6_get_first(struct seq_file *seq)
 			break;
 		}
 		read_unlock_bh(&idev->lock);
+		in6_dev_put(idev);
 	}
 	return im;
 }
@@ -481,6 +479,8 @@ static struct ifacaddr6 *ac6_get_next(struct seq_file *seq, struct ifacaddr6 *im
 			state->idev = NULL;
 			break;
 		}
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		state->idev = in6_dev_get(state->dev);
 		if (!state->idev)
 			continue;
@@ -575,7 +575,7 @@ static struct file_operations ac6_seq_fops = {
 
 int __init ac6_proc_init(void)
 {
-	if (!proc_net_fops_create("anycast6", S_IRUGO, &ac6_seq_fops))
+	if (!proc_glob_fops_create("net/anycast6", S_IRUGO, &ac6_seq_fops))
 		return -ENOMEM;
 
 	return 0;
@@ -583,7 +583,7 @@ int __init ac6_proc_init(void)
 
 void ac6_proc_exit(void)
 {
-	proc_net_remove("anycast6");
+	remove_proc_glob_entry("net/anycast6", NULL);
 }
 #endif
 

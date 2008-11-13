@@ -61,6 +61,7 @@ struct nlm_host {
 	spinlock_t		h_lock;
 	struct list_head	h_granted;	/* Locks in GRANTED state */
 	struct list_head	h_reclaim;	/* Locks in RECLAIM state */
+	struct ve_struct *	owner_env;	/* VE owning the host */
 };
 
 /*
@@ -80,7 +81,7 @@ struct nlm_wait;
 /*
  * Memory chunk for NLM client RPC request.
  */
-#define NLMCLNT_OHSIZE		(sizeof(system_utsname.nodename)+10)
+#define NLMCLNT_OHSIZE		(sizeof(utsname()->nodename)+10)
 struct nlm_rqst {
 	unsigned int		a_flags;	/* initial RPC task flags */
 	struct nlm_host *	a_host;		/* host handle */
@@ -141,8 +142,11 @@ extern struct svc_procedure	nlmsvc_procedures[];
 #ifdef CONFIG_LOCKD_V4
 extern struct svc_procedure	nlmsvc_procedures4[];
 #endif
-extern int			nlmsvc_grace_period;
-extern unsigned long		nlmsvc_timeout;
+
+#include <linux/ve_nfs.h>
+extern int			_nlmsvc_grace_period;
+extern unsigned long		_nlmsvc_timeout;
+
 
 /*
  * Lockd client functions

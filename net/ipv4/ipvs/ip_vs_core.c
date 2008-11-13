@@ -962,6 +962,10 @@ ip_vs_in(unsigned int hooknum, struct sk_buff **pskb,
 	 *	Big tappo: only PACKET_HOST (neither loopback nor mcasts)
 	 *	... don't know why 1st test DOES NOT include 2nd (?)
 	 */
+	/*
+	 * VZ: the question above is right.
+	 * The second test is superfluous.
+	 */
 	if (unlikely(skb->pkt_type != PACKET_HOST
 		     || skb->dev == &loopback_dev || skb->sk)) {
 		IP_VS_DBG(12, "packet type=%d proto=%d daddr=%d.%d.%d.%d ignored\n",

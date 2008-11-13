@@ -35,6 +35,8 @@
 #include <linux/vt_kern.h>
 #include <linux/workqueue.h>
 #include <linux/kexec.h>
+#include <linux/kallsyms.h>
+#include <linux/slab.h>
 
 #include <asm/ptrace.h>
 
@@ -166,8 +168,13 @@ static struct sysrq_key_op sysrq_showlocks_op = {
 static void sysrq_handle_showregs(int key, struct pt_regs *pt_regs,
 				  struct tty_struct *tty)
 {
+	bust_spinlocks(1);
 	if (pt_regs)
 		show_regs(pt_regs);
+	bust_spinlocks(0);
+#if defined(__i386__) || defined(__x86_64__)
+	smp_nmi_call_function(smp_show_regs, NULL, 1);
+#endif
 }
 static struct sysrq_key_op sysrq_showregs_op = {
 	.handler	= sysrq_handle_showregs,
@@ -192,6 +199,7 @@ static void sysrq_handle_showmem(int key, struct pt_regs *pt_regs,
 				 struct tty_struct *tty)
 {
 	show_mem();
+	show_slab_info();
 }
 static struct sysrq_key_op sysrq_showmem_op = {
 	.handler	= sysrq_handle_showmem,
@@ -207,7 +215,7 @@ static void send_sig_all(int sig)
 {
 	struct task_struct *p;
 
-	for_each_process(p) {
+	for_each_process_all(p) {
 		if (p->mm && p->pid != 1)
 			/* Not swapper, init nor kernel thread */
 			force_sig(sig, p);
@@ -259,6 +267,19 @@ static struct sysrq_key_op sysrq_kill_op = {
 	.enable_mask	= SYSRQ_ENABLE_SIGNAL,
 };
 
+#ifdef CONFIG_SCHED_VCPU
+static void sysrq_handle_vschedstate(int key, struct pt_regs *pt_regs,
+				   struct tty_struct *tty) 
+{
+	show_vsched();
+}
+static struct sysrq_key_op sysrq_vschedstate_op = {
+	.handler	= sysrq_handle_vschedstate,
+	.help_msg	= "vsced_stAte",
+	.action_msg	= "Show Vsched",
+};
+#endif
+
 static void sysrq_handle_unrt(int key, struct pt_regs *pt_regs,
 				struct tty_struct *tty)
 {
@@ -274,7 +295,274 @@ static struct sysrq_key_op sysrq_unrt_op = {
 /* Key Operations table and lock */
 static DEFINE_SPINLOCK(sysrq_key_table_lock);
 
-static struct sysrq_key_op *sysrq_key_table[36] = {
+#define SYSRQ_KEY_TABLE_LENGTH 37
+static struct sysrq_key_op **sysrq_key_table;
+static struct sysrq_key_op *sysrq_default_key_table[];
+
+#ifdef CONFIG_SYSRQ_DEBUG
+#define SYSRQ_NAMELEN_MAX	64
+#define SYSRQ_DUMP_LINES	32
+
+static struct sysrq_key_op *sysrq_debug_key_table[];
+static struct sysrq_key_op *sysrq_input_key_table[];
+static unsigned long *dump_address;
+static int orig_console_loglevel;
+static void (*sysrq_input_return)(char *) = NULL;
+
+static void dump_mem(void)
+{
+	unsigned long value[4];
+	mm_segment_t old_fs;
+	int line, err;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = 0;
+
+	for (line = 0; line < SYSRQ_DUMP_LINES; line++) {
+		err |= __get_user(value[0], dump_address++);
+		err |= __get_user(value[1], dump_address++);
+		err |= __get_user(value[2], dump_address++);
+		err |= __get_user(value[3], dump_address++);
+		if (err) {
+			printk("Invalid address %p\n", dump_address - 4);
+			break;
+		}
+#if BITS_PER_LONG == 32
+		printk("0x%p: %08lx %08lx %08lx %08lx\n",
+				dump_address - 4,
+				value[0], value[1], value[2], value[3]);
+#else
+		printk("0x%p: %016lx %016lx %016lx %016lx\n",
+				dump_address - 4,
+				value[0], value[1], value[2], value[3]);
+#endif
+	}
+	set_fs(old_fs);
+}
+
+static void write_mem(unsigned long val)
+{
+	mm_segment_t old_fs;
+	unsigned long old_val;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	if (__get_user(old_val, dump_address)) {
+		printk("Invalid address %p\n", dump_address);
+		goto out;
+	}
+
+#if BITS_PER_LONG == 32
+	printk("Changing [%p] from %08lx to %08lx\n",
+			dump_address, old_val, val);
+#else
+	printk("Changing [%p] from %016lx to %016lx\n",
+			dump_address, old_val, val);
+#endif
+	__put_user(val, dump_address);
+out:
+	set_fs(old_fs);
+}
+
+static void handle_read(int key, struct pt_regs *pt_regs,
+		struct tty_struct *tty)
+{
+	static int pos;
+	static int upper_case;
+	static char str[SYSRQ_NAMELEN_MAX];
+
+	if (key == 0) {
+		/* actually 0 is not shift only... */
+		upper_case = 1;
+		return;
+	}
+
+	if (key == 0x0d || pos == SYSRQ_NAMELEN_MAX - 1) {
+		/* enter */
+		sysrq_key_table = sysrq_debug_key_table;
+		str[pos] = '\0';
+		pos = upper_case = 0;
+		printk("\n");
+		if (sysrq_input_return == NULL)
+			printk("No return handler!!!\n");
+		else
+			sysrq_input_return(str);
+		return;
+	};
+
+	/* check for alowed symbols */
+	if (key == '-') {
+		if (upper_case)
+			key = '_';
+		goto correct;
+	};
+	if (key >= 'a' && key <= 'z') {
+		if (upper_case)
+			key = key - 'a' + 'A';
+		goto correct;
+	};
+	if (key >= '0' && key <= '9')
+		goto correct;
+
+	upper_case = 0;
+	return;
+
+correct:
+	str[pos] = key;
+	printk("%c", (char)key);
+	pos++;
+	upper_case = 0;
+}
+
+static struct sysrq_key_op input_read = {
+	.handler	= handle_read,
+	.help_msg	= "",
+	.action_msg	= NULL,
+};
+
+static struct sysrq_key_op *sysrq_input_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
+	[0 ... SYSRQ_KEY_TABLE_LENGTH - 1] = &input_read,
+};
+
+static void return_dump_mem(char *str)
+{
+	unsigned long address;
+	char *end;
+
+	address = simple_strtoul(str, &end, 0);
+	if (*end != '\0') {
+		printk("Bad address [%s]\n", str);
+		return;
+	}
+
+	dump_address = (unsigned long *)address;
+	dump_mem();
+}
+
+static void handle_dump_mem(int key, struct pt_regs *pt_regs,
+		struct tty_struct *tty)
+{
+	sysrq_input_return = return_dump_mem;
+	sysrq_key_table = sysrq_input_key_table;
+}
+
+static struct sysrq_key_op debug_dump_mem = {
+	.handler	= handle_dump_mem,
+	.help_msg	= "Dump",
+	.action_msg	= "Enter address:",
+};
+
+static void return_resolve(char *str)
+{
+	unsigned long address;
+
+	address = kallsyms_lookup_name(str);
+	printk("%s : %lx\n", str, address);
+	if (address) {
+		dump_address = (unsigned long *)address;
+		printk("Now you can dump it via X\n");
+	}
+}
+
+static void handle_resolve(int key, struct pt_regs *pt_regs,
+		struct tty_struct *tty)
+{
+	sysrq_input_return = return_resolve;
+	sysrq_key_table = sysrq_input_key_table;
+}
+
+static struct sysrq_key_op debug_resolve = {
+	.handler	= handle_resolve,
+	.help_msg	= "Resolve",
+	.action_msg	= "Enter symbol name:",
+};
+
+static void return_write_mem(char *str)
+{
+	unsigned long address;
+	unsigned long value;
+	char *end;
+
+	address = simple_strtoul(str, &end, 0);
+	if (*end != '-') {
+		printk("Bad address in %s\n", str);
+		return;
+	}
+	value = simple_strtoul(end + 1, &end, 0);
+	if (*end != '\0') {
+		printk("Bad value in %s\n", str);
+		return;
+	}
+
+	dump_address = (unsigned long *)address;
+	write_mem(value);
+}
+
+static void handle_write_mem(int key, struct pt_regs *pt_regs,
+		struct tty_struct *tty)
+{
+	sysrq_input_return = return_write_mem;
+	sysrq_key_table = sysrq_input_key_table;
+}
+
+static struct sysrq_key_op debug_write_mem = {
+	.handler	= handle_write_mem,
+	.help_msg	= "Writemem",
+	.action_msg	= "Enter address-value:",
+};
+
+static void handle_next(int key, struct pt_regs *pt_regs,
+		struct tty_struct *tty)
+{
+	dump_mem();
+}
+
+static struct sysrq_key_op debug_next = {
+	.handler	= handle_next,
+	.help_msg	= "neXt",
+	.action_msg	= "continuing",
+};
+
+static void handle_quit(int key, struct pt_regs *pt_regs,
+		struct tty_struct *tty)
+{
+	sysrq_key_table = sysrq_default_key_table;
+	console_loglevel = orig_console_loglevel;
+}
+
+static struct sysrq_key_op debug_quit = {
+	.handler	= handle_quit,
+	.help_msg	= "Quit",
+	.action_msg	= "Tnahk you for using debugger",
+};
+
+static struct sysrq_key_op *sysrq_debug_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
+	[13] = &debug_dump_mem,		/* d */
+	[26] = &debug_quit,		/* q */
+	[27] = &debug_resolve,		/* r */
+	[32] = &debug_write_mem,	/* w */
+	[33] = &debug_next,		/* x */
+};
+
+static void sysrq_handle_debug(int key, struct pt_regs *pt_regs,
+		struct tty_struct *tty)
+{
+	orig_console_loglevel = console_loglevel;
+	console_loglevel = 8;
+	sysrq_key_table = sysrq_debug_key_table;
+	printk("Welcome sysrq debugging mode\n"
+			"Press H for help\n");
+}
+
+static struct sysrq_key_op sysrq_debug_op = {
+	.handler        = sysrq_handle_debug,
+	.help_msg       = "debuG",
+	.action_msg     = "Select desired action",
+};
+#endif
+
+static struct sysrq_key_op *sysrq_default_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
 	&sysrq_loglevel_op,		/* 0 */
 	&sysrq_loglevel_op,		/* 1 */
 	&sysrq_loglevel_op,		/* 2 */
@@ -290,13 +578,21 @@ static struct sysrq_key_op *sysrq_key_table[36] = {
 	 * Don't use for system provided sysrqs, it is handled specially on
 	 * sparc and will never arrive
 	 */
+#ifdef CONFIG_SCHED_VCPU
+	&sysrq_vschedstate_op,		/* a */
+#else
 	NULL,				/* a */
+#endif
 	&sysrq_reboot_op,		/* b */
 	&sysrq_crashdump_op,		/* c */
 	&sysrq_showlocks_op,		/* d */
 	&sysrq_term_op,			/* e */
 	&sysrq_moom_op,			/* f */
+#ifdef CONFIG_SYSRQ_DEBUG
+	&sysrq_debug_op,		/* g */
+#else
 	NULL,				/* g */
+#endif
 	NULL,				/* h */
 	&sysrq_kill_op,			/* i */
 	NULL,				/* j */
@@ -317,8 +613,11 @@ static struct sysrq_key_op *sysrq_key_table[36] = {
 	NULL,				/* w */
 	NULL,				/* x */
 	NULL,				/* y */
-	NULL				/* z */
+	NULL,				/* z */
+	NULL,				/* for debugger */
 };
+
+static struct sysrq_key_op **sysrq_key_table = sysrq_default_key_table;
 
 /* key2index calculation, -1 on invalid index */
 static int sysrq_key_table_key2index(int key)
@@ -329,6 +628,10 @@ static int sysrq_key_table_key2index(int key)
 		retval = key - '0';
 	else if ((key >= 'a') && (key <= 'z'))
 		retval = key + 10 - 'a';
+#ifdef CONFIG_SYSRQ_DEBUG
+	else if (key == 0 || key == 0x0d || key == '-')
+		retval = SYSRQ_KEY_TABLE_LENGTH - 1;
+#endif
 	else
 		retval = -1;
 	return retval;
@@ -371,7 +674,6 @@ void __handle_sysrq(int key, struct pt_regs *pt_regs, struct tty_struct *tty,
 	spin_lock_irqsave(&sysrq_key_table_lock, flags);
 	orig_log_level = console_loglevel;
 	console_loglevel = 7;
-	printk(KERN_INFO "SysRq : ");
 
         op_p = __sysrq_get_key_op(key);
         if (op_p) {
@@ -381,16 +683,17 @@ void __handle_sysrq(int key, struct pt_regs *pt_regs, struct tty_struct *tty,
 		 */
 		if (!check_mask || sysrq_enabled == 1 ||
 		    (sysrq_enabled & op_p->enable_mask)) {
-			printk("%s\n", op_p->action_msg);
+		    	if (op_p->action_msg)
+				printk("SysRq: %s\n", op_p->action_msg);
 			console_loglevel = orig_log_level;
 			op_p->handler(key, pt_regs, tty);
 		} else {
 			printk("This sysrq operation is disabled.\n");
 		}
 	} else {
-		printk("HELP : ");
+		printk("SysRq HELP : ");
 		/* Only print the help msg once per handler */
-		for (i = 0; i < ARRAY_SIZE(sysrq_key_table); i++) {
+		for (i = 0; i < SYSRQ_KEY_TABLE_LENGTH; i++) {
 			if (sysrq_key_table[i]) {
 				int j;
 

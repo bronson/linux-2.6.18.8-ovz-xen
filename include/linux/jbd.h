@@ -251,10 +251,15 @@ typedef struct journal_superblock_s
 #define J_ASSERT(assert)						\
 do {									\
 	if (!(assert)) {						\
+		unsigned long stack;					\
 		printk (KERN_EMERG					\
 			"Assertion failure in %s() at %s:%d: \"%s\"\n",	\
 			__FUNCTION__, __FILE__, __LINE__, # assert);	\
-		BUG();							\
+		printk("Stack=%p current=%p pid=%d ve=%d comm='%s'\n",	\
+				&stack, current, current->pid,		\
+				get_exec_env()->veid,			\
+				current->comm);				\
+		dump_stack();						\
 	}								\
 } while (0)
 

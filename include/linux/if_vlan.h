@@ -77,6 +77,9 @@ struct vlan_group {
 	struct hlist_node	hlist;	/* linked list */
 	struct net_device *vlan_devices[VLAN_GROUP_ARRAY_LEN];
 	struct rcu_head		rcu;
+#ifdef CONFIG_VE
+	struct ve_struct	*owner;
+#endif
 };
 
 struct vlan_priority_tci_mapping {

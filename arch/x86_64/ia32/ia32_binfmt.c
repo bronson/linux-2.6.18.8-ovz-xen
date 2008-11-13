@@ -27,12 +27,14 @@
 #include <asm/ia32.h>
 #include <asm/vsyscall32.h>
 
+#include <ub/ub_vmpages.h>
+
 #define ELF_NAME "elf/i386"
 
 #define AT_SYSINFO 32
 #define AT_SYSINFO_EHDR		33
 
-int sysctl_vsyscall32 = 1;
+int sysctl_vsyscall32 = 0;
 
 #define ARCH_DLINFO do {  \
 	if (sysctl_vsyscall32) { \
@@ -352,9 +354,15 @@ int ia32_setup_arg_pages(struct linux_binprm *bprm, unsigned long stack_top,
 		bprm->loader += stack_base;
 	bprm->exec += stack_base;
 
+	ret = -ENOMEM;
+	if (ub_memory_charge(mm, stack_top -
+				(PAGE_MASK & (unsigned long)bprm->p),
+				VM_STACK_FLAGS, NULL, UB_SOFT))
+		goto err_charge;
+
 	mpnt = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!mpnt) 
-		return -ENOMEM; 
+		goto err_alloc;
 
 	memset(mpnt, 0, sizeof(*mpnt));
 
@@ -371,11 +379,8 @@ int ia32_setup_arg_pages(struct linux_binprm *bprm, unsigned long stack_top,
 			mpnt->vm_flags = VM_STACK_FLAGS;
  		mpnt->vm_page_prot = (mpnt->vm_flags & VM_EXEC) ? 
  			PAGE_COPY_EXEC : PAGE_COPY;
-		if ((ret = insert_vm_struct(mm, mpnt))) {
-			up_write(&mm->mmap_sem);
-			kmem_cache_free(vm_area_cachep, mpnt);
-			return ret;
-		}
+		if ((ret = insert_vm_struct(mm, mpnt)))
+			goto err_insert;
 		mm->stack_vm = mm->total_vm = vma_pages(mpnt);
 	} 
 
@@ -390,6 +395,15 @@ int ia32_setup_arg_pages(struct linux_binprm *bprm, unsigned long stack_top,
 	up_write(&mm->mmap_sem);
 	
 	return 0;
+
+err_insert:
+	up_write(&mm->mmap_sem);
+	kmem_cache_free(vm_area_cachep, mpnt);
+err_alloc:
+	ub_memory_uncharge(mm, stack_top - (PAGE_MASK & (unsigned long)bprm->p),
+				VM_STACK_FLAGS, NULL);
+err_charge:
+	return ret;
 }
 EXPORT_SYMBOL(ia32_setup_arg_pages);
 

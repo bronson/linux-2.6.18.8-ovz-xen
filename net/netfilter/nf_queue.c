@@ -185,12 +185,12 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 	/* Drop reference to owner of hook which queued us. */
 	module_put(info->elem->owner);
 
-	list_for_each_rcu(i, &nf_hooks[info->pf][info->hook]) {
+	list_for_each_rcu(i, &ve_nf_hooks[info->pf][info->hook]) {
 		if (i == elem) 
   			break;
   	}
   
-	if (i == &nf_hooks[info->pf][info->hook]) {
+	if (i == &ve_nf_hooks[info->pf][info->hook]) {
 		/* The module which sent it to userspace is gone. */
 		NFDEBUG("%s: module disappeared, dropping packet.\n",
 			__FUNCTION__);
@@ -211,7 +211,7 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 
 	if (verdict == NF_ACCEPT) {
 	next_hook:
-		verdict = nf_iterate(&nf_hooks[info->pf][info->hook],
+		verdict = nf_iterate(&ve_nf_hooks[info->pf][info->hook],
 				     &skb, info->hook, 
 				     info->indev, info->outdev, &elem,
 				     info->okfn, INT_MIN);

@@ -35,6 +35,12 @@ struct ipv4_devconf
 };
 
 extern struct ipv4_devconf ipv4_devconf;
+extern struct ipv4_devconf ipv4_devconf_dflt;
+#if defined(CONFIG_VE) && defined(CONFIG_INET)
+#define ve_ipv4_devconf		(*(get_exec_env()->_ipv4_devconf))
+#else
+#define ve_ipv4_devconf		ipv4_devconf
+#endif
 
 struct in_device
 {
@@ -61,29 +67,29 @@ struct in_device
 };
 
 #define IN_DEV_FORWARD(in_dev)		((in_dev)->cnf.forwarding)
-#define IN_DEV_MFORWARD(in_dev)		(ipv4_devconf.mc_forwarding && (in_dev)->cnf.mc_forwarding)
-#define IN_DEV_RPFILTER(in_dev)		(ipv4_devconf.rp_filter && (in_dev)->cnf.rp_filter)
-#define IN_DEV_SOURCE_ROUTE(in_dev)	(ipv4_devconf.accept_source_route && (in_dev)->cnf.accept_source_route)
-#define IN_DEV_BOOTP_RELAY(in_dev)	(ipv4_devconf.bootp_relay && (in_dev)->cnf.bootp_relay)
+#define IN_DEV_MFORWARD(in_dev)		(ve_ipv4_devconf.mc_forwarding && (in_dev)->cnf.mc_forwarding)
+#define IN_DEV_RPFILTER(in_dev)		(ve_ipv4_devconf.rp_filter && (in_dev)->cnf.rp_filter)
+#define IN_DEV_SOURCE_ROUTE(in_dev)	(ve_ipv4_devconf.accept_source_route && (in_dev)->cnf.accept_source_route)
+#define IN_DEV_BOOTP_RELAY(in_dev)	(ve_ipv4_devconf.bootp_relay && (in_dev)->cnf.bootp_relay)
 
-#define IN_DEV_LOG_MARTIANS(in_dev)	(ipv4_devconf.log_martians || (in_dev)->cnf.log_martians)
-#define IN_DEV_PROXY_ARP(in_dev)	(ipv4_devconf.proxy_arp || (in_dev)->cnf.proxy_arp)
-#define IN_DEV_SHARED_MEDIA(in_dev)	(ipv4_devconf.shared_media || (in_dev)->cnf.shared_media)
-#define IN_DEV_TX_REDIRECTS(in_dev)	(ipv4_devconf.send_redirects || (in_dev)->cnf.send_redirects)
-#define IN_DEV_SEC_REDIRECTS(in_dev)	(ipv4_devconf.secure_redirects || (in_dev)->cnf.secure_redirects)
+#define IN_DEV_LOG_MARTIANS(in_dev)	(ve_ipv4_devconf.log_martians || (in_dev)->cnf.log_martians)
+#define IN_DEV_PROXY_ARP(in_dev)	(ve_ipv4_devconf.proxy_arp || (in_dev)->cnf.proxy_arp)
+#define IN_DEV_SHARED_MEDIA(in_dev)	(ve_ipv4_devconf.shared_media || (in_dev)->cnf.shared_media)
+#define IN_DEV_TX_REDIRECTS(in_dev)	(ve_ipv4_devconf.send_redirects || (in_dev)->cnf.send_redirects)
+#define IN_DEV_SEC_REDIRECTS(in_dev)	(ve_ipv4_devconf.secure_redirects || (in_dev)->cnf.secure_redirects)
 #define IN_DEV_IDTAG(in_dev)		((in_dev)->cnf.tag)
 #define IN_DEV_MEDIUM_ID(in_dev)	((in_dev)->cnf.medium_id)
 #define IN_DEV_PROMOTE_SECONDARIES(in_dev)	(ipv4_devconf.promote_secondaries || (in_dev)->cnf.promote_secondaries)
 
 #define IN_DEV_RX_REDIRECTS(in_dev) \
 	((IN_DEV_FORWARD(in_dev) && \
-	  (ipv4_devconf.accept_redirects && (in_dev)->cnf.accept_redirects)) \
+	  (ve_ipv4_devconf.accept_redirects && (in_dev)->cnf.accept_redirects)) \
 	 || (!IN_DEV_FORWARD(in_dev) && \
-	  (ipv4_devconf.accept_redirects || (in_dev)->cnf.accept_redirects)))
+ 	  (ve_ipv4_devconf.accept_redirects || (in_dev)->cnf.accept_redirects)))
 
-#define IN_DEV_ARPFILTER(in_dev)	(ipv4_devconf.arp_filter || (in_dev)->cnf.arp_filter)
-#define IN_DEV_ARP_ANNOUNCE(in_dev)	(max(ipv4_devconf.arp_announce, (in_dev)->cnf.arp_announce))
-#define IN_DEV_ARP_IGNORE(in_dev)	(max(ipv4_devconf.arp_ignore, (in_dev)->cnf.arp_ignore))
+#define IN_DEV_ARPFILTER(in_dev)	(ve_ipv4_devconf.arp_filter || (in_dev)->cnf.arp_filter)
+#define IN_DEV_ARP_ANNOUNCE(in_dev)	(max(ve_ipv4_devconf.arp_announce, (in_dev)->cnf.arp_announce))
+#define IN_DEV_ARP_IGNORE(in_dev)	(max(ve_ipv4_devconf.arp_ignore, (in_dev)->cnf.arp_ignore))
 
 struct in_ifaddr
 {
@@ -114,6 +120,7 @@ extern u32		inet_select_addr(const struct net_device *dev, u32 dst, int scope);
 extern u32		inet_confirm_addr(const struct net_device *dev, u32 dst, u32 local, int scope);
 extern struct in_ifaddr *inet_ifa_byprefix(struct in_device *in_dev, u32 prefix, u32 mask);
 extern void		inet_forward_change(void);
+extern void		inet_del_ifa(struct in_device *in_dev, struct in_ifaddr **ifap, int destroy);
 
 static __inline__ int inet_ifa_match(u32 addr, struct in_ifaddr *ifa)
 {
@@ -181,6 +188,16 @@ static inline void in_dev_put(struct in_device *idev)
 #define __in_dev_put(idev)  atomic_dec(&(idev)->refcnt)
 #define in_dev_hold(idev)   atomic_inc(&(idev)->refcnt)
 
+struct ve_struct;
+#ifdef CONFIG_INET
+extern int devinet_sysctl_init(struct ve_struct *);
+extern void devinet_sysctl_fini(struct ve_struct *);
+extern void devinet_sysctl_free(struct ve_struct *);
+#else
+static inline int devinet_sysctl_init(struct ve_struct *ve) { return 0; }
+static inline void devinet_sysctl_fini(struct ve_struct *ve) { ; }
+static inline void devinet_sysctl_free(struct ve_struct *ve) { ; }
+#endif
 #endif /* __KERNEL__ */
 
 static __inline__ __u32 inet_make_mask(int logmask)

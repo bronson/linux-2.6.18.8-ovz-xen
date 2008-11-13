@@ -457,6 +457,9 @@ int sysfs_add_file(struct dentry * dir, const struct attribute * attr, int type)
 
 int sysfs_create_file(struct kobject * kobj, const struct attribute * attr)
 {
+	if (!ve_sysfs_alowed())
+		return 0;
+
 	BUG_ON(!kobj || !kobj->dentry || !attr);
 
 	return sysfs_add_file(kobj->dentry, attr, SYSFS_KOBJ_ATTR);
@@ -474,6 +477,9 @@ int sysfs_update_file(struct kobject * kobj, const struct attribute * attr)
 	struct dentry * dir = kobj->dentry;
 	struct dentry * victim;
 	int res = -ENOENT;
+
+	if (!ve_sysfs_alowed())
+		return 0;
 
 	mutex_lock(&dir->d_inode->i_mutex);
 	victim = lookup_one_len(attr->name, dir, strlen(attr->name));
@@ -545,6 +551,9 @@ EXPORT_SYMBOL_GPL(sysfs_chmod_file);
 
 void sysfs_remove_file(struct kobject * kobj, const struct attribute * attr)
 {
+	if (!ve_sysfs_alowed())
+		return;
+
 	sysfs_hash_and_remove(kobj->dentry,attr->name);
 }
 

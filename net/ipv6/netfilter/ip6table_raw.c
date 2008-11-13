@@ -145,11 +145,12 @@ static struct nf_hook_ops ip6t_ops[] = {
 static int __init ip6table_raw_init(void)
 {
 	int ret;
+	struct ip6t_table *tmp;
 
 	/* Register table */
-	ret = ip6t_register_table(&packet_raw, &initial_table.repl);
-	if (ret < 0)
-		return ret;
+	tmp = ip6t_register_table(&packet_raw, &initial_table.repl);
+	if (IS_ERR(tmp))
+		return PTR_ERR(tmp);
 
 	/* Register hooks */
 	ret = nf_register_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));

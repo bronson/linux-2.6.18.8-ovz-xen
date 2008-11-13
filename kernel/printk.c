@@ -30,7 +30,9 @@
 #include <linux/smp.h>
 #include <linux/security.h>
 #include <linux/bootmem.h>
+#include <linux/vzratelimit.h>
 #include <linux/syscalls.h>
+#include <linux/veprintk.h>
 
 #include <asm/uaccess.h>
 
@@ -53,6 +55,9 @@ int console_printk[4] = {
 };
 
 EXPORT_UNUSED_SYMBOL(console_printk);  /*  June 2006  */
+
+struct printk_aligned printk_no_wake_var[NR_CPUS];
+EXPORT_SYMBOL(printk_no_wake_var);
 
 /*
  * Low lever drivers may need that to know if they can schedule in
@@ -84,7 +89,7 @@ static int console_locked, console_suspended;
  * It is also used in interesting ways to provide interlocking in
  * release_console_sem().
  */
-static DEFINE_SPINLOCK(logbuf_lock);
+DEFINE_SPINLOCK(logbuf_lock);
 
 #define LOG_BUF_MASK	(log_buf_len-1)
 #define LOG_BUF(idx) (log_buf[(idx) & LOG_BUF_MASK])
@@ -115,6 +120,7 @@ static int preferred_console = -1;
 
 /* Flag: console code may call schedule() */
 static int console_may_schedule;
+int console_silence_loglevel;
 
 #ifdef CONFIG_PRINTK
 
@@ -122,6 +128,19 @@ static char __log_buf[__LOG_BUF_LEN];
 static char *log_buf = __log_buf;
 static int log_buf_len = __LOG_BUF_LEN;
 static unsigned long logged_chars; /* Number of chars produced since last read+clear operation */
+
+static int __init setup_console_silencelevel(char *str)
+{
+	int level;
+
+	if (get_option(&str, &level) != 1)
+		return 0;
+
+	console_silence_loglevel = level;
+	return 1;
+}
+
+__setup("silencelevel=", setup_console_silencelevel);
 
 static int __init log_buf_len_setup(char *str)
 {
@@ -186,6 +205,9 @@ int do_syslog(int type, char __user *buf, int len)
 	char c;
 	int error = 0;
 
+	if (!ve_is_super(get_exec_env()) && (type == 6 || type == 7))
+		goto out;
+
 	error = security_syslog(type);
 	if (error)
 		return error;
@@ -206,15 +228,15 @@ int do_syslog(int type, char __user *buf, int len)
 			error = -EFAULT;
 			goto out;
 		}
-		error = wait_event_interruptible(log_wait,
-							(log_start - log_end));
+		error = wait_event_interruptible(ve_log_wait,
+						(ve_log_start - ve_log_end));
 		if (error)
 			goto out;
 		i = 0;
 		spin_lock_irq(&logbuf_lock);
-		while (!error && (log_start != log_end) && i < len) {
-			c = LOG_BUF(log_start);
-			log_start++;
+		while (!error && (ve_log_start != ve_log_end) && i < len) {
+			c = VE_LOG_BUF(ve_log_start);
+			ve_log_start++;
 			spin_unlock_irq(&logbuf_lock);
 			error = __put_user(c,buf);
 			buf++;
@@ -240,15 +262,17 @@ int do_syslog(int type, char __user *buf, int len)
 			error = -EFAULT;
 			goto out;
 		}
+		if (ve_log_buf == NULL)
+			goto out;
 		count = len;
-		if (count > log_buf_len)
-			count = log_buf_len;
+		if (count > ve_log_buf_len)
+			count = ve_log_buf_len;
 		spin_lock_irq(&logbuf_lock);
-		if (count > logged_chars)
-			count = logged_chars;
+		if (count > ve_logged_chars)
+			count = ve_logged_chars;
 		if (do_clear)
-			logged_chars = 0;
-		limit = log_end;
+			ve_logged_chars = 0;
+		limit = ve_log_end;
 		/*
 		 * __put_user() could sleep, and while we sleep
 		 * printk() could overwrite the messages
@@ -257,9 +281,9 @@ int do_syslog(int type, char __user *buf, int len)
 		 */
 		for (i = 0; i < count && !error; i++) {
 			j = limit-1-i;
-			if (j + log_buf_len < log_end)
+			if (j + ve_log_buf_len < ve_log_end)
 				break;
-			c = LOG_BUF(j);
+			c = VE_LOG_BUF(j);
 			spin_unlock_irq(&logbuf_lock);
 			error = __put_user(c,&buf[count-1-i]);
 			cond_resched();
@@ -283,7 +307,7 @@ int do_syslog(int type, char __user *buf, int len)
 		}
 		break;
 	case 5:		/* Clear ring buffer */
-		logged_chars = 0;
+		ve_logged_chars = 0;
 		break;
 	case 6:		/* Disable logging to console */
 		console_loglevel = minimum_console_loglevel;
@@ -295,16 +319,19 @@ int do_syslog(int type, char __user *buf, int len)
 		error = -EINVAL;
 		if (len < 1 || len > 8)
 			goto out;
+		error = 0;
+		/* VE has no console, so return success */
+		if (!ve_is_super(get_exec_env()))
+			goto out;
 		if (len < minimum_console_loglevel)
 			len = minimum_console_loglevel;
 		console_loglevel = len;
-		error = 0;
 		break;
 	case 9:		/* Number of chars in the log buffer */
-		error = log_end - log_start;
+		error = ve_log_end - ve_log_start;
 		break;
 	case 10:	/* Size of the log buffer */
-		error = log_buf_len;
+		error = ve_log_buf_len;
 		break;
 	default:
 		error = -EINVAL;
@@ -403,15 +430,17 @@ static void call_console_drivers(unsigned long start, unsigned long end)
 
 static void emit_log_char(char c)
 {
-	LOG_BUF(log_end) = c;
-	log_end++;
-	if (log_end - log_start > log_buf_len)
-		log_start = log_end - log_buf_len;
-	if (log_end - con_start > log_buf_len)
-		con_start = log_end - log_buf_len;
-	if (logged_chars < log_buf_len)
-		logged_chars++;
+	VE_LOG_BUF(ve_log_end) = c;
+	ve_log_end++;
+	if (ve_log_end - ve_log_start > ve_log_buf_len)
+		ve_log_start = ve_log_end - ve_log_buf_len;
+	if (ve_is_super(get_exec_env()) && ve_log_end - con_start > ve_log_buf_len)
+		con_start = ve_log_end - ve_log_buf_len;
+	if (ve_logged_chars < ve_log_buf_len)
+		ve_logged_chars++;
 }
+
+static unsigned long do_release_console_sem(unsigned long *flags);
 
 /*
  * Zap console related locks when oopsing. Only zap at most once
@@ -488,6 +517,30 @@ static int have_callable_console(void)
  * printf(3)
  */
 
+static inline int ve_log_init(void)
+{
+#ifdef CONFIG_VE
+	if (ve_log_buf != NULL)
+		return 0;
+
+	if (ve_is_super(get_exec_env())) {
+		ve0._log_wait = &log_wait;
+		ve0._log_start = &log_start;
+		ve0._log_end = &log_end;
+		ve0._logged_chars = &logged_chars;
+		ve0.log_buf = log_buf;
+		return 0;
+	}
+
+	ve_log_buf = kmalloc(ve_log_buf_len, GFP_ATOMIC);
+	if (!ve_log_buf)
+		return -ENOMEM;
+
+	memset(ve_log_buf, 0, ve_log_buf_len);
+#endif
+	return 0;
+}
+
 asmlinkage int printk(const char *fmt, ...)
 {
 	va_list args;
@@ -503,13 +556,14 @@ asmlinkage int printk(const char *fmt, ...)
 /* cpu currently holding logbuf_lock */
 static volatile unsigned int printk_cpu = UINT_MAX;
 
-asmlinkage int vprintk(const char *fmt, va_list args)
+asmlinkage int __vprintk(const char *fmt, va_list args)
 {
 	unsigned long flags;
 	int printed_len;
 	char *p;
 	static char printk_buf[1024];
 	static int log_level_unknown = 1;
+	int err, need_wake;
 
 	preempt_disable();
 	if (unlikely(oops_in_progress) && printk_cpu == smp_processor_id())
@@ -522,6 +576,12 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	lockdep_off();
 	spin_lock(&logbuf_lock);
 	printk_cpu = smp_processor_id();
+
+	err = ve_log_init();
+	if (err) {
+		spin_unlock_irqrestore(&logbuf_lock, flags);
+		return err;
+	}
 
 	/* Emit the output into the temporary buffer */
 	printed_len = vscnprintf(printk_buf, sizeof(printk_buf), fmt, args);
@@ -583,7 +643,26 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 			log_level_unknown = 1;
 	}
 
-	if (!down_trylock(&console_sem)) {
+	if (!ve_is_super(get_exec_env())) {
+		need_wake = (ve_log_start != ve_log_end);
+		spin_unlock_irqrestore(&logbuf_lock, flags);
+		if (!oops_in_progress && need_wake)
+			wake_up_interruptible(&ve_log_wait);
+	} else if (__printk_no_wake) {
+		/*
+		 * A difficult case, created by the console semaphore mess...
+		 * All wakeups are omitted.
+		 */
+		if (!atomic_add_negative(-1, &console_sem.count)) {
+			console_locked = 1;
+			console_may_schedule = 0;
+			do_release_console_sem(&flags);
+			console_locked = 0;
+			console_may_schedule = 0;
+		}
+		atomic_inc(&console_sem.count);
+		spin_unlock_irqrestore(&logbuf_lock, flags);
+	} else if (!down_trylock(&console_sem)) {
 		/*
 		 * We own the drivers.  We can drop the spinlock and
 		 * let release_console_sem() print the text, maybe ...
@@ -625,6 +704,63 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 }
 EXPORT_SYMBOL(printk);
 EXPORT_SYMBOL(vprintk);
+
+static struct timer_list conswakeup_timer;
+static void conswakeup_timer_call(unsigned long dumy)
+{
+	if (!down_trylock(&console_sem)) {
+		console_locked = 1;
+		console_may_schedule = 0;
+		release_console_sem();
+	}
+	mod_timer(&conswakeup_timer, jiffies + 5 * HZ);
+}
+
+static int __init conswakeup_init(void)
+{
+	init_timer(&conswakeup_timer);
+	conswakeup_timer.function = &conswakeup_timer_call;
+	conswakeup_timer.expires = jiffies + 5 * HZ;
+	add_timer(&conswakeup_timer);
+	return 0;
+}
+console_initcall(conswakeup_init);
+
+asmlinkage int vprintk(const char *fmt, va_list args)
+{
+	int i;
+	struct ve_struct *env;
+
+	env = set_exec_env(get_ve0());
+	i = __vprintk(fmt, args);
+	set_exec_env(env);
+	return i;
+}
+
+asmlinkage int ve_vprintk(int dst, const char *fmt, va_list args)
+{
+	int printed_len;
+
+	printed_len = 0;
+	if (ve_is_super(get_exec_env()) || (dst & VE0_LOG))
+		printed_len = vprintk(fmt, args);
+	if (!ve_is_super(get_exec_env()) && (dst & VE_LOG))
+		printed_len = __vprintk(fmt, args);
+	return printed_len;
+}
+
+asmlinkage int ve_printk(int dst, const char *fmt, ...)
+{
+	va_list args;
+	int printed_len;
+
+	va_start(args, fmt);
+	printed_len = ve_vprintk(dst, fmt, args);
+	va_end(args);
+	return printed_len;
+}
+EXPORT_SYMBOL(ve_printk);
+
 
 #else
 
@@ -738,6 +874,18 @@ void resume_console(void)
 	release_console_sem();
 }
 
+void wake_up_klogd(void)
+{
+	if (!oops_in_progress && waitqueue_active(&log_wait))
+		/*
+		 * If we printk from within the lock dependency code,
+		 * from within the scheduler code, then do not lock
+		 * up due to self-recursion:
+		 */
+		if (!lockdep_internal())
+			wake_up_interruptible(&log_wait);
+}
+
 /**
  * acquire_console_sem - lock the console system for exclusive use.
  *
@@ -789,43 +937,45 @@ EXPORT_UNUSED_SYMBOL(is_console_locked);  /*  June 2006  */
  *
  * release_console_sem() may be called from any context.
  */
-void release_console_sem(void)
+static unsigned long do_release_console_sem(unsigned long *flags)
 {
-	unsigned long flags;
 	unsigned long _con_start, _log_end;
 	unsigned long wake_klogd = 0;
 
 	if (console_suspended) {
 		up(&secondary_console_sem);
-		return;
+		goto out;
 	}
 
 	console_may_schedule = 0;
 
 	for ( ; ; ) {
-		spin_lock_irqsave(&logbuf_lock, flags);
 		wake_klogd |= log_start - log_end;
 		if (con_start == log_end)
 			break;			/* Nothing to print */
 		_con_start = con_start;
 		_log_end = log_end;
 		con_start = log_end;		/* Flush */
-		spin_unlock(&logbuf_lock);
+		spin_unlock_irqrestore(&logbuf_lock, *flags);
 		call_console_drivers(_con_start, _log_end);
-		local_irq_restore(flags);
+		spin_lock_irqsave(&logbuf_lock, *flags);
 	}
+out:
+	return wake_klogd;
+}
+
+void release_console_sem(void)
+{
+	unsigned long flags;
+	unsigned long wake_klogd;
+
+	spin_lock_irqsave(&logbuf_lock, flags);
+	wake_klogd = do_release_console_sem(&flags);
 	console_locked = 0;
 	up(&console_sem);
 	spin_unlock_irqrestore(&logbuf_lock, flags);
-	if (wake_klogd && !oops_in_progress && waitqueue_active(&log_wait)) {
-		/*
-		 * If we printk from within the lock dependency code,
-		 * from within the scheduler code, then do not lock
-		 * up due to self-recursion:
-		 */
-		if (!lockdep_internal())
-			wake_up_interruptible(&log_wait);
-	}
+	if (wake_klogd)
+		wake_up_klogd();
 }
 EXPORT_SYMBOL(release_console_sem);
 
@@ -1105,3 +1255,33 @@ int printk_ratelimit(void)
 				printk_ratelimit_burst);
 }
 EXPORT_SYMBOL(printk_ratelimit);
+
+/*
+ *	Rate limiting stuff.
+ */
+int vz_ratelimit(struct vz_rate_info *p)
+{
+	unsigned long cjif, djif;
+	unsigned long flags;
+	static spinlock_t ratelimit_lock = SPIN_LOCK_UNLOCKED;
+	long new_bucket;
+
+	spin_lock_irqsave(&ratelimit_lock, flags);
+	cjif = jiffies;
+	djif = cjif - p->last;
+	if (djif < p->interval) {
+		if (p->bucket >= p->burst) {
+			spin_unlock_irqrestore(&ratelimit_lock, flags);
+			return 0;
+		}
+		p->bucket++;
+	} else {
+		new_bucket = p->bucket - (djif / (unsigned)p->interval);
+		if (new_bucket < 0)
+			new_bucket = 0;
+		p->bucket = new_bucket + 1;
+	}
+	p->last = cjif;
+	spin_unlock_irqrestore(&ratelimit_lock, flags);
+	return 1;
+}

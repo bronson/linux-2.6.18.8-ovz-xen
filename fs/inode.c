@@ -8,6 +8,7 @@
 #include <linux/mm.h>
 #include <linux/dcache.h>
 #include <linux/init.h>
+#include <linux/kernel_stat.h>
 #include <linux/quotaops.h>
 #include <linux/slab.h>
 #include <linux/writeback.h>
@@ -22,6 +23,8 @@
 #include <linux/bootmem.h>
 #include <linux/inotify.h>
 #include <linux/mount.h>
+#include <linux/nsproxy.h>
+#include <linux/namespace.h>
 
 /*
  * This is needed for the following functions:
@@ -97,13 +100,15 @@ static DEFINE_MUTEX(iprune_mutex);
  */
 struct inodes_stat_t inodes_stat;
 
-static kmem_cache_t * inode_cachep __read_mostly;
+kmem_cache_t * inode_cachep __read_mostly;
+
+static struct address_space_operations vfs_empty_aops;
+struct inode_operations vfs_empty_iops;
+static struct file_operations vfs_empty_fops;
+EXPORT_SYMBOL(vfs_empty_iops);
 
 static struct inode *alloc_inode(struct super_block *sb)
 {
-	static const struct address_space_operations empty_aops;
-	static struct inode_operations empty_iops;
-	static const struct file_operations empty_fops;
 	struct inode *inode;
 
 	if (sb->s_op->alloc_inode)
@@ -118,8 +123,8 @@ static struct inode *alloc_inode(struct super_block *sb)
 		inode->i_blkbits = sb->s_blocksize_bits;
 		inode->i_flags = 0;
 		atomic_set(&inode->i_count, 1);
-		inode->i_op = &empty_iops;
-		inode->i_fop = &empty_fops;
+		inode->i_op = &vfs_empty_iops;
+		inode->i_fop = &vfs_empty_fops;
 		inode->i_nlink = 1;
 		atomic_set(&inode->i_writecount, 0);
 		inode->i_size = 0;
@@ -143,7 +148,7 @@ static struct inode *alloc_inode(struct super_block *sb)
 			return NULL;
 		}
 
-		mapping->a_ops = &empty_aops;
+		mapping->a_ops = &vfs_empty_aops;
  		mapping->host = inode;
 		mapping->flags = 0;
 		mapping_set_gfp_mask(mapping, GFP_HIGHUSER);
@@ -298,13 +303,76 @@ static void dispose_list(struct list_head *head)
 	spin_unlock(&inode_lock);
 }
 
+static void show_header(struct inode *inode)
+{
+	struct super_block *sb = inode->i_sb;
+
+	printk("VFS: Busy inodes after unmount. "
+			"sb = %p, fs type = %s, sb count = %d, "
+			"sb->s_root = %s\n", sb,
+			(sb->s_type != NULL) ? sb->s_type->name : "",
+			sb->s_count,
+			(sb->s_root != NULL) ?
+			(char *)sb->s_root->d_name.name : "");
+}
+
+static void show_inode(struct inode *inode)
+{
+	struct dentry *d;
+	struct vfsmount *mnt;
+	int i;
+
+	printk("inode = %p, inode->i_count = %d, "
+			"inode->i_nlink = %d, "
+			"inode->i_mode = %d, "
+			"inode->i_state = %ld, "
+			"inode->i_flags = %d, "
+			"inode->i_devices.next = %p, "
+			"inode->i_devices.prev = %p, "
+			"inode->i_ino = %ld\n",
+			inode,
+			atomic_read(&inode->i_count),
+			inode->i_nlink,
+			inode->i_mode,
+			inode->i_state,
+			inode->i_flags,
+			inode->i_devices.next,
+			inode->i_devices.prev,
+			inode->i_ino);
+	printk("inode dump: ");
+	for (i = 0; i < sizeof(*inode); i++)
+		printk("%2.2x ", *((u_char *)inode + i));
+	printk("\n");
+	list_for_each_entry(d, &inode->i_dentry, d_alias) {
+		printk("  d_alias %s d_count=%d d_flags=%x\n",
+			d->d_name.name, atomic_read(&d->d_count), d->d_flags);
+		for (i = 0; i < sizeof(*d); i++)
+			printk("%2.2x ", *((u_char *)d + i));
+		printk("\n");
+	}
+
+	spin_lock(&vfsmount_lock);
+	list_for_each_entry(mnt, &get_task_mnt_ns(current)->list, mnt_list) {
+		if (mnt->mnt_sb != inode->i_sb)
+			continue;
+		printk("mnt=%p count=%d flags=%x exp_mask=%x\n",
+				mnt, atomic_read(&mnt->mnt_count),
+				mnt->mnt_flags,
+				mnt->mnt_expiry_mark);
+		for (i = 0; i < sizeof(*mnt); i++)
+			printk("%2.2x ", *((u_char *)mnt + i));
+		printk("\n");
+	}
+	spin_unlock(&vfsmount_lock);
+}
+
 /*
  * Invalidate all inodes for a device.
  */
-static int invalidate_list(struct list_head *head, struct list_head *dispose)
+static int invalidate_list(struct list_head *head, struct list_head *dispose, int check)
 {
 	struct list_head *next;
-	int busy = 0, count = 0;
+	int busy = 0, count = 0, once = 1;
 
 	next = head->next;
 	for (;;) {
@@ -331,6 +399,14 @@ static int invalidate_list(struct list_head *head, struct list_head *dispose)
 			continue;
 		}
 		busy = 1;
+
+		if (check) {
+			if (once) {
+				once = 0;
+				show_header(inode);
+			}
+			show_inode(inode);
+		}
 	}
 	/* only unused inodes may be cached with i_count zero */
 	inodes_stat.nr_unused -= count;
@@ -345,7 +421,7 @@ static int invalidate_list(struct list_head *head, struct list_head *dispose)
  *	fails because there are busy inodes then a non zero value is returned.
  *	If the discard is successful all the inodes have been discarded.
  */
-int invalidate_inodes(struct super_block * sb)
+int invalidate_inodes(struct super_block * sb, int check)
 {
 	int busy;
 	LIST_HEAD(throw_away);
@@ -353,7 +429,7 @@ int invalidate_inodes(struct super_block * sb)
 	mutex_lock(&iprune_mutex);
 	spin_lock(&inode_lock);
 	inotify_unmount_inodes(&sb->s_inodes);
-	busy = invalidate_list(&sb->s_inodes, &throw_away);
+	busy = invalidate_list(&sb->s_inodes, &throw_away, check);
 	spin_unlock(&inode_lock);
 
 	dispose_list(&throw_away);
@@ -377,7 +453,7 @@ int __invalidate_device(struct block_device *bdev)
 		 * hold).
 		 */
 		shrink_dcache_sb(sb);
-		res = invalidate_inodes(sb);
+		res = invalidate_inodes(sb, 0);
 		drop_super(sb);
 	}
 	invalidate_bdev(bdev, 0);
@@ -472,6 +548,7 @@ static void prune_icache(int nr_to_scan)
  */
 static int shrink_icache_memory(int nr, gfp_t gfp_mask)
 {
+	KSTAT_PERF_ENTER(shrink_icache)
 	if (nr) {
 		/*
 		 * Nasty deadlock avoidance.  We may hold various FS locks,
@@ -482,6 +559,7 @@ static int shrink_icache_memory(int nr, gfp_t gfp_mask)
 			return -1;
 		prune_icache(nr);
 	}
+	KSTAT_PERF_LEAVE(shrink_icache)
 	return (inodes_stat.nr_unused / 100) * sysctl_vfs_cache_pressure;
 }
 
@@ -546,7 +624,8 @@ repeat:
  */
 struct inode *new_inode(struct super_block *sb)
 {
-	static unsigned long last_ino;
+	/* 32 bits for compatability mode stat calls */
+	static unsigned int last_ino;
 	struct inode * inode;
 
 	spin_lock_prefetch(&inode_lock);
@@ -705,7 +784,8 @@ static inline unsigned long hash(struct super_block *sb, unsigned long hashval)
  */
 ino_t iunique(struct super_block *sb, ino_t max_reserved)
 {
-	static ino_t counter;
+	/* 32 bits for compatability mode stat calls */
+	static unsigned int counter;
 	struct inode *inode;
 	struct hlist_head * head;
 	ino_t res;

@@ -60,34 +60,17 @@
 #include <net/sock.h>
 #include <net/scm.h>
 #include <net/netlink.h>
+#include <net/netlink_sock.h>
+
+#include <ub/beancounter.h>
+#include <ub/ub_net.h>
+#include <ub/ub_sk.h>
 
 #define NLGRPSZ(x)	(ALIGN(x, sizeof(unsigned long) * 8) / 8)
 
-struct netlink_sock {
-	/* struct sock has to be the first member of netlink_sock */
-	struct sock		sk;
-	u32			pid;
-	u32			dst_pid;
-	u32			dst_group;
-	u32			flags;
-	u32			subscriptions;
-	u32			ngroups;
-	unsigned long		*groups;
-	unsigned long		state;
-	wait_queue_head_t	wait;
-	struct netlink_callback	*cb;
-	spinlock_t		cb_lock;
-	void			(*data_ready)(struct sock *sk, int bytes);
-	struct module		*module;
-};
 
 #define NETLINK_KERNEL_SOCKET	0x1
 #define NETLINK_RECV_PKTINFO	0x2
-
-static inline struct netlink_sock *nlk_sk(struct sock *sk)
-{
-	return (struct netlink_sock *)sk;
-}
 
 struct nl_pid_hash {
 	struct hlist_head *table;
@@ -209,7 +192,10 @@ static __inline__ struct sock *netlink_lookup(int protocol, u32 pid)
 	read_lock(&nl_table_lock);
 	head = nl_pid_hashfn(hash, pid);
 	sk_for_each(sk, node, head) {
-		if (nlk_sk(sk)->pid == pid) {
+		/* VEs should find sockets, created by kernel */
+		if ((nlk_sk(sk)->pid == pid) &&
+				(!pid || ve_accessible_strict(sk->owner_env,
+							      get_exec_env()))){
 			sock_hold(sk);
 			goto found;
 		}
@@ -327,7 +313,9 @@ static int netlink_insert(struct sock *sk, u32 pid)
 	head = nl_pid_hashfn(hash, pid);
 	len = 0;
 	sk_for_each(osk, node, head) {
-		if (nlk_sk(osk)->pid == pid)
+		if ((nlk_sk(sk)->pid == pid) &&
+				ve_accessible_strict(sk->owner_env,
+					get_exec_env()))
 			break;
 		len++;
 	}
@@ -380,6 +368,8 @@ static int __netlink_create(struct socket *sock, int protocol)
 	sk = sk_alloc(PF_NETLINK, GFP_KERNEL, &netlink_proto, 1);
 	if (!sk)
 		return -ENOMEM;
+	if (ub_other_sock_charge(sk))
+		goto out_free;
 
 	sock_init_data(sock, sk);
 
@@ -390,6 +380,10 @@ static int __netlink_create(struct socket *sock, int protocol)
 	sk->sk_destruct = netlink_sock_destruct;
 	sk->sk_protocol = protocol;
 	return 0;
+
+out_free:
+	sk_free(sk);
+	return -ENOMEM;
 }
 
 static int netlink_create(struct socket *sock, int protocol)
@@ -443,6 +437,7 @@ static int netlink_release(struct socket *sock)
 		return 0;
 
 	netlink_remove(sk);
+	sock_orphan(sk);
 	nlk = nlk_sk(sk);
 
 	spin_lock(&nlk->cb_lock);
@@ -457,7 +452,6 @@ static int netlink_release(struct socket *sock)
 	/* OK. Socket is unlinked, and, therefore,
 	   no new packets will arrive */
 
-	sock_orphan(sk);
 	sock->sk = NULL;
 	wake_up_interruptible_all(&nlk->wait);
 
@@ -498,7 +492,7 @@ static int netlink_autobind(struct socket *sock)
 	struct hlist_head *head;
 	struct sock *osk;
 	struct hlist_node *node;
-	s32 pid = current->tgid;
+	s32 pid = virt_pid(current);
 	int err;
 	static s32 rover = -4097;
 
@@ -507,7 +501,9 @@ retry:
 	netlink_table_grab();
 	head = nl_pid_hashfn(hash, pid);
 	sk_for_each(osk, node, head) {
-		if (nlk_sk(osk)->pid == pid) {
+		if ((nlk_sk(osk)->pid == pid) &&
+				ve_accessible_strict(osk->owner_env,
+					get_exec_env())) {
 			/* Bind collision, search negative pid values. */
 			pid = rover--;
 			if (rover > -4097)
@@ -532,7 +528,7 @@ retry:
 static inline int netlink_capable(struct socket *sock, unsigned int flag) 
 { 
 	return (nl_table[sock->sk->sk_protocol].nl_nonroot & flag) ||
-	       capable(CAP_NET_ADMIN);
+	       capable(CAP_VE_NET_ADMIN);
 } 
 
 static void
@@ -804,6 +800,21 @@ static inline struct sk_buff *netlink_trim(struct sk_buff *skb,
 	return skb;
 }
 
+static int netlink_rcv_sync(struct sock *sk, struct sk_buff *skb)
+{
+	int ret;
+	struct netlink_sock *nlk = nlk_sk(sk);
+
+	if (nlk->netlink_rcv == NULL)
+		return 0;
+
+	ret = skb->len;
+	skb_set_owner_r(skb, sk);
+	nlk->netlink_rcv(skb);
+	sock_put(sk);
+	return ret;
+}
+
 int netlink_unicast(struct sock *ssk, struct sk_buff *skb, u32 pid, int nonblock)
 {
 	struct sock *sk;
@@ -819,6 +830,13 @@ retry:
 		kfree_skb(skb);
 		return PTR_ERR(sk);
 	}
+
+	if (nlk_sk(sk)->flags & NETLINK_KERNEL_SOCKET) {
+		err = netlink_rcv_sync(sk, skb);
+		if (err != 0)
+			return err;
+	}
+
 	err = netlink_attachskb(sk, skb, nonblock, timeo, ssk);
 	if (err == 1)
 		goto retry;
@@ -875,6 +893,9 @@ static inline int do_one_broadcast(struct sock *sk,
 
 	if (nlk->pid == p->pid || p->group - 1 >= nlk->ngroups ||
 	    !test_bit(p->group - 1, nlk->groups))
+		goto out;
+
+	if (!ve_accessible_strict(get_exec_env(), sk->owner_env))
 		goto out;
 
 	if (p->failure) {
@@ -972,6 +993,9 @@ static inline int do_one_set_err(struct sock *sk,
 
 	if (nlk->pid == p->pid || p->group - 1 >= nlk->ngroups ||
 	    !test_bit(p->group - 1, nlk->groups))
+		goto out;
+
+	if (!ve_accessible_strict(get_exec_env(), sk->owner_env))
 		goto out;
 
 	sk->sk_err = p->code;
@@ -1109,12 +1133,17 @@ static int netlink_sendmsg(struct kiocb *kiocb, struct socket *sock,
 	struct sock_iocb *siocb = kiocb_to_siocb(kiocb);
 	struct sock *sk = sock->sk;
 	struct netlink_sock *nlk = nlk_sk(sk);
-	struct sockaddr_nl *addr=msg->msg_name;
+	struct sockaddr_nl *addr = msg->msg_name;
 	u32 dst_pid;
-	u32 dst_group;
 	struct sk_buff *skb;
 	int err;
 	struct scm_cookie scm;
+	struct sock *dstsk;
+	long timeo;
+	int no_ubc, no_buf;
+	unsigned long chargesize;
+
+	DECLARE_WAITQUEUE(wait, current);
 
 	if (msg->msg_flags&MSG_OOB)
 		return -EOPNOTSUPP;
@@ -1125,17 +1154,16 @@ static int netlink_sendmsg(struct kiocb *kiocb, struct socket *sock,
 	if (err < 0)
 		return err;
 
+	/* Broadcasts from user to kernel are disabled. This is OK
+	 * according to ANK */
 	if (msg->msg_namelen) {
 		if (addr->nl_family != AF_NETLINK)
 			return -EINVAL;
 		dst_pid = addr->nl_pid;
-		dst_group = ffs(addr->nl_groups);
-		if (dst_group && !netlink_capable(sock, NL_NONROOT_SEND))
+		if (addr->nl_groups && !netlink_capable(sock, NL_NONROOT_SEND))
 			return -EPERM;
-	} else {
+	} else
 		dst_pid = nlk->dst_pid;
-		dst_group = nlk->dst_group;
-	}
 
 	if (!nlk->pid) {
 		err = netlink_autobind(sock);
@@ -1148,12 +1176,12 @@ static int netlink_sendmsg(struct kiocb *kiocb, struct socket *sock,
 		goto out;
 	err = -ENOBUFS;
 	skb = alloc_skb(len, GFP_KERNEL);
-	if (skb==NULL)
+	if (skb == NULL)
 		goto out;
 
 	NETLINK_CB(skb).pid	= nlk->pid;
 	NETLINK_CB(skb).dst_pid = dst_pid;
-	NETLINK_CB(skb).dst_group = dst_group;
+	NETLINK_CB(skb).dst_group = 0;
 	NETLINK_CB(skb).loginuid = audit_get_loginuid(current->audit_context);
 	selinux_get_task_sid(current, &(NETLINK_CB(skb).sid));
 	memcpy(NETLINK_CREDS(skb), &siocb->scm->creds, sizeof(struct ucred));
@@ -1165,24 +1193,92 @@ static int netlink_sendmsg(struct kiocb *kiocb, struct socket *sock,
 	 */
 
 	err = -EFAULT;
-	if (memcpy_fromiovec(skb_put(skb,len), msg->msg_iov, len)) {
-		kfree_skb(skb);
-		goto out;
-	}
+	if (memcpy_fromiovec(skb_put(skb,len), msg->msg_iov, len))
+		goto out_free;
 
 	err = security_netlink_send(sk, skb);
-	if (err) {
-		kfree_skb(skb);
-		goto out;
+	if (err)
+		goto out_free;
+
+	timeo = sock_sndtimeo(sk, msg->msg_flags&MSG_DONTWAIT);
+retry:
+	dstsk = netlink_getsockbypid(sk, dst_pid);
+	if (IS_ERR(dstsk)) {
+		err = PTR_ERR(dstsk);
+		goto out_free;
+	}
+	if (nlk_sk(dstsk)->flags & NETLINK_KERNEL_SOCKET) {
+		err = netlink_rcv_sync(dstsk, skb);
+		if (err != 0)
+			return err;
 	}
 
-	if (dst_group) {
-		atomic_inc(&skb->users);
-		netlink_broadcast(sk, skb, dst_pid, dst_group, GFP_KERNEL);
+	nlk = nlk_sk(dstsk);
+#ifdef NL_EMULATE_DEV
+	if (nlk->handler) {
+		skb_orphan(skb);
+		err = nlk->handler(protocol, skb);
+		goto out_put;
 	}
-	err = netlink_unicast(sk, skb, dst_pid, msg->msg_flags&MSG_DONTWAIT);
+#endif
 
+	/* BTW, it could be done once, before the retry loop */
+	chargesize = skb_charge_fullsize(skb);
+	no_ubc = ub_sock_getwres_other(sk, chargesize);
+	no_buf = atomic_read(&dstsk->sk_rmem_alloc) > dstsk->sk_rcvbuf ||
+		test_bit(0, &nlk->state);
+	if (no_ubc || no_buf) {
+		wait_queue_head_t *sleep;
+
+		if (!no_ubc)
+			ub_sock_retwres_other(sk, chargesize,
+					      SOCK_MIN_UBCSPACE_CH);
+		err = -EAGAIN;
+		if (timeo == 0) {
+			kfree_skb(skb);
+			goto out_put;
+		}
+
+		/* wake up comes to different queues */
+		sleep = no_ubc ? sk->sk_sleep : &nlk->wait;
+		__set_current_state(TASK_INTERRUPTIBLE);
+		add_wait_queue(sleep, &wait);
+
+		/* this if can't be moved upper because ub_sock_snd_queue_add()
+		 * may change task state to TASK_RUNNING */
+		if (no_ubc)
+			ub_sock_sndqueueadd_other(sk, chargesize);
+
+		if ((atomic_read(&dstsk->sk_rmem_alloc) > dstsk->sk_rcvbuf ||
+		     test_bit(0, &nlk->state) || no_ubc) &&
+		    !sock_flag(dstsk, SOCK_DEAD))
+			timeo = schedule_timeout(timeo);
+
+		__set_current_state(TASK_RUNNING);
+		remove_wait_queue(sleep, &wait);
+		if (no_ubc)
+			ub_sock_sndqueuedel(sk);
+		sock_put(dstsk);
+
+		if (!signal_pending(current))
+			goto retry;
+		err = sock_intr_errno(timeo);
+		goto out_free;
+	}
+
+	skb_orphan(skb);
+	skb_set_owner_r(skb, dstsk);
+	ub_skb_set_charge(skb, sk, chargesize, UB_OTHERSOCKBUF);
+	skb_queue_tail(&dstsk->sk_receive_queue, skb);
+	dstsk->sk_data_ready(dstsk, len);
+	err = len;
+out_put:
+	sock_put(dstsk);
 out:
+	return err;
+
+out_free:
+	kfree_skb(skb);
 	return err;
 }
 
@@ -1301,6 +1397,7 @@ netlink_kernel_create(int unit, unsigned int groups,
 
 	nlk = nlk_sk(sk);
 	nlk->flags |= NETLINK_KERNEL_SOCKET;
+	nlk->netlink_rcv = NULL;
 
 	netlink_table_grab();
 	nl_table[unit].groups = groups;
@@ -1346,6 +1443,10 @@ static int netlink_dump(struct sock *sk)
 	skb = sock_rmalloc(sk, NLMSG_GOODSIZE, 0, GFP_KERNEL);
 	if (!skb)
 		return -ENOBUFS;
+	if (ub_nlrcvbuf_charge(skb, sk) < 0) {
+		kfree_skb(skb);
+		return -EACCES;
+	}
 
 	spin_lock(&nlk->cb_lock);
 
@@ -1407,9 +1508,9 @@ int netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 		return -ECONNREFUSED;
 	}
 	nlk = nlk_sk(sk);
-	/* A dump is in progress... */
+	/* A dump or destruction is in progress... */
 	spin_lock(&nlk->cb_lock);
-	if (nlk->cb) {
+	if (nlk->cb || sock_flag(sk, SOCK_DEAD)) {
 		spin_unlock(&nlk->cb_lock);
 		netlink_destroy_callback(cb);
 		sock_put(sk);
@@ -1513,8 +1614,18 @@ void netlink_run_queue(struct sock *sk, unsigned int *qlen,
 		*qlen = skb_queue_len(&sk->sk_receive_queue);
 
 	for (; *qlen; (*qlen)--) {
+		int ret;
+		struct ve_struct *old_env;
+		struct user_beancounter *old_ub;
 		skb = skb_dequeue(&sk->sk_receive_queue);
-		if (netlink_rcv_skb(skb, cb)) {
+
+		old_env = set_exec_env(skb->owner_env);
+		old_ub = set_exec_ub(skb_bc(skb)->ub);
+		ret = netlink_rcv_skb(skb, cb);
+		(void)set_exec_ub(old_ub);
+		(void)set_exec_env(old_env);
+
+		if (ret) {
 			if (skb->len)
 				skb_queue_head(&sk->sk_receive_queue, skb);
 			else {
@@ -1776,6 +1887,7 @@ static int __init netlink_proto_init(void)
 
 	sock_register(&netlink_family_ops);
 #ifdef CONFIG_PROC_FS
+	/* FIXME: virtualize before give access from VEs */
 	proc_net_fops_create("netlink", 0, &netlink_seq_fops);
 #endif
 	/* The netlink device handler may be needed early. */ 

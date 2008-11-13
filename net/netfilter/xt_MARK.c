@@ -82,7 +82,8 @@ checkentry_v0(const char *tablename,
 	struct xt_mark_target_info *markinfo = targinfo;
 
 	if (markinfo->mark > 0xffffffff) {
-		printk(KERN_WARNING "MARK: Only supports 32bit wide mark\n");
+		ve_printk(VE_LOG, KERN_WARNING "MARK: Only supports 32bit wide"
+								" mark\n");
 		return 0;
 	}
 	return 1;
@@ -101,16 +102,103 @@ checkentry_v1(const char *tablename,
 	if (markinfo->mode != XT_MARK_SET
 	    && markinfo->mode != XT_MARK_AND
 	    && markinfo->mode != XT_MARK_OR) {
-		printk(KERN_WARNING "MARK: unknown mode %u\n",
+		ve_printk(VE_LOG, KERN_WARNING "MARK: unknown mode %u\n",
 		       markinfo->mode);
 		return 0;
 	}
 	if (markinfo->mark > 0xffffffff) {
-		printk(KERN_WARNING "MARK: Only supports 32bit wide mark\n");
+		ve_printk(VE_LOG, KERN_WARNING "MARK: Only supports 32bit wide"
+								" mark\n");
 		return 0;
 	}
 	return 1;
 }
+
+#ifdef CONFIG_COMPAT
+static int mark_reg_v1_compat_to_user(void *target, void **dstptr,
+		int *size, int off)
+{
+	struct xt_entry_target *pt;
+	struct xt_mark_target_info_v1 *pinfo;
+	struct compat_xt_mark_target_info_v1 rinfo;
+	u_int16_t tsize;
+
+	pt = (struct xt_entry_target *)target;
+	tsize = pt->u.user.target_size;
+	if (__copy_to_user(*dstptr, pt, sizeof(struct compat_xt_entry_target)))
+		return -EFAULT;
+	pinfo = (struct xt_mark_target_info_v1 *)pt->data;
+	memset(&rinfo, 0, sizeof(struct compat_xt_mark_target_info_v1));
+	/* mark fit in 32bit due to check in checkentry() */
+	rinfo.mark = (compat_ulong_t)pinfo->mark;
+	rinfo.mode = pinfo->mode;
+	if (__copy_to_user(*dstptr + sizeof(struct compat_xt_entry_target),
+			&rinfo, sizeof(struct compat_xt_mark_target_info_v1)))
+		return -EFAULT;
+	tsize -= off;
+	if (put_user(tsize, (u_int16_t *)*dstptr))
+		return -EFAULT;
+	*size -= off;
+	*dstptr += tsize;
+	return 0;
+}
+
+static int mark_reg_v1_compat_from_user(void *target, void **dstptr,
+		int *size, int off)
+{
+	struct compat_xt_entry_target *pt;
+	struct xt_entry_target *dstpt;
+	struct compat_xt_mark_target_info_v1 *pinfo;
+	struct xt_mark_target_info_v1 rinfo;
+	u_int16_t tsize;
+
+	pt = (struct compat_xt_entry_target *)target;
+	dstpt = (struct xt_entry_target *)*dstptr;
+	tsize = pt->u.user.target_size;
+	memset(*dstptr, 0, sizeof(struct xt_entry_target));
+	memcpy(*dstptr, pt, sizeof(struct compat_xt_entry_target));
+
+	pinfo = (struct compat_xt_mark_target_info_v1 *)pt->data;
+	memset(&rinfo, 0, sizeof(struct xt_mark_target_info_v1));
+	rinfo.mark = pinfo->mark;
+	rinfo.mode = pinfo->mode;
+
+	memcpy(*dstptr + sizeof(struct xt_entry_target),
+				&rinfo, sizeof(struct xt_mark_target_info_v1));
+	tsize += off;
+	dstpt->u.user.target_size = tsize;
+	*size += off;
+	*dstptr += tsize;
+	return 0;
+}
+
+static int mark_reg_v1_compat(void *target, void **dstptr,
+		int *size, int convert)
+{
+	int ret, off;
+
+	off = XT_ALIGN(sizeof(struct xt_mark_target_info_v1)) -
+		COMPAT_XT_ALIGN(sizeof(struct compat_xt_mark_target_info_v1));
+	switch (convert) {
+		case COMPAT_TO_USER:
+			ret = mark_reg_v1_compat_to_user(target,
+					dstptr, size, off);
+			break;
+		case COMPAT_FROM_USER:
+			ret = mark_reg_v1_compat_from_user(target,
+					dstptr, size, off);
+			break;
+		case COMPAT_CALC_SIZE:
+			*size += off;
+			ret = 0;
+			break;
+		default:
+			ret = -ENOPROTOOPT;
+			break;
+	}
+	return ret;
+}
+#endif /*CONFIG_COMPAT*/
 
 static struct xt_target ipt_mark_reg_v0 = {
 	.name		= "MARK",
@@ -129,6 +217,9 @@ static struct xt_target ipt_mark_reg_v1 = {
 	.targetsize	= sizeof(struct xt_mark_target_info_v1),
 	.table		= "mangle",
 	.checkentry	= checkentry_v1,
+#ifdef CONFIG_COMPAT
+	.compat		= mark_reg_v1_compat,
+#endif
 	.me		= THIS_MODULE,
 	.family		= AF_INET,
 	.revision	= 1,

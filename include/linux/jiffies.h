@@ -80,6 +80,7 @@
  */
 extern u64 __jiffy_data jiffies_64;
 extern unsigned long volatile __jiffy_data jiffies;
+extern unsigned long cycles_per_jiffy, cycles_per_clock;
 
 #if (BITS_PER_LONG < 64)
 u64 get_jiffies_64(void);
@@ -394,12 +395,14 @@ static inline clock_t jiffies_to_clock_t(long x)
 static inline unsigned long clock_t_to_jiffies(unsigned long x)
 {
 #if (HZ % USER_HZ)==0
+	WARN_ON((long)x < 0);
 	if (x >= ~0UL / (HZ / USER_HZ))
 		return ~0UL;
 	return x * (HZ / USER_HZ);
 #else
 	u64 jif;
 
+	WARN_ON((long)x < 0);
 	/* Don't worry about loss of precision here .. */
 	if (x >= ~0UL / HZ * USER_HZ)
 		return ~0UL;
@@ -413,6 +416,7 @@ static inline unsigned long clock_t_to_jiffies(unsigned long x)
 
 static inline u64 jiffies_64_to_clock_t(u64 x)
 {
+	WARN_ON((s64)x < 0);
 #if (TICK_NSEC % (NSEC_PER_SEC / USER_HZ)) == 0
 	do_div(x, HZ / USER_HZ);
 #else
@@ -429,6 +433,7 @@ static inline u64 jiffies_64_to_clock_t(u64 x)
 
 static inline u64 nsec_to_clock_t(u64 x)
 {
+	WARN_ON((s64)x < 0);
 #if (NSEC_PER_SEC % USER_HZ) == 0
 	do_div(x, (NSEC_PER_SEC / USER_HZ));
 #elif (USER_HZ % 512) == 0

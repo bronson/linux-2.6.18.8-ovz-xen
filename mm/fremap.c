@@ -20,6 +20,8 @@
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
 
+#include <ub/ub_vmpages.h>
+
 static int zap_pte(struct mm_struct *mm, struct vm_area_struct *vma,
 			unsigned long addr, pte_t *ptep)
 {
@@ -34,6 +36,7 @@ static int zap_pte(struct mm_struct *mm, struct vm_area_struct *vma,
 			if (pte_dirty(pte))
 				set_page_dirty(page);
 			page_remove_rmap(page);
+			pb_remove_ref(page, mm);
 			page_cache_release(page);
 		}
 	} else {
@@ -57,6 +60,10 @@ int install_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	pte_t *pte;
 	pte_t pte_val;
 	spinlock_t *ptl;
+	struct page_beancounter *pbc;
+
+	if (unlikely(pb_alloc(&pbc)))
+		goto out_nopb;
 
 	pte = get_locked_pte(mm, addr, &ptl);
 	if (!pte)
@@ -75,11 +82,14 @@ int install_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (page_mapcount(page) > INT_MAX/2)
 		goto unlock;
 
-	if (pte_none(*pte) || !zap_pte(mm, vma, addr, pte))
+	if (pte_none(*pte) || !zap_pte(mm, vma, addr, pte)) {
+		ub_unused_privvm_dec(mm, vma);
 		inc_mm_counter(mm, file_rss);
+	}
 
 	flush_icache_page(vma, page);
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
+	pb_add_ref(page, mm, &pbc);
 	page_add_file_rmap(page);
 	pte_val = *pte;
 	update_mmu_cache(vma, addr, pte_val);
@@ -88,6 +98,8 @@ int install_page(struct mm_struct *mm, struct vm_area_struct *vma,
 unlock:
 	pte_unmap_unlock(pte, ptl);
 out:
+	pb_free(&pbc);
+out_nopb:
 	return err;
 }
 EXPORT_SYMBOL(install_page);
@@ -110,6 +122,7 @@ int install_file_pte(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	if (!pte_none(*pte) && zap_pte(mm, vma, addr, pte)) {
 		update_hiwater_rss(mm);
+		ub_unused_privvm_inc(mm, vma);
 		dec_mm_counter(mm, file_rss);
 	}
 
@@ -227,4 +240,5 @@ asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
 
 	return err;
 }
+EXPORT_SYMBOL_GPL(sys_remap_file_pages);
 

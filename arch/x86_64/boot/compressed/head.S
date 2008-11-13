@@ -34,7 +34,7 @@
 startup_32:
 	cld
 	cli
-	movl $(__KERNEL_DS),%eax
+	movl $(__BOOT_DS),%eax
 	movl %eax,%ds
 	movl %eax,%es
 	movl %eax,%fs
@@ -76,7 +76,7 @@ startup_32:
 	jnz  3f
 	addl $8,%esp
 	xorl %ebx,%ebx
-	ljmp $(__KERNEL_CS), $__PHYSICAL_START
+	ljmp $(__BOOT_CS), $__PHYSICAL_START
 
 /*
  * We come here, if we were loaded high.
@@ -104,7 +104,7 @@ startup_32:
 	popl %eax	# hcount
 	movl $__PHYSICAL_START,%edi
 	cli		# make sure we don't get interrupted
-	ljmp $(__KERNEL_CS), $0x1000 # and jump to the move routine
+	ljmp $(__BOOT_CS), $0x1000 # and jump to the move routine
 
 /*
  * Routine (template) for moving the decompressed kernel in place,
@@ -127,7 +127,7 @@ move_routine_start:
 	movsl
 	movl %ebx,%esi	# Restore setup pointer
 	xorl %ebx,%ebx
-	ljmp $(__KERNEL_CS), $__PHYSICAL_START
+	ljmp $(__BOOT_CS), $__PHYSICAL_START
 move_routine_end:
 
 
@@ -137,5 +137,5 @@ user_stack:
 	.fill 4096,4,0
 stack_start:	
 	.long user_stack+4096
-	.word __KERNEL_DS
+	.word __BOOT_DS
 

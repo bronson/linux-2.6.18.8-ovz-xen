@@ -19,6 +19,9 @@ struct shmem_inode_info {
 	swp_entry_t		i_direct[SHMEM_NR_DIRECT]; /* first blocks */
 	struct list_head	swaplist;	/* chain of maybes on swap */
 	struct inode		vfs_inode;
+#ifdef CONFIG_USER_RESOURCE
+	struct user_beancounter	*shmi_ub;
+#endif
 };
 
 struct shmem_sb_info {
@@ -35,5 +38,7 @@ static inline struct shmem_inode_info *SHMEM_I(struct inode *inode)
 {
 	return container_of(inode, struct shmem_inode_info, vfs_inode);
 }
+
+extern struct file_system_type tmpfs_fs_type;
 
 #endif

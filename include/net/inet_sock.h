@@ -170,9 +170,10 @@ static inline void inet_sk_copy_descendant(struct sock *sk_to,
 extern int inet_sk_rebuild_header(struct sock *sk);
 
 static inline unsigned int inet_ehashfn(const __u32 laddr, const __u16 lport,
-					const __u32 faddr, const __u16 fport)
+					const __u32 faddr, const __u16 fport,
+					const envid_t veid)
 {
-	unsigned int h = (laddr ^ lport) ^ (faddr ^ fport);
+	int h = (laddr ^ lport) ^ (faddr ^ fport) ^ (veid ^ (veid >> 16));
 	h ^= h >> 16;
 	h ^= h >> 8;
 	return h;
@@ -185,8 +186,9 @@ static inline int inet_sk_ehashfn(const struct sock *sk)
 	const __u16 lport = inet->num;
 	const __u32 faddr = inet->daddr;
 	const __u16 fport = inet->dport;
+	envid_t veid = VEID(sk->owner_env);
 
-	return inet_ehashfn(laddr, lport, faddr, fport);
+	return inet_ehashfn(laddr, lport, faddr, fport, veid);
 }
 
 #endif	/* _INET_SOCK_H */

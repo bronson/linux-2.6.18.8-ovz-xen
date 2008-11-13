@@ -41,47 +41,6 @@
 # define GET_SIGSET(k,u)	__get_user((k)->sig[0], &(u)->sig[0])
 #endif
 
-long
-ia64_rt_sigsuspend (sigset_t __user *uset, size_t sigsetsize, struct sigscratch *scr)
-{
-	sigset_t oldset, set;
-
-	/* XXX: Don't preclude handling different sized sigset_t's.  */
-	if (sigsetsize != sizeof(sigset_t))
-		return -EINVAL;
-
-	if (!access_ok(VERIFY_READ, uset, sigsetsize))
-		return -EFAULT;
-
-	if (GET_SIGSET(&set, uset))
-		return -EFAULT;
-
-	sigdelsetmask(&set, ~_BLOCKABLE);
-
-	spin_lock_irq(&current->sighand->siglock);
-	{
-		oldset = current->blocked;
-		current->blocked = set;
-		recalc_sigpending();
-	}
-	spin_unlock_irq(&current->sighand->siglock);
-
-	/*
-	 * The return below usually returns to the signal handler.  We need to
-	 * pre-set the correct error code here to ensure that the right values
-	 * get saved in sigcontext by ia64_do_signal.
-	 */
-	scr->pt.r8 = EINTR;
-	scr->pt.r10 = -1;
-
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (ia64_do_signal(&oldset, scr, 1))
-			return -EINTR;
-	}
-}
-
 asmlinkage long
 sys_sigaltstack (const stack_t __user *uss, stack_t __user *uoss, long arg2,
 		 long arg3, long arg4, long arg5, long arg6, long arg7,
@@ -269,7 +228,7 @@ ia64_rt_sigreturn (struct sigscratch *scr)
 	si.si_signo = SIGSEGV;
 	si.si_errno = 0;
 	si.si_code = SI_KERNEL;
-	si.si_pid = current->pid;
+	si.si_pid = virt_pid(current);
 	si.si_uid = current->uid;
 	si.si_addr = sc;
 	force_sig_info(SIGSEGV, &si, current);
@@ -374,7 +333,7 @@ force_sigsegv_info (int sig, void __user *addr)
 	si.si_signo = SIGSEGV;
 	si.si_errno = 0;
 	si.si_code = SI_KERNEL;
-	si.si_pid = current->pid;
+	si.si_pid = virt_pid(current);
 	si.si_uid = current->uid;
 	si.si_addr = addr;
 	force_sig_info(SIGSEGV, &si, current);
@@ -478,10 +437,11 @@ handle_signal (unsigned long sig, struct k_sigaction *ka, siginfo_t *info, sigse
  * Note that `init' is a special process: it doesn't get signals it doesn't want to
  * handle.  Thus you cannot kill init even with a SIGKILL even by mistake.
  */
-long
-ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
+void
+ia64_do_signal (struct sigscratch *scr, long in_syscall)
 {
 	struct k_sigaction ka;
+	sigset_t *oldset;
 	siginfo_t info;
 	long restart = in_syscall;
 	long errno = scr->pt.r8;
@@ -493,9 +453,17 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 	 * doing anything if so.
 	 */
 	if (!user_mode(&scr->pt))
-		return 0;
+		return;
 
-	if (!oldset)
+	if (try_to_freeze() && !signal_pending(current)) {
+		if ((long) scr->pt.r10 != -1)
+			restart = 0;
+ 		goto no_signal;
+	}
+
+	if (test_thread_flag(TIF_RESTORE_SIGMASK))
+		oldset = &current->saved_sigmask;
+	else
 		oldset = &current->blocked;
 
 	/*
@@ -548,8 +516,10 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 				if (IS_IA32_PROCESS(&scr->pt)) {
 					scr->pt.r8 = scr->pt.r1;
 					scr->pt.cr_iip -= 2;
-				} else
+				} else {
 					ia64_decrement_ip(&scr->pt);
+					scr->pt.r10 = 0;
+				}
 				restart = 0; /* don't restart twice if handle_signal() fails... */
 			}
 		}
@@ -558,11 +528,19 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 		 * Whee!  Actually deliver the signal.  If the delivery failed, we need to
 		 * continue to iterate in this loop so we can deliver the SIGSEGV...
 		 */
-		if (handle_signal(signr, &ka, &info, oldset, scr))
-			return 1;
+		if (handle_signal(signr, &ka, &info, oldset, scr)) {
+			/* a signal was successfully delivered; the saved
+			 * sigmask will have been stored in the signal frame,
+			 * and will be restored by sigreturn, so we can simply
+			 * clear the TIF_RESTORE_SIGMASK flag */
+			if (test_thread_flag(TIF_RESTORE_SIGMASK))
+				clear_thread_flag(TIF_RESTORE_SIGMASK);
+			return;
+		}
 	}
 
 	/* Did we come from a system call? */
+no_signal:
 	if (restart) {
 		/* Restart the system call - no handlers present */
 		if (errno == ERESTARTNOHAND || errno == ERESTARTSYS || errno == ERESTARTNOINTR
@@ -582,8 +560,15 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 				ia64_decrement_ip(&scr->pt);
 				if (errno == ERESTART_RESTARTBLOCK)
 					scr->pt.r15 = __NR_restart_syscall;
+				scr->pt.r10 = 0;
 			}
 		}
 	}
-	return 0;
+
+	/* if there's no signal to deliver, we just put the saved sigmask
+	 * back */
+	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
+		clear_thread_flag(TIF_RESTORE_SIGMASK);
+		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
+	}
 }

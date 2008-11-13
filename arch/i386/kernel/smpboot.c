@@ -320,6 +320,10 @@ static void __init synchronize_tsc_bp(void)
 	}
 	if (!buggy)
 		printk("passed.\n");
+#ifdef CONFIG_VE
+	/* TSC reset. kill whatever might rely on old values */
+	VE_TASK_INFO(current)->wakeup_stamp = 0;
+#endif
 }
 
 static void __init synchronize_tsc_ap(void)
@@ -347,6 +351,10 @@ static void __init synchronize_tsc_ap(void)
 		while (atomic_read(&tsc.count_stop) != num_booting_cpus())
 			cpu_relax();
 	}
+#ifdef CONFIG_VE
+	/* TSC reset. kill whatever might rely on old values */
+	VE_TASK_INFO(current)->wakeup_stamp = 0;
+#endif
 }
 #undef NR_LOOPS
 
@@ -941,6 +949,13 @@ static int __devinit do_boot_cpu(int apicid, int cpu)
 	if (IS_ERR(idle))
 		panic("failed fork for CPU %d", cpu);
 	idle->thread.eip = (unsigned long) start_secondary;
+
+#ifdef CONFIG_VE
+	/* Cosmetic: sleep_time won't be changed afterwards for the idle
+	* thread;  keep it 0 rather than -cycles. */
+	VE_TASK_INFO(idle)->sleep_time = 0;
+#endif
+
 	/* start_eip had better be page-aligned! */
 	start_eip = setup_trampoline();
 

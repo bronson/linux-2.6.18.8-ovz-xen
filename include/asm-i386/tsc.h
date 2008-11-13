@@ -32,13 +32,17 @@ static inline cycles_t get_cycles(void)
 {
 	unsigned long long ret = 0;
 
-#ifndef CONFIG_X86_TSC
-	if (!cpu_has_tsc)
-		return 0;
-#endif
-
 #if defined(CONFIG_X86_GENERIC) || defined(CONFIG_X86_TSC)
 	rdtscll(ret);
+#elif defined(CONFIG_VE)
+	/*
+	 * get_cycles is used in the following calculations:
+	 * - VPS idle and iowait times in kernel/shced.h
+	 * - task's sleep time to be shown with SyRq-t
+	 * - kstat latencies in linux/vzstat.h
+	 * - sched latency via wakeup_stamp in linux/ve_task.h
+	 */
+#warning "some of VPS statistics won't be correct without get_cycles() (kstat_lat, ve_idle, etc)"
 #endif
 	return ret;
 }

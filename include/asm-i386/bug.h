@@ -13,7 +13,10 @@
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 #define BUG()				\
  __asm__ __volatile__(	"ud2\n"		\
+			"\t.byte 0x66\n"\
+			"\t.byte 0xb8\n" /* mov $xxx, %ax */\
 			"\t.word %c0\n"	\
+			"\t.byte 0xb8\n" /* mov $xxx, %eax */\
 			"\t.long %c1\n"	\
 			 : : "i" (__LINE__), "i" (__FILE__))
 #else

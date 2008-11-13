@@ -180,7 +180,7 @@ static int fill_pid(pid_t pid, struct task_struct *pidtsk,
 
 	if (!pidtsk) {
 		read_lock(&tasklist_lock);
-		tsk = find_task_by_pid(pid);
+		tsk = find_task_by_pid_ve(pid);
 		if (!tsk) {
 			read_unlock(&tasklist_lock);
 			return -ESRCH;
@@ -219,7 +219,7 @@ static int fill_tgid(pid_t tgid, struct task_struct *tgidtsk,
 	first = tgidtsk;
 	if (!first) {
 		read_lock(&tasklist_lock);
-		first = find_task_by_pid(tgid);
+		first = find_task_by_pid_ve(tgid);
 		if (!first) {
 			read_unlock(&tasklist_lock);
 			return -ESRCH;
@@ -251,7 +251,7 @@ static int fill_tgid(pid_t tgid, struct task_struct *tgidtsk,
 		 */
 		delayacct_add_tsk(stats, tsk);
 
-	} while_each_thread(first, tsk);
+	} while_each_thread_all(first, tsk);
 	read_unlock(&tasklist_lock);
 	stats->version = TASKSTATS_VERSION;
 

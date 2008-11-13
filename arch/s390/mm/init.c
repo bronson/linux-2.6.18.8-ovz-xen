@@ -90,6 +90,7 @@ void show_mem(void)
         printk("%d pages shared\n",shared);
         printk("%d pages swap cached\n",cached);
 }
+EXPORT_SYMBOL(show_mem);
 
 extern unsigned long __initdata zholes_size[];
 /*

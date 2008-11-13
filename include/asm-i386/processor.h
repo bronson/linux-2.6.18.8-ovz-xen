@@ -214,6 +214,21 @@ static inline unsigned int cpuid_edx(unsigned int op)
 	return edx;
 }
 
+#ifdef CONFIG_SMP
+void cpuid_on_cpu(unsigned int cpu, u32 op, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx);
+u32 cpuid_eax_on_cpu(unsigned int cpu, u32 op);
+#else
+static inline void cpuid_on_cpu(unsigned int cpu, u32 op, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx)
+{
+	cpuid(op, eax, ebx, ecx, edx);
+}
+
+static inline u32 cpuid_eax_on_cpu(unsigned int cpu, u32 op)
+{
+	return cpuid_eax(op);
+}
+#endif
+
 #define load_cr3(pgdir) write_cr3(__pa(pgdir))
 
 /*

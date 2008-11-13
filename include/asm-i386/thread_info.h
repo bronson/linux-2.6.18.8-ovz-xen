@@ -99,13 +99,13 @@ static inline struct thread_info *current_thread_info(void)
 	({							\
 		struct thread_info *ret;			\
 								\
-		ret = kmalloc(THREAD_SIZE, GFP_KERNEL);		\
+		ret = kmalloc(THREAD_SIZE, GFP_KERNEL_UBC);	\
 		if (ret)					\
 			memset(ret, 0, THREAD_SIZE);		\
 		ret;						\
 	})
 #else
-#define alloc_thread_info(tsk) kmalloc(THREAD_SIZE, GFP_KERNEL)
+#define alloc_thread_info(tsk) kmalloc(THREAD_SIZE, GFP_KERNEL_UBC)
 #endif
 
 #define free_thread_info(info)	kfree(info)
@@ -142,6 +142,7 @@ static inline struct thread_info *current_thread_info(void)
 #define TIF_MEMDIE		16
 #define TIF_DEBUG		17	/* uses debug registers */
 #define TIF_IO_BITMAP		18	/* uses I/O bitmap */
+#define TIF_FREEZE		19	/* Freeze request (atomic PF_FREEZE) */
 
 #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
 #define _TIF_NOTIFY_RESUME	(1<<TIF_NOTIFY_RESUME)

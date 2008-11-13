@@ -80,6 +80,11 @@ static int nf_sockopt(struct sock *sk, int pf, int val,
 	struct nf_sockopt_ops *ops;
 	int ret;
 
+#ifdef CONFIG_VE_IPTABLES
+	if (!get_exec_env()->_nf_hooks)
+		return -ENOPROTOOPT;
+#endif
+
 	if (mutex_lock_interruptible(&nf_sockopt_mutex) != 0)
 		return -EINTR;
 
@@ -137,6 +142,11 @@ static int compat_nf_sockopt(struct sock *sk, int pf, int val,
 	struct list_head *i;
 	struct nf_sockopt_ops *ops;
 	int ret;
+
+#ifdef CONFIG_VE_IPTABLES
+       if (!get_exec_env()->_nf_hooks)
+               return -ENOPROTOOPT;
+#endif
 
 	if (mutex_lock_interruptible(&nf_sockopt_mutex) != 0)
 		return -EINTR;

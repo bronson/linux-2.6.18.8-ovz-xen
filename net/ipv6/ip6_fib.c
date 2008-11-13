@@ -1126,8 +1126,12 @@ static int fib6_age(struct rt6_info *rt, void *arg)
 
 static DEFINE_SPINLOCK(fib6_gc_lock);
 
+LIST_HEAD(fib6_table_list);
+
 void fib6_run_gc(unsigned long dummy)
 {
+	struct fib6_table *tbl;
+
 	if (dummy != ~0UL) {
 		spin_lock_bh(&fib6_gc_lock);
 		gc_args.timeout = dummy ? (int)dummy : ip6_rt_gc_interval;
@@ -1145,7 +1149,11 @@ void fib6_run_gc(unsigned long dummy)
 
 	write_lock_bh(&rt6_lock);
 	ndisc_dst_gc(&gc_args.more);
-	fib6_clean_tree(&ip6_routing_table, fib6_age, 0, NULL);
+	list_for_each_entry(tbl, &fib6_table_list, list) {
+		struct ve_struct *old_env = set_exec_env(tbl->owner_env);
+		fib6_clean_tree(&tbl->root, fib6_age, 0, NULL);
+		set_exec_env(old_env);
+	}
 	write_unlock_bh(&rt6_lock);
 
 	if (gc_args.more)
@@ -1161,7 +1169,7 @@ void __init fib6_init(void)
 {
 	fib6_node_kmem = kmem_cache_create("fib6_nodes",
 					   sizeof(struct fib6_node),
-					   0, SLAB_HWCACHE_ALIGN,
+					   0, SLAB_HWCACHE_ALIGN | SLAB_UBC,
 					   NULL, NULL);
 	if (!fib6_node_kmem)
 		panic("cannot create fib6_nodes cache");

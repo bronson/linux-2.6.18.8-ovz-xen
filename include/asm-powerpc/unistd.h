@@ -324,9 +324,23 @@
 #define __NR_get_robust_list	299
 #define __NR_set_robust_list	300
 
+#define __NR_utimensat		304
+
+#define __NR_fairsched_mknod	400
+#define __NR_fairsched_rmnod	401
+#define __NR_fairsched_chwt	402
+#define __NR_fairsched_mvpr	403
+#define __NR_fairsched_rate	404
+#define __NR_fairsched_vcpus	405
+
+#define __NR_getluid            410
+#define __NR_setluid            411
+#define __NR_setublimit         412
+#define __NR_ubstat             413
+
 #ifdef __KERNEL__
 
-#define __NR_syscalls		301
+#define __NR_syscalls		414
 
 #define __NR__exit __NR_exit
 #define NR_syscalls	__NR_syscalls

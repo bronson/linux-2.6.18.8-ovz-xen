@@ -21,6 +21,7 @@
 #include <linux/mount.h>
 #include <linux/uio.h>
 #include <linux/namei.h>
+#include <linux/ve_proto.h>
 #include <asm/uaccess.h>
 
 struct bdev_inode {
@@ -947,9 +948,15 @@ do_open(struct block_device *bdev, struct file *file, unsigned int subclass)
 {
 	struct module *owner = NULL;
 	struct gendisk *disk;
-	int ret = -ENXIO;
+	int ret;
 	int part;
 
+	ret = get_device_perms_ve(S_IFBLK, bdev->bd_dev,
+				  file->f_mode & (FMODE_READ | FMODE_WRITE));
+	if (ret)
+	        return ret;
+
+	ret = -ENXIO;
 	file->f_mapping = bdev->bd_inode->i_mapping;
 	lock_kernel();
 	disk = get_gendisk(bdev->bd_dev, &part);
@@ -1215,7 +1222,7 @@ EXPORT_SYMBOL(ioctl_by_bdev);
  * namespace if possible and return it.  Return ERR_PTR(error)
  * otherwise.
  */
-struct block_device *lookup_bdev(const char *path)
+struct block_device *lookup_bdev(const char *path, int mode)
 {
 	struct block_device *bdev;
 	struct inode *inode;
@@ -1233,6 +1240,11 @@ struct block_device *lookup_bdev(const char *path)
 	error = -ENOTBLK;
 	if (!S_ISBLK(inode->i_mode))
 		goto fail;
+
+	error = get_device_perms_ve(S_IFBLK, inode->i_rdev, mode);
+	if (error)
+		goto fail;
+
 	error = -EACCES;
 	if (nd.mnt->mnt_flags & MNT_NODEV)
 		goto fail;
@@ -1264,12 +1276,13 @@ struct block_device *open_bdev_excl(const char *path, int flags, void *holder)
 	mode_t mode = FMODE_READ;
 	int error = 0;
 
-	bdev = lookup_bdev(path);
+	if (!(flags & MS_RDONLY))
+		mode |= FMODE_WRITE;
+
+	bdev = lookup_bdev(path, mode);
 	if (IS_ERR(bdev))
 		return bdev;
 
-	if (!(flags & MS_RDONLY))
-		mode |= FMODE_WRITE;
 	error = blkdev_get(bdev, mode, 0);
 	if (error)
 		return ERR_PTR(error);

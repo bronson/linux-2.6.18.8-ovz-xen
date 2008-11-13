@@ -11,6 +11,7 @@
 #include <asm/delay.h>
 #include <linux/pci.h>
 #include <linux/reboot_fixups.h>
+#include <linux/interrupt.h>
 
 static void cs5530a_warm_reset(struct pci_dev *dev)
 {
@@ -42,6 +43,11 @@ void mach_reboot_fixups(void)
 	struct device_fixup *cur;
 	struct pci_dev *dev;
 	int i;
+
+	/* we can be called from sysrq-B code. In such a case it is
+	 * prohibited to dig PCI */
+	if (in_interrupt())
+		return;
 
 	for (i=0; i < ARRAY_SIZE(fixups_table); i++) {
 		cur = &(fixups_table[i]);

@@ -198,7 +198,7 @@ do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, un
 
 	/* Careful about overflows.. */
 	len = PAGE_ALIGN(len);
-	if (!len || len > TASK_SIZE) {
+	if (len > TASK_SIZE) {
 		addr = -EINVAL;
 		goto out;
 	}

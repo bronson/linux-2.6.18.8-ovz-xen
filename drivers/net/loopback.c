@@ -59,6 +59,13 @@
 #include <linux/percpu.h>
 
 static DEFINE_PER_CPU(struct net_device_stats, loopback_stats);
+#ifdef CONFIG_VE
+#define LOOPBACK_STATS(cpu)	((ve_is_super(get_exec_env())) ?	\
+				&per_cpu(loopback_stats, cpu) :		\
+				per_cpu_ptr(get_exec_env()->_loopback_stats, cpu))
+#else
+#define LOOPBACK_STATS(cpu)	&per_cpu(loopback_stats, cpu)
+#endif
 
 #define LOOPBACK_OVERHEAD (128 + MAX_HEADER + 16 + 16)
 
@@ -130,6 +137,11 @@ static int loopback_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_device_stats *lb_stats;
 
+	if (unlikely(get_exec_env()->disable_net)) {
+		kfree_skb(skb);
+		return 0;
+	}
+
 	skb_orphan(skb);
 
 	skb->protocol = eth_type_trans(skb,dev);
@@ -149,7 +161,7 @@ static int loopback_xmit(struct sk_buff *skb, struct net_device *dev)
 #endif
 	dev->last_rx = jiffies;
 
-	lb_stats = &per_cpu(loopback_stats, get_cpu());
+	lb_stats = LOOPBACK_STATS(get_cpu());
 	lb_stats->rx_bytes += skb->len;
 	lb_stats->tx_bytes = lb_stats->rx_bytes;
 	lb_stats->rx_packets++;
@@ -175,7 +187,7 @@ static struct net_device_stats *get_stats(struct net_device *dev)
 	for_each_possible_cpu(i) {
 		struct net_device_stats *lb_stats;
 
-		lb_stats = &per_cpu(loopback_stats, i);
+		lb_stats = LOOPBACK_STATS(i);
 		stats->rx_bytes   += lb_stats->rx_bytes;
 		stats->tx_bytes   += lb_stats->tx_bytes;
 		stats->rx_packets += lb_stats->rx_packets;
@@ -195,6 +207,36 @@ static struct ethtool_ops loopback_ethtool_ops = {
 	.get_tso		= ethtool_op_get_tso,
 	.set_tso		= ethtool_op_set_tso,
 };
+
+static void loopback_destructor(struct net_device *dev)
+{
+	kfree(dev->priv);
+	dev->priv = NULL;
+}
+
+struct net_device templ_loopback_dev = {
+	.name	 		= "lo",
+	.get_stats		= get_stats,
+	.destructor		= loopback_destructor,
+	.mtu			= (16 * 1024) + 20 + 20 + 12,
+	.hard_start_xmit	= loopback_xmit,
+	.hard_header		= eth_header,
+	.hard_header_cache	= eth_header_cache,
+	.header_cache_update	= eth_header_cache_update,
+	.hard_header_len	= ETH_HLEN,	/* 14	*/
+	.addr_len		= ETH_ALEN,	/* 6	*/
+	.tx_queue_len		= 0,
+	.type			= ARPHRD_LOOPBACK,	/* 0x0001*/
+	.rebuild_header		= eth_rebuild_header,
+	.flags			= IFF_LOOPBACK,
+	.features 		= NETIF_F_SG|NETIF_F_FRAGLIST
+				  |NETIF_F_NO_CSUM|NETIF_F_HIGHDMA
+				  |NETIF_F_LLTX|NETIF_F_VIRTUAL,
+};
+
+#ifdef loopback_dev
+#undef loopback_dev
+#endif
 
 struct net_device loopback_dev = {
 	.name	 		= "lo",
@@ -229,9 +271,13 @@ int __init loopback_init(void)
 		memset(stats, 0, sizeof(struct net_device_stats));
 		loopback_dev.priv = stats;
 		loopback_dev.get_stats = &get_stats;
+		loopback_dev.destructor = &loopback_destructor;
 	}
-	
+#ifdef CONFIG_VE
+	get_ve0()->_loopback_dev = &loopback_dev;
+#endif
 	return register_netdev(&loopback_dev);
 };
 
 EXPORT_SYMBOL(loopback_dev);
+EXPORT_SYMBOL(templ_loopback_dev);

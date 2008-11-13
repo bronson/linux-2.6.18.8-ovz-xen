@@ -318,6 +318,9 @@
 #define __NR_unshare		299
 #define __NR_set_robust_list	300
 #define __NR_get_robust_list	301
+#define __NR_utimensat		310
+
+#define NR_SYSCALLS		311
 
 #define NR_SYSCALLS		302
 

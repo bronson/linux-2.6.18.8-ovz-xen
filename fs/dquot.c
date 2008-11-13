@@ -158,7 +158,9 @@ static struct quota_format_type *find_quota_format(int id)
 	struct quota_format_type *actqf;
 
 	spin_lock(&dq_list_lock);
-	for (actqf = quota_formats; actqf && actqf->qf_fmt_id != id; actqf = actqf->qf_next);
+	for (actqf = quota_formats;
+		 actqf && (actqf->qf_fmt_id != id || actqf->qf_ops == NULL);
+						 actqf = actqf->qf_next);
 	if (!actqf || !try_module_get(actqf->qf_owner)) {
 		int qm;
 

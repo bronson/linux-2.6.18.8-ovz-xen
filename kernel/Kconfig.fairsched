@@ -1,0 +1,22 @@
+config SCHED_VCPU
+	bool "VCPU scheduler support"
+	default y
+	help
+	  VCPU scheduler support adds additional layer of abstraction
+	  which allows to virtualize cpu notion and split physical cpus
+	  and virtual cpus. This support allows to use CPU fair scheduler,
+	  dynamically add/remove cpus to/from VPS and so on.
+
+config FAIRSCHED
+	bool "Fair CPU scheduler (EXPERIMENTAL)"
+	depends on SCHED_VCPU
+	default SCHED_VCPU
+	help
+	  Config option for Fair CPU scheduler (fairsched).
+	  This option allows to group processes to scheduling nodes
+	  which receive CPU proportional to their weight.
+	  This is very important feature for process groups isolation and
+	  QoS management.
+
+	  If unsure, say N.
+

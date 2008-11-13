@@ -37,6 +37,7 @@ static int errno;
 #include <asm/ebus.h>
 #include <asm/uaccess.h>
 #include <asm/envctrl.h>
+#include <asm/unistd.h>
 
 #define ENVCTRL_MINOR	162
 

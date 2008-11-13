@@ -42,6 +42,10 @@ update-po-config: $(obj)/kxgettext
 	$(Q)rm -f arch/um/Kconfig_arch
 	$(Q)rm -f scripts/kconfig/linux_*.pot scripts/kconfig/config.pot
 
+nonint_oldconfig: scripts/kconfig/conf
+	./scripts/kconfig/conf -b arch/$(ARCH)/Kconfig
+
+
 PHONY += randconfig allyesconfig allnoconfig allmodconfig defconfig
 
 randconfig: $(obj)/conf

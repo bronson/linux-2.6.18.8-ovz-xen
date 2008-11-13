@@ -73,6 +73,7 @@ void page_add_anon_rmap(struct page *, struct vm_area_struct *, unsigned long);
 void page_add_new_anon_rmap(struct page *, struct vm_area_struct *, unsigned long);
 void page_add_file_rmap(struct page *);
 void page_remove_rmap(struct page *);
+struct anon_vma *page_lock_anon_vma(struct page *page);
 
 /**
  * page_dup_rmap - duplicate pte mapping to a page

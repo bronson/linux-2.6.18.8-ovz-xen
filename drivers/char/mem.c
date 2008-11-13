@@ -682,16 +682,27 @@ out:
 	return written ? written : -EFAULT;
 }
 
+static struct page * zero_vm_nopage(struct vm_area_struct * vma,
+		unsigned long address, int * type)
+{
+	struct page *zero_page = ZERO_PAGE(address);
+	get_page(zero_page);
+	return zero_page;
+}
+
+struct vm_operations_struct zero_vm_ops =
+{
+	.nopage = zero_vm_nopage,
+};
+
 static int mmap_zero(struct file * file, struct vm_area_struct * vma)
 {
 	int err;
 
 	if (vma->vm_flags & VM_SHARED)
 		return shmem_zero_setup(vma);
-	err = zeromap_page_range(vma, vma->vm_start,
-			vma->vm_end - vma->vm_start, vma->vm_page_prot);
-	BUG_ON(err == -EEXIST);
-	return err;
+	vma->vm_ops = &zero_vm_ops;
+	return 0;
 }
 #else /* CONFIG_MMU */
 static ssize_t read_zero(struct file * file, char * buf, 

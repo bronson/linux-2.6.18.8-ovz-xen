@@ -30,6 +30,7 @@
 #include <linux/pagevec.h>
 #include <linux/smp_lock.h>
 #include <linux/writeback.h>
+#include <linux/task_io_accounting_ops.h>
 #include <linux/delay.h>
 #include <asm/div64.h>
 #include "cifsfs.h"
@@ -465,7 +466,7 @@ static int cifs_reopen_file(struct inode *inode, struct file *file,
 int cifs_close(struct inode *inode, struct file *file)
 {
 	int rc = 0;
-	int xid;
+	int xid, timeout;
 	struct cifs_sb_info *cifs_sb;
 	struct cifsTconInfo *pTcon;
 	struct cifsFileInfo *pSMBFile =
@@ -483,9 +484,9 @@ int cifs_close(struct inode *inode, struct file *file)
 			/* no sense reconnecting to close a file that is
 			   already closed */
 			if (pTcon->tidStatus != CifsNeedReconnect) {
-				int timeout = 2;
+				timeout = 2;
 				while((atomic_read(&pSMBFile->wrtPending) != 0)
-					 && (timeout < 1000) ) {
+					&& (timeout <= 2048)) {
 					/* Give write a better chance to get to
 					server ahead of the close.  We do not
 					want to add a wait_q here as it would
@@ -515,6 +516,23 @@ int cifs_close(struct inode *inode, struct file *file)
 		list_del(&pSMBFile->flist);
 		list_del(&pSMBFile->tlist);
 		write_unlock(&GlobalSMBSeslock);
+		timeout = 10;
+		/* We waited above to give the SMBWrite a chance to issue
+		   on the wire (so we do not get SMBWrite returning EBADF
+		   if writepages is racing with close.  Note that writepages
+		   does not specify a file handle, so it is possible for a file
+		   to be opened twice, and the application close the "wrong"
+		   file handle - in these cases we delay long enough to allow
+		   the SMBWrite to get on the wire before the SMB Close.
+		   We allow total wait here over 45 seconds, more than
+		   oplock break time, and more than enough to allow any write
+		   to complete on the server, or to time out on the client */
+		while ((atomic_read(&pSMBFile->wrtPending) != 0)
+				&& (timeout <= 50000)) {
+			cERROR(1, ("writes pending, delay free of handle"));
+			msleep(timeout);
+			timeout *= 8;
+		}
 		kfree(pSMBFile->search_resume_name);
 		kfree(file->private_data);
 		file->private_data = NULL;
@@ -813,9 +831,9 @@ ssize_t cifs_user_write(struct file *file, const char __user *write_data,
 	}
 
 	if (*poffset > file->f_dentry->d_inode->i_size)
-		long_op = 2; /* writes past end of file can take a long time */
+		long_op = CIFS_VLONG_OP; /* writes past EOF take long time */
 	else
-		long_op = 1;
+		long_op = CIFS_LONG_OP;
 
 	for (total_written = 0; write_size > total_written;
 	     total_written += bytes_written) {
@@ -868,7 +886,7 @@ ssize_t cifs_user_write(struct file *file, const char __user *write_data,
 			}
 		} else
 			*poffset += bytes_written;
-		long_op = FALSE; /* subsequent writes fast -
+		long_op = CIFS_STD_OP; /* subsequent writes fast -
 				    15 seconds is plenty */
 	}
 
@@ -927,9 +945,9 @@ static ssize_t cifs_write(struct file *file, const char *write_data,
 	}
 
 	if (*poffset > file->f_dentry->d_inode->i_size)
-		long_op = 2; /* writes past end of file can take a long time */
+		long_op = CIFS_VLONG_OP; /* writes past EOF take a long time */
 	else
-		long_op = 1;
+		long_op = CIFS_LONG_OP;
 
 	for (total_written = 0; write_size > total_written;
 	     total_written += bytes_written) {
@@ -1001,7 +1019,7 @@ static ssize_t cifs_write(struct file *file, const char *write_data,
 			}
 		} else
 			*poffset += bytes_written;
-		long_op = FALSE; /* subsequent writes fast - 
+		long_op = CIFS_STD_OP; /* subsequent writes fast - 
 				    15 seconds is plenty */
 	}
 
@@ -1048,8 +1066,7 @@ struct cifsFileInfo *find_writable_file(struct cifsInodeInfo *cifs_inode)
 		     (open_file->pfile->f_flags & O_WRONLY))) {
 			atomic_inc(&open_file->wrtPending);
 			read_unlock(&GlobalSMBSeslock);
-			if((open_file->invalidHandle) && 
-			   (!open_file->closePend) /* BB fixme -since the second clause can not be true remove it BB */) {
+			if (open_file->invalidHandle) {
 				rc = cifs_reopen_file(&cifs_inode->vfs_inode, 
 						      open_file->pfile, FALSE);
 				/* if it fails, try another handle - might be */
@@ -1063,6 +1080,11 @@ struct cifsFileInfo *find_writable_file(struct cifsInodeInfo *cifs_inode)
 					     (&open_file->wrtPending);
 					continue;
 				}
+			}
+			if (open_file->closePend) {
+				read_lock(&GlobalSMBSeslock);
+				atomic_dec(&open_file->wrtPending);
+				continue;
 			}
 			return open_file;
 		}
@@ -1288,7 +1310,7 @@ retry:
 						   open_file->netfid,
 						   bytes_to_write, offset,
 						   &bytes_written, iov, n_iov,
-						   1);
+						   CIFS_LONG_OP);
 				atomic_dec(&open_file->wrtPending);
 				if (rc || bytes_written < bytes_to_write) {
 					cERROR(1,("Write2 ret %d, written = %d",
@@ -1816,6 +1838,7 @@ static int cifs_readpages(struct file *file, struct address_space *mapping,
 			}
 			break;
 		} else if (bytes_read > 0) {
+			task_io_account_read(bytes_read);
 			pSMBr = (struct smb_com_read_rsp *)smb_read_data;
 			cifs_copy_cache_pages(mapping, page_list, bytes_read,
 				smb_read_data + 4 /* RFC1001 hdr */ +

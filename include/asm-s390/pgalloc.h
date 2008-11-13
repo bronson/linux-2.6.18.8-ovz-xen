@@ -33,12 +33,12 @@ static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 	int i;
 
 #ifndef __s390x__
-	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL,1);
+	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL_UBC | __GFP_SOFT_UBC, 1);
         if (pgd != NULL)
 		for (i = 0; i < USER_PTRS_PER_PGD; i++)
 			pmd_clear(pmd_offset(pgd + i, i*PGDIR_SIZE));
 #else /* __s390x__ */
-	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL,2);
+	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL_UBC | __GFP_SOFT_UBC, 2);
         if (pgd != NULL)
 		for (i = 0; i < PTRS_PER_PGD; i++)
 			pgd_clear(pgd + i);
@@ -71,7 +71,7 @@ static inline pmd_t * pmd_alloc_one(struct mm_struct *mm, unsigned long vmaddr)
 	pmd_t *pmd;
         int i;
 
-	pmd = (pmd_t *) __get_free_pages(GFP_KERNEL, 2);
+	pmd = (pmd_t *) __get_free_pages(GFP_KERNEL_UBC | __GFP_SOFT_UBC, 2);
 	if (pmd != NULL) {
 		for (i=0; i < PTRS_PER_PMD; i++)
 			pmd_clear(pmd+i);
@@ -117,16 +117,13 @@ pmd_populate(struct mm_struct *mm, pmd_t *pmd, struct page *page)
 	pmd_populate_kernel(mm, pmd, (pte_t *)((page-mem_map) << PAGE_SHIFT));
 }
 
-/*
- * page table entry allocation/free routines.
- */
-static inline pte_t *
-pte_alloc_one_kernel(struct mm_struct *mm, unsigned long vmaddr)
+static inline pte_t *pte_alloc(struct mm_struct *mm, unsigned long vmaddr,
+		gfp_t mask)
 {
 	pte_t *pte;
         int i;
 
-	pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+	pte = (pte_t *)__get_free_page(mask);
 	if (pte != NULL) {
 		for (i=0; i < PTRS_PER_PTE; i++) {
 			pte_clear(mm, vmaddr, pte+i);
@@ -136,10 +133,20 @@ pte_alloc_one_kernel(struct mm_struct *mm, unsigned long vmaddr)
 	return pte;
 }
 
+/*
+ * page table entry allocation/free routines.
+ */
+static inline pte_t *
+pte_alloc_one_kernel(struct mm_struct *mm, unsigned long vmaddr)
+{
+	return pte_alloc(mm, vmaddr, GFP_KERNEL | __GFP_REPEAT);
+}
+
 static inline struct page *
 pte_alloc_one(struct mm_struct *mm, unsigned long vmaddr)
 {
-	pte_t *pte = pte_alloc_one_kernel(mm, vmaddr);
+	pte_t *pte = pte_alloc(mm, vmaddr, GFP_KERNEL_UBC | __GFP_SOFT_UBC |
+			__GFP_REPEAT);
 	if (pte)
 		return virt_to_page(pte);
 	return NULL;

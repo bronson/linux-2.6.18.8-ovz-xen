@@ -94,6 +94,7 @@ struct frag_queue
 #define FIRST_IN		2
 #define LAST_IN			1
 	__u16			nhoffset;
+	struct ve_struct *owner_env;
 };
 
 /* Hash table. */
@@ -292,7 +293,9 @@ static void ip6_frag_expire(unsigned long data)
 {
 	struct frag_queue *fq = (struct frag_queue *) data;
 	struct net_device *dev;
+	struct ve_struct *envid;
 
+	envid = set_exec_env(fq->owner_env);
 	spin_lock(&fq->lock);
 
 	if (fq->last_in & COMPLETE)
@@ -322,6 +325,8 @@ static void ip6_frag_expire(unsigned long data)
 out:
 	spin_unlock(&fq->lock);
 	fq_put(fq, NULL);
+
+	(void)set_exec_env(envid);
 }
 
 /* Creation primitives. */
@@ -341,7 +346,8 @@ static struct frag_queue *ip6_frag_intern(struct frag_queue *fq_in)
 	hlist_for_each_entry(fq, n, &ip6_frag_hash[hash], list) {
 		if (fq->id == fq_in->id && 
 		    ipv6_addr_equal(&fq_in->saddr, &fq->saddr) &&
-		    ipv6_addr_equal(&fq_in->daddr, &fq->daddr)) {
+		    ipv6_addr_equal(&fq_in->daddr, &fq->daddr) &&
+		    fq->owner_env == get_exec_env()) {
 			atomic_inc(&fq->refcnt);
 			write_unlock(&ip6_frag_lock);
 			fq_in->last_in |= COMPLETE;
@@ -382,6 +388,7 @@ ip6_frag_create(u32 id, struct in6_addr *src, struct in6_addr *dst)
 	fq->timer.data = (long) fq;
 	spin_lock_init(&fq->lock);
 	atomic_set(&fq->refcnt, 1);
+	fq->owner_env = get_exec_env();
 
 	return ip6_frag_intern(fq);
 
@@ -402,7 +409,8 @@ fq_find(u32 id, struct in6_addr *src, struct in6_addr *dst)
 	hlist_for_each_entry(fq, n, &ip6_frag_hash[hash], list) {
 		if (fq->id == id && 
 		    ipv6_addr_equal(src, &fq->saddr) &&
-		    ipv6_addr_equal(dst, &fq->daddr)) {
+		    ipv6_addr_equal(dst, &fq->daddr) &&
+		    fq->owner_env == get_exec_env()) {
 			atomic_inc(&fq->refcnt);
 			read_unlock(&ip6_frag_lock);
 			return fq;
@@ -731,6 +739,9 @@ static int ipv6_frag_rcv(struct sk_buff **skbp)
 		    fq->meat == fq->len)
 			ret = ip6_frag_reasm(fq, skbp, dev);
 
+		if (ret > 0)
+			(*skbp)->owner_env = skb->owner_env;
+
 		spin_unlock(&fq->lock);
 		fq_put(fq, NULL);
 		return ret;
@@ -740,6 +751,48 @@ static int ipv6_frag_rcv(struct sk_buff **skbp)
 	kfree_skb(skb);
 	return -1;
 }
+
+#ifdef CONFIG_VE
+/* XXX */
+void ip6_frag_cleanup(struct ve_struct *envid)
+{
+	int i, progress;
+
+	local_bh_disable();
+	do {
+		progress = 0;
+		for (i = 0; i < IP6Q_HASHSZ; i++) {
+			struct frag_queue *fq;
+			struct hlist_node *p, *n;
+
+			if (hlist_empty(&ip6_frag_hash[i]))
+				continue;
+inner_restart:
+			read_lock(&ip6_frag_lock);
+			hlist_for_each_entry_safe(fq, p, n,
+					&ip6_frag_hash[i], list) {
+				if (!ve_accessible_strict(fq->owner_env, envid))
+					continue;
+				atomic_inc(&fq->refcnt);
+				read_unlock(&ip6_frag_lock);
+
+				spin_lock(&fq->lock);
+				if (!(fq->last_in&COMPLETE))
+					fq_kill(fq);
+				spin_unlock(&fq->lock);
+
+				fq_put(fq, NULL);
+				progress = 1;
+				goto inner_restart;
+			}
+			read_unlock(&ip6_frag_lock);
+		}
+	} while(progress);
+	local_bh_enable();
+}
+EXPORT_SYMBOL(ip6_frag_cleanup);
+#endif
+
 
 static struct inet6_protocol frag_protocol =
 {

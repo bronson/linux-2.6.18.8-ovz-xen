@@ -44,6 +44,18 @@ MODULE_PARM_DESC(ip_pkt_list_tot, "number of packets per IP to remember (max. 25
 MODULE_PARM_DESC(ip_list_hash_size, "size of hash table used to look up IPs");
 MODULE_PARM_DESC(ip_list_perms, "permissions on /proc/net/ipt_recent/* files");
 
+#include <linux/sched.h>
+
+#if defined(CONFIG_VE_IPTABLES)
+#define tables		(get_exec_env()->_ipt_recent->tables)
+#define proc_dir	(get_exec_env()->_ipt_recent->proc_dir)
+#else
+static LIST_HEAD(tables);
+static struct proc_dir_entry	*proc_dir;
+#endif /* CONFIG_VE_IPTABLES */
+
+static int init_ipt_recent(void);
+static void fini_ipt_recent(void);
 
 struct recent_entry {
 	struct list_head	list;
@@ -67,12 +79,10 @@ struct recent_table {
 	struct list_head	iphash[0];
 };
 
-static LIST_HEAD(tables);
 static DEFINE_SPINLOCK(recent_lock);
 static DEFINE_MUTEX(recent_mutex);
 
 #ifdef CONFIG_PROC_FS
-static struct proc_dir_entry	*proc_dir;
 static struct file_operations	recent_fops;
 #endif
 
@@ -237,8 +247,10 @@ ipt_recent_checkentry(const char *tablename, const void *ip,
 	const struct ipt_recent_info *info = matchinfo;
 	struct recent_table *t;
 	unsigned i;
+	struct ve_struct *env;
 	int ret = 0;
 
+	env = get_exec_env();
 	if (hweight8(info->check_set &
 		     (IPT_RECENT_SET | IPT_RECENT_REMOVE |
 		      IPT_RECENT_CHECK | IPT_RECENT_UPDATE)) != 1)
@@ -248,6 +260,9 @@ ipt_recent_checkentry(const char *tablename, const void *ip,
 		return 0;
 	if (info->name[0] == '\0' ||
 	    strnlen(info->name, IPT_RECENT_NAME_LEN) == IPT_RECENT_NAME_LEN)
+		return 0;
+
+	if (init_ipt_recent())
 		return 0;
 
 	mutex_lock(&recent_mutex);
@@ -291,6 +306,13 @@ ipt_recent_destroy(const struct xt_match *match, void *matchinfo,
 {
 	const struct ipt_recent_info *info = matchinfo;
 	struct recent_table *t;
+	struct ve_struct *env;
+
+	env = get_exec_env();
+#ifdef CONFIG_VE_IPTABLES
+	if (!env->_ipt_recent)
+		return;
+#endif
 
 	mutex_lock(&recent_mutex);
 	t = recent_table_lookup(info->name);
@@ -305,6 +327,8 @@ ipt_recent_destroy(const struct xt_match *match, void *matchinfo,
 		kfree(t);
 	}
 	mutex_unlock(&recent_mutex);
+	if ((!ve_is_super(env)) && list_empty(&tables))
+		fini_ipt_recent();
 }
 
 #ifdef CONFIG_PROC_FS
@@ -465,6 +489,57 @@ static struct ipt_match recent_match = {
 	.me		= THIS_MODULE,
 };
 
+static int init_ipt_recent(void)
+{
+	struct ve_struct *env;
+	int err = 0;
+
+	env = get_exec_env();
+#ifdef CONFIG_VE_IPTABLES
+	if (env->_ipt_recent)
+		return 0;
+
+	env->_ipt_recent =
+		kmalloc(sizeof(struct ve_ipt_recent), GFP_KERNEL);
+	if (!env->_ipt_recent) {
+		err = -ENOMEM;
+		goto out;
+	}
+	memset(env->_ipt_recent, 0, sizeof(struct ve_ipt_recent));
+
+	INIT_LIST_HEAD(&tables);
+#endif
+#ifdef CONFIG_PROC_FS
+	if (err)
+		return err;
+	proc_dir = proc_mkdir("ipt_recent", proc_net);
+	if (proc_dir == NULL) {
+		err = -ENOMEM;
+		goto out_mem;
+	}
+#endif
+out:
+	return err;
+out_mem:
+	kfree(env->_ipt_recent);
+	goto out;
+}
+
+static void fini_ipt_recent(void)
+{
+	struct ve_struct *env;
+
+	env = get_exec_env();
+#ifdef CONFIG_PROC_FS
+	remove_proc_entry("ipt_recent", proc_net);
+#endif
+#ifdef CONFIG_VE_IPTABLES
+	if (env->_ipt_recent)
+		kfree(env->_ipt_recent);
+	env->_ipt_recent = NULL;
+#endif
+}
+
 static int __init ipt_recent_init(void)
 {
 	int err;
@@ -474,25 +549,24 @@ static int __init ipt_recent_init(void)
 	ip_list_hash_size = 1 << fls(ip_list_tot);
 
 	err = ipt_register_match(&recent_match);
-#ifdef CONFIG_PROC_FS
 	if (err)
 		return err;
-	proc_dir = proc_mkdir("ipt_recent", proc_net);
-	if (proc_dir == NULL) {
+
+	err = init_ipt_recent();
+	if (err) {
 		ipt_unregister_match(&recent_match);
-		err = -ENOMEM;
+		return err;
 	}
-#endif
-	return err;
+
+	return 0;
 }
 
 static void __exit ipt_recent_exit(void)
 {
 	BUG_ON(!list_empty(&tables));
+
+	fini_ipt_recent();
 	ipt_unregister_match(&recent_match);
-#ifdef CONFIG_PROC_FS
-	remove_proc_entry("ipt_recent", proc_net);
-#endif
 }
 
 module_init(ipt_recent_init);

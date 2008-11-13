@@ -836,7 +836,7 @@ static void mrtsock_destruct(struct sock *sk)
 {
 	rtnl_lock();
 	if (sk == mroute_socket) {
-		ipv4_devconf.mc_forwarding--;
+		ve_ipv4_devconf.mc_forwarding--;
 
 		write_lock_bh(&mrt_lock);
 		mroute_socket=NULL;
@@ -887,7 +887,7 @@ int ip_mroute_setsockopt(struct sock *sk,int optname,char __user *optval,int opt
 				mroute_socket=sk;
 				write_unlock_bh(&mrt_lock);
 
-				ipv4_devconf.mc_forwarding++;
+				ve_ipv4_devconf.mc_forwarding++;
 			}
 			rtnl_unlock();
 			return ret;

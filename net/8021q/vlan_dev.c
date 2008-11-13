@@ -436,6 +436,7 @@ int vlan_dev_hard_header(struct sk_buff *skb, struct net_device *dev,
 
 int vlan_dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
+	struct ve_struct *env;
 	struct net_device_stats *stats = vlan_dev_get_stats(dev);
 	struct vlan_ethhdr *veth = (struct vlan_ethhdr *)(skb->data);
 
@@ -489,13 +490,17 @@ int vlan_dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	stats->tx_bytes += skb->len;
 
 	skb->dev = VLAN_DEV_INFO(dev)->real_dev;
+	skb->owner_env = skb->dev->owner_env;
+	env = set_exec_env(skb->owner_env);
 	dev_queue_xmit(skb);
+	set_exec_env(env);
 
 	return 0;
 }
 
 int vlan_dev_hwaccel_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
+	struct ve_struct *env;
 	struct net_device_stats *stats = vlan_dev_get_stats(dev);
 	unsigned short veth_TCI;
 
@@ -513,7 +518,10 @@ int vlan_dev_hwaccel_hard_start_xmit(struct sk_buff *skb, struct net_device *dev
 	stats->tx_bytes += skb->len;
 
 	skb->dev = VLAN_DEV_INFO(dev)->real_dev;
+	skb->owner_env = skb->dev->owner_env;
+	env = set_exec_env(skb->owner_env);
 	dev_queue_xmit(skb);
+	set_exec_env(env);
 
 	return 0;
 }

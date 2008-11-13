@@ -20,7 +20,7 @@ static int check_clock(const clockid_t which_clock)
 		return 0;
 
 	read_lock(&tasklist_lock);
-	p = find_task_by_pid(pid);
+	p = find_task_by_pid_ve(pid);
 	if (!p || (CPUCLOCK_PERTHREAD(which_clock) ?
 		   p->tgid != current->tgid : p->tgid != pid)) {
 		error = -EINVAL;
@@ -305,7 +305,7 @@ int posix_cpu_clock_get(const clockid_t which_clock, struct timespec *tp)
 		 */
 		struct task_struct *p;
 		read_lock(&tasklist_lock);
-		p = find_task_by_pid(pid);
+		p = find_task_by_pid_ve(pid);
 		if (p) {
 			if (CPUCLOCK_PERTHREAD(which_clock)) {
 				if (p->tgid == current->tgid) {
@@ -349,7 +349,7 @@ int posix_cpu_timer_create(struct k_itimer *new_timer)
 		if (pid == 0) {
 			p = current;
 		} else {
-			p = find_task_by_pid(pid);
+			p = find_task_by_pid_ve(pid);
 			if (p && p->tgid != current->tgid)
 				p = NULL;
 		}
@@ -357,7 +357,7 @@ int posix_cpu_timer_create(struct k_itimer *new_timer)
 		if (pid == 0) {
 			p = current->group_leader;
 		} else {
-			p = find_task_by_pid(pid);
+			p = find_task_by_pid_ve(pid);
 			if (p && p->tgid != pid)
 				p = NULL;
 		}

@@ -142,7 +142,7 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int exstack)
 	vma->vm_end = addr + PAGE_SIZE;
 	/* MAYWRITE to allow gdb to COW and set breakpoints */
 	vma->vm_flags = VM_READ|VM_EXEC|VM_MAYREAD|VM_MAYEXEC|VM_MAYWRITE;
-	vma->vm_flags |= mm->def_flags;
+	vma->vm_flags |= mm->def_flags | VM_DONTEXPAND;
 	vma->vm_page_prot = protection_map[vma->vm_flags & 7];
 	vma->vm_ops = &syscall_vm_ops;
 	vma->vm_mm = mm;

@@ -39,13 +39,19 @@ extern rwlock_t udp_hash_lock;
 
 extern int udp_port_rover;
 
-static inline int udp_lport_inuse(u16 num)
+static inline int udp_hashfn(u16 num, unsigned veid)
+{
+	return ((num + (veid ^ (veid >> 16))) & (UDP_HTABLE_SIZE - 1));
+}
+
+static inline int udp_lport_inuse(u16 num, struct ve_struct *env)
 {
 	struct sock *sk;
 	struct hlist_node *node;
 
-	sk_for_each(sk, node, &udp_hash[num & (UDP_HTABLE_SIZE - 1)])
-		if (inet_sk(sk)->num == num)
+	sk_for_each(sk, node, &udp_hash[udp_hashfn(num, VEID(env))])
+		if (inet_sk(sk)->num == num &&
+		    ve_accessible_strict(sk->owner_env, env))
 			return 1;
 	return 0;
 }
@@ -75,9 +81,14 @@ extern unsigned int udp_poll(struct file *file, struct socket *sock,
 			     poll_table *wait);
 
 DECLARE_SNMP_STAT(struct udp_mib, udp_statistics);
-#define UDP_INC_STATS(field)		SNMP_INC_STATS(udp_statistics, field)
-#define UDP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(udp_statistics, field)
-#define UDP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(udp_statistics, field)
+#ifdef CONFIG_VE
+#define ve_udp_statistics (get_exec_env()->_udp_statistics)
+#else
+#define ve_udp_statistics udp_statistics
+#endif
+#define UDP_INC_STATS(field)		SNMP_INC_STATS(ve_udp_statistics, field)
+#define UDP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ve_udp_statistics, field)
+#define UDP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ve_udp_statistics, field)
 
 /* /proc */
 struct udp_seq_afinfo {

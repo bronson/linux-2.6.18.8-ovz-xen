@@ -17,6 +17,7 @@ typedef int (*nmi_callback_t)(struct pt_regs * regs, int cpu);
  * set. Return 1 if the NMI was handled.
  */
 void set_nmi_callback(nmi_callback_t callback);
+void set_nmi_ipi_callback(nmi_callback_t callback);
 
 /**
  * unset_nmi_callback
@@ -24,6 +25,7 @@ void set_nmi_callback(nmi_callback_t callback);
  * Remove the handler previously set.
  */
 void unset_nmi_callback(void);
+void unset_nmi_ipi_callback(void);
 
 extern void setup_apic_nmi_watchdog (void);
 extern int reserve_lapic_nmi(void);

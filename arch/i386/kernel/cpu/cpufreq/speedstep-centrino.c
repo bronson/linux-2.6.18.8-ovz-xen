@@ -17,7 +17,6 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/cpufreq.h>
-#include <linux/sched.h>	/* current */
 #include <linux/delay.h>
 #include <linux/compiler.h>
 
@@ -318,14 +317,8 @@ static unsigned int get_cur_freq(unsigned int cpu)
 {
 	unsigned l, h;
 	unsigned clock_freq;
-	cpumask_t saved_mask;
 
-	saved_mask = current->cpus_allowed;
-	set_cpus_allowed(current, cpumask_of_cpu(cpu));
-	if (smp_processor_id() != cpu)
-		return 0;
-
-	rdmsr(MSR_IA32_PERF_STATUS, l, h);
+	rdmsr_on_cpu(cpu, MSR_IA32_PERF_STATUS, &l, &h);
 	clock_freq = extract_clock(l, cpu, 0);
 
 	if (unlikely(clock_freq == 0)) {
@@ -335,11 +328,10 @@ static unsigned int get_cur_freq(unsigned int cpu)
 		 * P-state transition (like TM2). Get the last freq set 
 		 * in PERF_CTL.
 		 */
-		rdmsr(MSR_IA32_PERF_CTL, l, h);
+		rdmsr_on_cpu(cpu, MSR_IA32_PERF_CTL, &l, &h);
 		clock_freq = extract_clock(l, cpu, 1);
 	}
 
-	set_cpus_allowed(current, saved_mask);
 	return clock_freq;
 }
 
@@ -548,15 +540,15 @@ static int centrino_cpu_init(struct cpufreq_policy *policy)
 
 	/* Check to see if Enhanced SpeedStep is enabled, and try to
 	   enable it if not. */
-	rdmsr(MSR_IA32_MISC_ENABLE, l, h);
+	rdmsr_on_cpu(policy->cpu, MSR_IA32_MISC_ENABLE, &l, &h);
 
 	if (!(l & (1<<16))) {
 		l |= (1<<16);
 		dprintk("trying to enable Enhanced SpeedStep (%x)\n", l);
-		wrmsr(MSR_IA32_MISC_ENABLE, l, h);
+		wrmsr_on_cpu(policy->cpu, MSR_IA32_MISC_ENABLE, l, h);
 
 		/* check to see if it stuck */
-		rdmsr(MSR_IA32_MISC_ENABLE, l, h);
+		rdmsr_on_cpu(policy->cpu, MSR_IA32_MISC_ENABLE, &l, &h);
 		if (!(l & (1<<16))) {
 			printk(KERN_INFO PFX "couldn't enable Enhanced SpeedStep\n");
 			return -ENODEV;
@@ -636,7 +628,6 @@ static int centrino_target (struct cpufreq_policy *policy,
 	unsigned int	msr, oldmsr = 0, h = 0, cpu = policy->cpu;
 	struct cpufreq_freqs	freqs;
 	cpumask_t		online_policy_cpus;
-	cpumask_t		saved_mask;
 	cpumask_t		set_mask;
 	cpumask_t		covered_cpus;
 	int			retval = 0;
@@ -660,7 +651,6 @@ static int centrino_target (struct cpufreq_policy *policy,
 	online_policy_cpus = policy->cpus;
 #endif
 
-	saved_mask = current->cpus_allowed;
 	first_cpu = 1;
 	cpus_clear(covered_cpus);
 	for_each_cpu_mask(j, online_policy_cpus) {
@@ -674,8 +664,7 @@ static int centrino_target (struct cpufreq_policy *policy,
 		else
 			cpu_set(j, set_mask);
 
-		set_cpus_allowed(current, set_mask);
-		if (unlikely(!cpu_isset(smp_processor_id(), set_mask))) {
+		if (unlikely(!cpu_isset(j, set_mask))) {
 			dprintk("couldn't limit to CPUs in this domain\n");
 			retval = -EAGAIN;
 			if (first_cpu) {
@@ -688,7 +677,7 @@ static int centrino_target (struct cpufreq_policy *policy,
 		msr = centrino_model[cpu]->op_points[newstate].index;
 
 		if (first_cpu) {
-			rdmsr(MSR_IA32_PERF_CTL, oldmsr, h);
+			rdmsr_on_cpu(j, MSR_IA32_PERF_CTL, &oldmsr, &h);
 			if (msr == (oldmsr & 0xffff)) {
 				dprintk("no change needed - msr was and needs "
 					"to be %x\n", oldmsr);
@@ -715,7 +704,7 @@ static int centrino_target (struct cpufreq_policy *policy,
 			oldmsr |= msr;
 		}
 
-		wrmsr(MSR_IA32_PERF_CTL, oldmsr, h);
+		wrmsr_on_cpu(j, MSR_IA32_PERF_CTL, oldmsr, h);
 		if (policy->shared_type == CPUFREQ_SHARED_TYPE_ANY)
 			break;
 
@@ -737,8 +726,7 @@ static int centrino_target (struct cpufreq_policy *policy,
 
 		if (!cpus_empty(covered_cpus)) {
 			for_each_cpu_mask(j, covered_cpus) {
-				set_cpus_allowed(current, cpumask_of_cpu(j));
-				wrmsr(MSR_IA32_PERF_CTL, oldmsr, h);
+				wrmsr_on_cpu(j, MSR_IA32_PERF_CTL, oldmsr, h);
 			}
 		}
 
@@ -753,7 +741,6 @@ static int centrino_target (struct cpufreq_policy *policy,
 	}
 
 migrate_end:
-	set_cpus_allowed(current, saved_mask);
 	return 0;
 }
 

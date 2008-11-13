@@ -1187,16 +1187,20 @@ static void add_header(struct buffer *b, struct module *mod)
 /**
  * Record CRCs for unresolved symbols
  **/
-static void add_versions(struct buffer *b, struct module *mod)
+static int add_versions(struct buffer *b, struct module *mod)
 {
 	struct symbol *s, *exp;
-
+	int err;
+	
+	err = 0;
 	for (s = mod->unres; s; s = s->next) {
 		exp = find_symbol(s->name);
 		if (!exp || exp->module == mod) {
-			if (have_vmlinux && !s->weak)
+			if (have_vmlinux && !s->weak) {
 				warn("\"%s\" [%s.ko] undefined!\n",
 				     s->name, mod->name);
+				err = 1;
+			}
 			continue;
 		}
 		s->module = exp->module;
@@ -1205,7 +1209,7 @@ static void add_versions(struct buffer *b, struct module *mod)
 	}
 
 	if (!modversions)
-		return;
+		return err;
 
 	buf_printf(b, "\n");
 	buf_printf(b, "static const struct modversion_info ____versions[]\n");
@@ -1225,6 +1229,7 @@ static void add_versions(struct buffer *b, struct module *mod)
 	}
 
 	buf_printf(b, "};\n");
+	return err;
 }
 
 static void add_depends(struct buffer *b, struct module *mod,
@@ -1401,7 +1406,7 @@ int main(int argc, char **argv)
 	char fname[SZ];
 	char *kernel_read = NULL, *module_read = NULL;
 	char *dump_write = NULL;
-	int opt;
+	int opt, err;
 
 	while ((opt = getopt(argc, argv, "i:I:mo:a")) != -1) {
 		switch(opt) {
@@ -1441,6 +1446,7 @@ int main(int argc, char **argv)
 		check_exports(mod);
 	}
 
+	err = 0;
 	for (mod = modules; mod; mod = mod->next) {
 		if (mod->skip)
 			continue;
@@ -1448,7 +1454,7 @@ int main(int argc, char **argv)
 		buf.pos = 0;
 
 		add_header(&buf, mod);
-		add_versions(&buf, mod);
+		err |= add_versions(&buf, mod);
 		add_depends(&buf, mod, modules);
 		add_moddevtable(&buf, mod);
 		add_srcversion(&buf, mod);
@@ -1460,5 +1466,5 @@ int main(int argc, char **argv)
 	if (dump_write)
 		write_dump(dump_write);
 
-	return 0;
+	return err;
 }

@@ -25,6 +25,7 @@
 #include <linux/file.h>
 #include <linux/vfs.h>
 #include <linux/ioctl32.h>
+#include <linux/virtinfo.h>
 #include <linux/ioctl.h>
 #include <linux/init.h>
 #include <linux/sockios.h>	/* for SIOCDEVPRIVATE */
@@ -46,6 +47,8 @@
 #include <linux/rwsem.h>
 #include <linux/acct.h>
 #include <linux/mm.h>
+#include <linux/quota.h>
+#include <linux/grsecurity.h>
 
 #include <net/sock.h>		/* siocdevprivate_ioctl */
 
@@ -69,6 +72,43 @@ int compat_printk(const char *fmt, ...)
 	return ret;
 }
 
+int ve_compat_printk(int dst, const char *fmt, ...)
+{
+	va_list ap;
+	int ret;
+	if (!compat_log)
+		return 0;
+	va_start(ap, fmt);
+	ret = ve_vprintk(dst, fmt, ap);
+	va_end(ap);
+	return ret;
+}
+
+asmlinkage long compat_sys_utimensat(unsigned int dfd, char __user *filename,
+					struct compat_timespec __user *t, int flags)
+{
+	struct timeval tv[2];
+
+	if  (t) {
+		if (get_user(tv[0].tv_sec, &t[0].tv_sec) || get_user(tv[0].tv_usec, &t[0].tv_nsec) ||
+		    get_user(tv[1].tv_sec, &t[1].tv_sec) || get_user(tv[1].tv_usec, &t[1].tv_nsec))
+			return -EFAULT;
+
+		if ((tv[0].tv_usec == UTIME_OMIT || tv[0].tv_usec == UTIME_NOW)
+		  && tv[0].tv_sec != 0)
+			return -EINVAL;
+		if ((tv[1].tv_usec == UTIME_OMIT || tv[1].tv_usec == UTIME_NOW)
+		  && tv[1].tv_sec != 0)
+			return -EINVAL;
+
+		if (tv[0].tv_usec == UTIME_OMIT && tv[1].tv_usec == UTIME_OMIT)
+			return 0;
+	}
+	tv[0].tv_usec/=1000; /* nsec->usec */
+	tv[1].tv_usec/=1000;
+	return do_utimes(dfd, filename, t ? tv : NULL, flags);
+}
+
 /*
  * Not all architectures have sys_utime, so implement this in terms
  * of sys_utimes.
@@ -84,7 +124,7 @@ asmlinkage long compat_sys_utime(char __user *filename, struct compat_utimbuf __
 		tv[0].tv_usec = 0;
 		tv[1].tv_usec = 0;
 	}
-	return do_utimes(AT_FDCWD, filename, t ? tv : NULL);
+	return do_utimes(AT_FDCWD, filename, t ? tv : NULL, 0);
 }
 
 asmlinkage long compat_sys_futimesat(unsigned int dfd, char __user *filename, struct compat_timeval __user *t)
@@ -98,7 +138,7 @@ asmlinkage long compat_sys_futimesat(unsigned int dfd, char __user *filename, st
 		    get_user(tv[1].tv_usec, &t[1].tv_usec))
 			return -EFAULT;
 	}
-	return do_utimes(dfd, filename, t ? tv : NULL);
+	return do_utimes(dfd, filename, t ? tv : NULL, 0);
 }
 
 asmlinkage long compat_sys_utimes(char __user *filename, struct compat_timeval __user *t)
@@ -213,6 +253,8 @@ asmlinkage long compat_sys_statfs(const char __user *path, struct compat_statfs 
 		struct kstatfs tmp;
 		error = vfs_statfs(nd.dentry, &tmp);
 		if (!error)
+			error = faudit_statfs(nd.mnt->mnt_sb, &tmp);
+		if (!error)
 			error = put_compat_statfs(buf, &tmp);
 		path_release(&nd);
 	}
@@ -230,6 +272,8 @@ asmlinkage long compat_sys_fstatfs(unsigned int fd, struct compat_statfs __user 
 	if (!file)
 		goto out;
 	error = vfs_statfs(file->f_dentry, &tmp);
+	if (!error)
+		error = faudit_statfs(file->f_vfsmnt->mnt_sb, &tmp);
 	if (!error)
 		error = put_compat_statfs(buf, &tmp);
 	fput(file);
@@ -281,6 +325,8 @@ asmlinkage long compat_sys_statfs64(const char __user *path, compat_size_t sz, s
 		struct kstatfs tmp;
 		error = vfs_statfs(nd.dentry, &tmp);
 		if (!error)
+			error = faudit_statfs(nd.mnt->mnt_sb, &tmp);
+		if (!error)
 			error = put_compat_statfs64(buf, &tmp);
 		path_release(&nd);
 	}
@@ -301,6 +347,8 @@ asmlinkage long compat_sys_fstatfs64(unsigned int fd, compat_size_t sz, struct c
 	if (!file)
 		goto out;
 	error = vfs_statfs(file->f_dentry, &tmp);
+	if (!error)
+		error = faudit_statfs(file->f_vfsmnt->mnt_sb, &tmp);
 	if (!error)
 		error = put_compat_statfs64(buf, &tmp);
 	fput(file);
@@ -1480,6 +1528,101 @@ out:
 	return ret;
 }
 
+#define COPY_V2_DQBLK(cdq, idq) do {				\
+		cdq.dqb_ihardlimit = idq.dqb_ihardlimit;	\
+		cdq.dqb_isoftlimit = idq.dqb_isoftlimit;	\
+		cdq.dqb_curinodes = idq.dqb_curinodes;		\
+		cdq.dqb_bhardlimit = idq.dqb_bhardlimit;	\
+		cdq.dqb_bsoftlimit = idq.dqb_bsoftlimit;	\
+		cdq.dqb_curspace = idq.dqb_curspace;		\
+		cdq.dqb_btime = idq.dqb_btime;			\
+		cdq.dqb_itime = idq.dqb_itime;			\
+	} while (0)
+
+asmlinkage long sys32_quotactl(unsigned int cmd, const char __user *special,
+		qid_t id, void __user *addr)
+{
+	long ret;
+	unsigned int cmds;
+	mm_segment_t old_fs;
+	struct if_dqblk dqblk;
+	struct if32_dqblk {
+		__u32 dqb_bhardlimit[2];
+		__u32 dqb_bsoftlimit[2];
+		__u32 dqb_curspace[2];
+		__u32 dqb_ihardlimit[2];
+		__u32 dqb_isoftlimit[2];
+		__u32 dqb_curinodes[2];
+		__u32 dqb_btime[2];
+		__u32 dqb_itime[2];
+		__u32 dqb_valid;
+	} dqblk32;
+	struct compat_v2_dqblk cdq;
+	struct compat_v2_dqblk_32 cdq32;
+
+	cmds = cmd >> SUBCMDSHIFT;
+
+	switch (cmds) {
+		case Q_GETQUOTA:
+			old_fs = get_fs();
+			set_fs(KERNEL_DS);
+			ret = sys_quotactl(cmd, special, id, &dqblk);
+			set_fs(old_fs);
+			if (ret < 0)
+				break;
+
+			memcpy(&dqblk32, &dqblk, sizeof(dqblk32));
+			dqblk32.dqb_valid = dqblk.dqb_valid;
+			if (copy_to_user(addr, &dqblk32, sizeof(dqblk32)))
+				ret = -EFAULT;
+
+			break;
+		case Q_SETQUOTA:
+			ret = -EFAULT;
+			if (copy_from_user(&dqblk32, addr, sizeof(dqblk32)))
+				break;
+			memcpy(&dqblk, &dqblk32, sizeof(dqblk32));
+			dqblk.dqb_valid = dqblk32.dqb_valid;
+
+			old_fs = get_fs();
+			set_fs(KERNEL_DS);
+			ret = sys_quotactl(cmd, special, id, &dqblk);
+			set_fs(old_fs);
+			break;
+#ifdef CONFIG_QUOTA_COMPAT
+		case QC_GETQUOTA:
+			old_fs = get_fs();
+			set_fs(KERNEL_DS);
+			ret = sys_quotactl(cmd, special, id, &cdq);
+			set_fs(old_fs);
+			if (ret < 0)
+				break;
+
+			COPY_V2_DQBLK(cdq32, cdq);
+
+			if (copy_to_user(addr, &cdq32, sizeof(cdq32)))
+				ret = -EFAULT;
+			break;
+		case QC_SETQUOTA:
+			ret = -EFAULT;
+			if (copy_from_user(&cdq32, addr, sizeof(cdq32)))
+				break;
+
+			COPY_V2_DQBLK(cdq, cdq32);
+
+			old_fs = get_fs();
+			set_fs(KERNEL_DS);
+			ret = sys_quotactl(cmd, special, id, &cdq);
+			set_fs(old_fs);
+			break;
+#endif
+		default:
+			ret = sys_quotactl(cmd, special, id, addr);
+			break;
+	}
+	return ret;
+}
+
 #ifdef CONFIG_MMU
 
 #define free_arg_pages(bprm) do { } while (0)
@@ -1512,6 +1655,10 @@ int compat_do_execve(char * filename,
 	struct file *file;
 	int retval;
 	int i;
+
+	retval = virtinfo_gencall(VIRTINFO_DOEXECVE, NULL);
+	if (retval)
+		return retval;
 
 	retval = -ENOMEM;
 	bprm = kzalloc(sizeof(*bprm), GFP_KERNEL);
@@ -1566,6 +1713,11 @@ int compat_do_execve(char * filename,
 	retval = compat_copy_strings(bprm->argc, argv, bprm);
 	if (retval < 0)
 		goto out;
+
+	if (!gr_tpe_allow(file)) {
+		retval = -EACCES;
+		goto out;
+	}
 
 	retval = search_binary_handler(bprm, regs);
 	if (retval >= 0) {

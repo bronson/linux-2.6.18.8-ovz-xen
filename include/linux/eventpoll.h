@@ -58,6 +58,91 @@ static inline void eventpoll_init_file(struct file *file)
 	spin_lock_init(&file->f_ep_lock);
 }
 
+struct epoll_filefd {
+	struct file *file;
+	int fd;
+};
+
+/*
+ * This structure is stored inside the "private_data" member of the file
+ * structure and rapresent the main data sructure for the eventpoll
+ * interface.
+ */
+struct eventpoll {
+	/* Protect the this structure access */
+	rwlock_t lock;
+
+	/*
+	 * This semaphore is used to ensure that files are not removed
+	 * while epoll is using them. This is read-held during the event
+	 * collection loop and it is write-held during the file cleanup
+	 * path, the epoll file exit code and the ctl operations.
+	 */
+	struct rw_semaphore sem;
+
+	/* Wait queue used by sys_epoll_wait() */
+	wait_queue_head_t wq;
+
+	/* Wait queue used by file->poll() */
+	wait_queue_head_t poll_wait;
+
+	/* List of ready file descriptors */
+	struct list_head rdllist;
+
+	/* RB-Tree root used to store monitored fd structs */
+	struct rb_root rbr;
+};
+
+/*
+ * Each file descriptor added to the eventpoll interface will
+ * have an entry of this type linked to the hash.
+ */
+struct epitem {
+	/* RB-Tree node used to link this structure to the eventpoll rb-tree */
+	struct rb_node rbn;
+
+	/* List header used to link this structure to the eventpoll ready list */
+	struct list_head rdllink;
+
+	/* The file descriptor information this item refers to */
+	struct epoll_filefd ffd;
+
+	/* Number of active wait queue attached to poll operations */
+	int nwait;
+
+	/* List containing poll wait queues */
+	struct list_head pwqlist;
+
+	/* The "container" of this item */
+	struct eventpoll *ep;
+
+	/* The structure that describe the interested events and the source fd */
+	struct epoll_event event;
+
+	/*
+	 * Used to keep track of the usage count of the structure. This avoids
+	 * that the structure will desappear from underneath our processing.
+	 */
+	atomic_t usecnt;
+
+	/* List header used to link this item to the "struct file" items list */
+	struct list_head fllink;
+
+	/* List header used to link the item to the transfer list */
+	struct list_head txlink;
+
+	/*
+	 * This is used during the collection/transfer of events to userspace
+	 * to pin items empty events set.
+	 */
+	unsigned int revents;
+};
+
+extern struct semaphore epsem;
+struct epitem *ep_find(struct eventpoll *ep, struct file *file, int fd);
+int ep_insert(struct eventpoll *ep, struct epoll_event *event,
+		     struct file *tfile, int fd);
+void ep_release_epitem(struct epitem *epi);
 
 /* Used to release the epoll bits inside the "struct file" */
 void eventpoll_release_file(struct file *file);
@@ -89,6 +174,8 @@ static inline void eventpoll_release(struct file *file)
 	 */
 	eventpoll_release_file(file);
 }
+
+extern struct mutex epmutex;
 
 #else
 

@@ -15,16 +15,18 @@
 #include <asm/uaccess.h>
 
 unsigned securebits = SECUREBITS_DEFAULT; /* systemwide security settings */
-kernel_cap_t cap_bset = CAP_INIT_EFF_SET;
-
 EXPORT_SYMBOL(securebits);
+#ifndef CONFIG_VE
+kernel_cap_t cap_bset = CAP_INIT_EFF_SET;
 EXPORT_SYMBOL(cap_bset);
+#endif
 
 /*
  * This lock protects task->cap_* for all tasks including current.
  * Locking rule: acquire this prior to tasklist_lock.
  */
-static DEFINE_SPINLOCK(task_capability_lock);
+DEFINE_SPINLOCK(task_capability_lock);
+EXPORT_SYMBOL(task_capability_lock);
 
 /*
  * For sys_getproccap() and sys_setproccap(), any of the three
@@ -67,8 +69,8 @@ asmlinkage long sys_capget(cap_user_header_t header, cap_user_data_t dataptr)
      spin_lock(&task_capability_lock);
      read_lock(&tasklist_lock); 
 
-     if (pid && pid != current->pid) {
-	     target = find_task_by_pid(pid);
+     if (pid && pid != virt_pid(current)) {
+	     target = find_task_by_pid_ve(pid);
 	     if (!target) {
 	          ret = -ESRCH;
 	          goto out;
@@ -100,9 +102,13 @@ static inline int cap_set_pg(int pgrp, kernel_cap_t *effective,
 	int ret = -EPERM;
 	int found = 0;
 
-	do_each_task_pid(pgrp, PIDTYPE_PGID, g) {
+	pgrp = vpid_to_pid(pgrp);
+	if (pgrp < 0)
+		return ret;
+
+	do_each_task_pid_ve(pgrp, PIDTYPE_PGID, g) {
 		target = g;
-		while_each_thread(g, target) {
+		while_each_thread_ve(g, target) {
 			if (!security_capset_check(target, effective,
 							inheritable,
 							permitted)) {
@@ -113,7 +119,7 @@ static inline int cap_set_pg(int pgrp, kernel_cap_t *effective,
 			}
 			found = 1;
 		}
-	} while_each_task_pid(pgrp, PIDTYPE_PGID, g);
+	} while_each_task_pid_ve(pgrp, PIDTYPE_PGID, g);
 
 	if (!found)
 	     ret = 0;
@@ -132,7 +138,7 @@ static inline int cap_set_all(kernel_cap_t *effective,
      int ret = -EPERM;
      int found = 0;
 
-     do_each_thread(g, target) {
+     do_each_thread_ve(g, target) {
              if (target == current || target->pid == 1)
                      continue;
              found = 1;
@@ -141,7 +147,7 @@ static inline int cap_set_all(kernel_cap_t *effective,
 		     continue;
 	     ret = 0;
 	     security_capset_set(target, effective, inheritable, permitted);
-     } while_each_thread(g, target);
+     } while_each_thread_ve(g, target);
 
      if (!found)
 	     ret = 0;
@@ -188,7 +194,7 @@ asmlinkage long sys_capset(cap_user_header_t header, const cap_user_data_t data)
      if (get_user(pid, &header->pid))
 	     return -EFAULT; 
 
-     if (pid && pid != current->pid && !capable(CAP_SETPCAP))
+     if (pid && pid != virt_pid(current) && !capable(CAP_SETPCAP))
              return -EPERM;
 
      if (copy_from_user(&effective, &data->effective, sizeof(effective)) ||
@@ -199,8 +205,8 @@ asmlinkage long sys_capset(cap_user_header_t header, const cap_user_data_t data)
      spin_lock(&task_capability_lock);
      read_lock(&tasklist_lock);
 
-     if (pid > 0 && pid != current->pid) {
-          target = find_task_by_pid(pid);
+     if (pid > 0 && pid != virt_pid(current)) {
+          target = find_task_by_pid_ve(pid);
           if (!target) {
                ret = -ESRCH;
                goto out;

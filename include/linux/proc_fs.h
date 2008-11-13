@@ -4,6 +4,7 @@
 #include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 #include <asm/atomic.h>
 
 /*
@@ -86,8 +87,16 @@ struct vmcore {
 
 extern struct proc_dir_entry proc_root;
 extern struct proc_dir_entry *proc_root_fs;
+extern struct file_system_type proc_fs_type;
+
+#ifdef CONFIG_VE
+#include <linux/sched.h>
+#define proc_net	(get_exec_env()->_proc_net)
+#define proc_net_stat	(get_exec_env()->_proc_net_stat)
+#else
 extern struct proc_dir_entry *proc_net;
 extern struct proc_dir_entry *proc_net_stat;
+#endif
 extern struct proc_dir_entry *proc_bus;
 extern struct proc_dir_entry *proc_root_driver;
 extern struct proc_dir_entry *proc_root_kcore;
@@ -108,7 +117,11 @@ char *task_mem(struct mm_struct *, char *);
 
 extern struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 						struct proc_dir_entry *parent);
+extern struct proc_dir_entry *create_proc_glob_entry(const char *name,
+						mode_t mode,
+						struct proc_dir_entry *parent);
 extern void remove_proc_entry(const char *name, struct proc_dir_entry *parent);
+extern void remove_proc_glob_entry(const char *name, struct proc_dir_entry *parent);
 
 extern struct vfsmount *proc_mnt;
 extern int proc_fill_super(struct super_block *,void *,int);
@@ -195,6 +208,15 @@ static inline struct proc_dir_entry *proc_net_fops_create(const char *name,
 	return res;
 }
 
+static inline struct proc_dir_entry *proc_glob_fops_create(const char *name,
+	mode_t mode, struct file_operations *fops)
+{
+	struct proc_dir_entry *res = create_proc_glob_entry(name, mode, NULL);
+	if (res)
+		res->proc_fops = fops;
+	return res;
+}
+
 static inline void proc_net_remove(const char *name)
 {
 	remove_proc_entry(name,proc_net);
@@ -207,12 +229,15 @@ static inline void proc_net_remove(const char *name)
 #define proc_bus NULL
 
 #define proc_net_fops_create(name, mode, fops)  ({ (void)(mode), NULL; })
+#define proc_glob_fops_create(name, mode, fops)  ({ (void)(mode), NULL; })
 #define proc_net_create(name, mode, info)	({ (void)(mode), NULL; })
 static inline void proc_net_remove(const char *name) {}
 
 static inline void proc_flush_task(struct task_struct *task) { }
 
 static inline struct proc_dir_entry *create_proc_entry(const char *name,
+	mode_t mode, struct proc_dir_entry *parent) { return NULL; }
+static inline struct proc_dir_entry *create_proc_glob_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *parent) { return NULL; }
 
 #define remove_proc_entry(name, parent) do {} while (0)
@@ -236,6 +261,48 @@ static inline void proc_tty_unregister_driver(struct tty_driver *driver) {};
 extern struct proc_dir_entry proc_root;
 
 #endif /* CONFIG_PROC_FS */
+
+static inline struct proc_dir_entry *create_proc_entry_mod(const char *name,
+					mode_t mode,
+					struct proc_dir_entry *parent,
+					struct module *owner)
+{
+	struct proc_dir_entry *ent;
+
+	/*
+	 * lock_kernel() here protects against proc_lookup()
+	 * which can find this freshly created entry w/o owner being set.
+	 * this can lead to module being put more times then getted.
+	 */
+	lock_kernel();
+	ent = create_proc_entry(name, mode, parent);
+	if (ent)
+		ent->owner = owner;
+	unlock_kernel();
+
+	return ent;
+}
+
+static inline struct proc_dir_entry *create_proc_glob_entry_mod(const char *name, 
+					mode_t mode,
+					struct proc_dir_entry *parent,
+					struct module *owner)
+{
+	struct proc_dir_entry *ent;
+
+	/*
+	 * lock_kernel() here protects against proc_lookup()
+	 * which can find this freshly created entry w/o owner being set.
+	 * this can lead to module being put more times then getted.
+	 */
+	lock_kernel();
+	ent = create_proc_glob_entry(name, mode, parent);
+	if (ent)
+		ent->owner = owner;
+	unlock_kernel();
+
+	return ent;
+}
 
 #if !defined(CONFIG_PROC_KCORE)
 static inline void kclist_add(struct kcore_list *new, void *addr, size_t size)
@@ -266,10 +333,24 @@ static inline struct proc_dir_entry *PDE(const struct inode *inode)
 	return PROC_I(inode)->pde;
 }
 
+static inline struct proc_dir_entry * de_get(struct proc_dir_entry *de)
+{
+	if (de)
+		atomic_inc(&de->count);
+	return de;
+}
+
+void de_put(struct proc_dir_entry *de);
+
 struct proc_maps_private {
 	struct pid *pid;
 	struct task_struct *task;
 	struct vm_area_struct *tail_vma;
 };
+
+#define LPDE(inode)	(PROC_I((inode))->pde)
+#ifdef CONFIG_VE
+#define GPDE(inode)	(*(struct proc_dir_entry **)(&(inode)->i_pipe))
+#endif
 
 #endif /* _LINUX_PROC_FS_H */

@@ -390,7 +390,7 @@ static struct task_struct * futex_find_get_task(pid_t pid)
 	struct task_struct *p;
 
 	read_lock(&tasklist_lock);
-	p = find_task_by_pid(pid);
+	p = find_task_by_pid_ve(pid);
 	if (!p)
 		goto out_unlock;
 	if ((current->euid != p->euid) && (current->euid != p->uid)) {
@@ -505,7 +505,23 @@ lookup_pi_state(u32 uval, struct futex_hash_bucket *hb, struct futex_q *me)
 	p = futex_find_get_task(pid);
 	if (!p)
 		return -ESRCH;
+	if (unlikely(p == current)) {
+		put_task_struct(p);
+		return -EDEADLK;
+	}
 
+	read_lock(&tasklist_lock);
+	/* To this moment p can go through do_exit and
+	 * clean its pi_state_list. We are going to recreate it
+	 * and it wil leak. The most obvious solution is to take
+	 * tasklist_lock. Probably, we can use pi_lock for the
+	 * same purpose. _ANK_
+	 */
+	if (p->exit_state) {
+		read_unlock(&tasklist_lock);
+		put_task_struct(p);
+		return -ESRCH;
+	}
 	pi_state = alloc_pi_state();
 
 	/*
@@ -526,6 +542,7 @@ lookup_pi_state(u32 uval, struct futex_hash_bucket *hb, struct futex_q *me)
 	put_task_struct(p);
 
 	me->pi_state = pi_state;
+	read_unlock(&tasklist_lock);
 
 	return 0;
 }
@@ -566,6 +583,7 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_q *this)
 	if (!pi_state)
 		return -EINVAL;
 
+	spin_lock(&pi_state->pi_mutex.wait_lock);
 	new_owner = rt_mutex_next_owner(&pi_state->pi_mutex);
 
 	/*
@@ -583,7 +601,7 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_q *this)
 	 * preserve the owner died bit.)
 	 */
 	if (!(uval & FUTEX_OWNER_DIED)) {
-		newval = FUTEX_WAITERS | new_owner->pid;
+		newval = FUTEX_WAITERS | virt_pid(new_owner);
 
 		inc_preempt_count();
 		curval = futex_atomic_cmpxchg_inatomic(uaddr, uval, newval);
@@ -605,6 +623,7 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_q *this)
 	pi_state->owner = new_owner;
 	spin_unlock_irq(&new_owner->pi_lock);
 
+	spin_unlock(&pi_state->pi_mutex.wait_lock);
 	rt_mutex_unlock(&pi_state->pi_mutex);
 
 	return 0;
@@ -1156,7 +1175,7 @@ static int futex_lock_pi(u32 __user *uaddr, int detect, unsigned long sec,
 	 * (by doing a 0 -> TID atomic cmpxchg), while holding all
 	 * the locks. It will most likely not succeed.
 	 */
-	newval = current->pid;
+	newval = virt_pid(current);
 
 	inc_preempt_count();
 	curval = futex_atomic_cmpxchg_inatomic(uaddr, 0, newval);
@@ -1166,7 +1185,7 @@ static int futex_lock_pi(u32 __user *uaddr, int detect, unsigned long sec,
 		goto uaddr_faulted;
 
 	/* We own the lock already */
-	if (unlikely((curval & FUTEX_TID_MASK) == current->pid)) {
+	if (unlikely((curval & FUTEX_TID_MASK) == virt_pid(current))) {
 		if (!detect && 0)
 			force_sig(SIGKILL, current);
 		ret = -EDEADLK;
@@ -1212,7 +1231,7 @@ static int futex_lock_pi(u32 __user *uaddr, int detect, unsigned long sec,
 		 */
 		if (curval & FUTEX_OWNER_DIED) {
 			uval = newval;
-			newval = current->pid |
+			newval = virt_pid(current) |
 				FUTEX_OWNER_DIED | FUTEX_WAITERS;
 
 			inc_preempt_count();
@@ -1260,7 +1279,7 @@ static int futex_lock_pi(u32 __user *uaddr, int detect, unsigned long sec,
 	 * did a lock-steal - fix up the PI-state in that case.
 	 */
 	if (!ret && q.pi_state->owner != curr) {
-		u32 newtid = current->pid | FUTEX_WAITERS;
+		u32 newtid = virt_pid(current) | FUTEX_WAITERS;
 
 		/* Owner died? */
 		if (q.pi_state->owner != NULL) {
@@ -1369,7 +1388,7 @@ retry:
 	/*
 	 * We release only a lock we actually own:
 	 */
-	if ((uval & FUTEX_TID_MASK) != current->pid)
+	if ((uval & FUTEX_TID_MASK) != virt_pid(current))
 		return -EPERM;
 	/*
 	 * First take all the futex related locks:
@@ -1391,7 +1410,7 @@ retry_locked:
 	 */
 	if (!(uval & FUTEX_OWNER_DIED)) {
 		inc_preempt_count();
-		uval = futex_atomic_cmpxchg_inatomic(uaddr, current->pid, 0);
+		uval = futex_atomic_cmpxchg_inatomic(uaddr, virt_pid(current), 0);
 		dec_preempt_count();
 	}
 
@@ -1401,7 +1420,7 @@ retry_locked:
 	 * Rare case: we managed to release the lock atomically,
 	 * no need to wake anyone else up:
 	 */
-	if (unlikely(uval == current->pid))
+	if (unlikely(uval == virt_pid(current)))
 		goto out_unlock;
 
 	/*
@@ -1625,7 +1644,7 @@ sys_get_robust_list(int pid, struct robust_list_head __user **head_ptr,
 
 		ret = -ESRCH;
 		read_lock(&tasklist_lock);
-		p = find_task_by_pid(pid);
+		p = find_task_by_pid_ve(pid);
 		if (!p)
 			goto err_unlock;
 		ret = -EPERM;
@@ -1658,7 +1677,7 @@ retry:
 	if (get_user(uval, uaddr))
 		return -1;
 
-	if ((uval & FUTEX_TID_MASK) == curr->pid) {
+	if ((uval & FUTEX_TID_MASK) == virt_pid(curr)) {
 		/*
 		 * Ok, this dying thread is truly holding a futex
 		 * of interest. Set the OWNER_DIED bit atomically

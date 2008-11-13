@@ -154,7 +154,7 @@ void debug_rt_mutex_print_deadlock(struct rt_mutex_waiter *waiter)
 	if (!waiter->deadlock_lock || !rt_trace_on)
 		return;
 
-	task = find_task_by_pid(waiter->deadlock_task_pid);
+	task = find_task_by_pid_all(waiter->deadlock_task_pid);
 	if (!task)
 		return;
 

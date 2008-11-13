@@ -72,6 +72,8 @@
 #include <net/xfrm.h>
 #include <net/netdma.h>
 
+#include <ub/ub_tcp.h>
+
 #include <linux/inet.h>
 #include <linux/ipv6.h>
 #include <linux/stddef.h>
@@ -621,7 +623,8 @@ static void tcp_v4_timewait_ack(struct sock *sk, struct sk_buff *skb)
 	const struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
 
 	tcp_v4_send_ack(skb, tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
-			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale, tcptw->tw_ts_recent);
+		tcptw->tw_rcv_wnd >> (tw->tw_rcv_wscale& TW_WSCALE_MASK),
+		tcptw->tw_ts_recent);
 
 	inet_twsk_put(tw);
 }
@@ -723,6 +726,7 @@ struct request_sock_ops tcp_request_sock_ops = {
 	.destructor	=	tcp_v4_reqsk_destructor,
 	.send_reset	=	tcp_v4_send_reset,
 };
+EXPORT_SYMBOL_GPL(tcp_request_sock_ops);
 
 static struct timewait_sock_ops tcp_timewait_sock_ops = {
 	.twsk_obj_size	= sizeof(struct tcp_timewait_sock),
@@ -998,12 +1002,15 @@ static int tcp_v4_checksum_init(struct sk_buff *skb)
  */
 int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
+	struct user_beancounter *ub;
+
+	ub = set_exec_ub(sock_bc(sk)->ub);
 	if (sk->sk_state == TCP_ESTABLISHED) { /* Fast path */
 		TCP_CHECK_TIMER(sk);
 		if (tcp_rcv_established(sk, skb, skb->h.th, skb->len))
 			goto reset;
 		TCP_CHECK_TIMER(sk);
-		return 0;
+		goto restore_context;
 	}
 
 	if (skb->len < (skb->h.th->doff << 2) || tcp_checksum_complete(skb))
@@ -1017,7 +1024,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 		if (nsk != sk) {
 			if (tcp_child_process(sk, nsk, skb))
 				goto reset;
-			return 0;
+			goto restore_context;
 		}
 	}
 
@@ -1025,6 +1032,9 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 	if (tcp_rcv_state_process(sk, skb, skb->h.th, skb->len))
 		goto reset;
 	TCP_CHECK_TIMER(sk);
+
+restore_context:
+	(void)set_exec_ub(ub);
 	return 0;
 
 reset:
@@ -1036,7 +1046,7 @@ discard:
 	 * might be destroyed here. This current version compiles correctly,
 	 * but you have been warned.
 	 */
-	return 0;
+	goto restore_context;
 
 csum_err:
 	TCP_INC_STATS_BH(TCP_MIB_INERRS);
@@ -1291,6 +1301,8 @@ static int tcp_v4_init_sock(struct sock *sk)
 	tp->snd_cwnd_clamp = ~0;
 	tp->mss_cache = 536;
 
+	tp->advmss = 65535; /* max value */
+
 	tp->reordering = sysctl_tcp_reordering;
 	icsk->icsk_ca_ops = &tcp_init_congestion_ops;
 
@@ -1340,6 +1352,8 @@ int tcp_v4_destroy_sock(struct sock *sk)
 	 * If sendmsg cached page exists, toss it.
 	 */
 	if (sk->sk_sndmsg_page) {
+		/* queue is empty, uncharge */
+		ub_sock_tcp_detachpage(sk);
 		__free_page(sk->sk_sndmsg_page);
 		sk->sk_sndmsg_page = NULL;
 	}
@@ -1354,16 +1368,34 @@ EXPORT_SYMBOL(tcp_v4_destroy_sock);
 #ifdef CONFIG_PROC_FS
 /* Proc filesystem TCP sock list dumping. */
 
-static inline struct inet_timewait_sock *tw_head(struct hlist_head *head)
+static inline struct inet_timewait_sock *tw_head(struct hlist_head *head,
+		envid_t veid)
 {
-	return hlist_empty(head) ? NULL :
-		list_entry(head->first, struct inet_timewait_sock, tw_node);
+	struct inet_timewait_sock *tw;
+	struct hlist_node *pos;
+
+	if (hlist_empty(head))
+		return NULL;
+	hlist_for_each_entry(tw, pos, head, tw_node) {
+		if (!ve_accessible_veid(tw->tw_owner_env, veid))
+			continue;
+		return tw;
+	}
+	return NULL;
 }
 
-static inline struct inet_timewait_sock *tw_next(struct inet_timewait_sock *tw)
+static inline struct inet_timewait_sock *
+	tw_next(struct inet_timewait_sock *tw, envid_t veid)
 {
-	return tw->tw_node.next ?
-		hlist_entry(tw->tw_node.next, typeof(*tw), tw_node) : NULL;
+	while (1) {
+		if (tw->tw_node.next == NULL)
+			return NULL;
+		tw = hlist_entry(tw->tw_node.next, typeof(*tw), tw_node);
+		if (!ve_accessible_veid(tw->tw_owner_env, veid))
+			continue;
+		return tw;
+	}
+	return NULL;	/* make compiler happy */
 }
 
 static void *listening_get_next(struct seq_file *seq, void *cur)
@@ -1372,7 +1404,9 @@ static void *listening_get_next(struct seq_file *seq, void *cur)
 	struct hlist_node *node;
 	struct sock *sk = cur;
 	struct tcp_iter_state* st = seq->private;
+	struct ve_struct *ve;
 
+	ve = get_exec_env();
 	if (!sk) {
 		st->bucket = 0;
 		sk = sk_head(&tcp_hashinfo.listening_hash[0]);
@@ -1412,6 +1446,8 @@ get_req:
 	}
 get_sk:
 	sk_for_each_from(sk, node) {
+		if (!ve_accessible(sk->owner_env, ve))
+			continue;
 		if (sk->sk_family == st->family) {
 			cur = sk;
 			goto out;
@@ -1452,7 +1488,9 @@ static void *established_get_first(struct seq_file *seq)
 {
 	struct tcp_iter_state* st = seq->private;
 	void *rc = NULL;
+	struct ve_struct *ve;
 
+	ve = get_exec_env();
 	for (st->bucket = 0; st->bucket < tcp_hashinfo.ehash_size; ++st->bucket) {
 		struct sock *sk;
 		struct hlist_node *node;
@@ -1463,6 +1501,8 @@ static void *established_get_first(struct seq_file *seq)
 
 		read_lock(&tcp_hashinfo.ehash[st->bucket].lock);
 		sk_for_each(sk, node, &tcp_hashinfo.ehash[st->bucket].chain) {
+			if (!ve_accessible(sk->owner_env, ve))
+				continue;
 			if (sk->sk_family != st->family) {
 				continue;
 			}
@@ -1472,6 +1512,8 @@ static void *established_get_first(struct seq_file *seq)
 		st->state = TCP_SEQ_STATE_TIME_WAIT;
 		inet_twsk_for_each(tw, node,
 				   &tcp_hashinfo.ehash[st->bucket + tcp_hashinfo.ehash_size].chain) {
+			if (!ve_accessible_veid(tw->tw_owner_env, VEID(ve)))
+				continue;
 			if (tw->tw_family != st->family) {
 				continue;
 			}
@@ -1491,16 +1533,17 @@ static void *established_get_next(struct seq_file *seq, void *cur)
 	struct inet_timewait_sock *tw;
 	struct hlist_node *node;
 	struct tcp_iter_state* st = seq->private;
+	struct ve_struct *ve;
 
+	ve = get_exec_env();
 	++st->num;
 
 	if (st->state == TCP_SEQ_STATE_TIME_WAIT) {
 		tw = cur;
-		tw = tw_next(tw);
+		tw = tw_next(tw, VEID(ve));
 get_tw:
-		while (tw && tw->tw_family != st->family) {
-			tw = tw_next(tw);
-		}
+		while (tw && tw->tw_family != st->family)
+			tw = tw_next(tw, VEID(ve));
 		if (tw) {
 			cur = tw;
 			goto out;
@@ -1522,12 +1565,15 @@ get_tw:
 		sk = sk_next(sk);
 
 	sk_for_each_from(sk, node) {
+		if (!ve_accessible(sk->owner_env, ve))
+			continue;
 		if (sk->sk_family == st->family)
 			goto found;
 	}
 
 	st->state = TCP_SEQ_STATE_TIME_WAIT;
-	tw = tw_head(&tcp_hashinfo.ehash[st->bucket + tcp_hashinfo.ehash_size].chain);
+	tw = tw_head(&tcp_hashinfo.ehash[st->bucket +
+			tcp_hashinfo.ehash_size].chain, VEID(ve));
 	goto get_tw;
 found:
 	cur = sk;
@@ -1672,7 +1718,7 @@ int tcp_proc_register(struct tcp_seq_afinfo *afinfo)
 	afinfo->seq_fops->llseek	= seq_lseek;
 	afinfo->seq_fops->release	= seq_release_private;
 	
-	p = proc_net_fops_create(afinfo->name, S_IRUGO, afinfo->seq_fops);
+	p = proc_glob_fops_create(afinfo->name, S_IRUGO, afinfo->seq_fops);
 	if (p)
 		p->data = afinfo;
 	else
@@ -1684,7 +1730,8 @@ void tcp_proc_unregister(struct tcp_seq_afinfo *afinfo)
 {
 	if (!afinfo)
 		return;
-	proc_net_remove(afinfo->name);
+
+	remove_proc_glob_entry(afinfo->name, NULL);
 	memset(afinfo->seq_fops, 0, sizeof(*afinfo->seq_fops)); 
 }
 
@@ -1815,7 +1862,7 @@ out:
 static struct file_operations tcp4_seq_fops;
 static struct tcp_seq_afinfo tcp4_seq_afinfo = {
 	.owner		= THIS_MODULE,
-	.name		= "tcp",
+	.name		= "net/tcp",
 	.family		= AF_INET,
 	.seq_show	= tcp4_seq_show,
 	.seq_fops	= &tcp4_seq_fops,
@@ -1874,6 +1921,86 @@ void __init tcp_v4_init(struct net_proto_family *ops)
 	if (inet_csk_ctl_sock_create(&tcp_socket, PF_INET, SOCK_RAW, IPPROTO_TCP) < 0)
 		panic("Failed to create the TCP control socket.\n");
 }
+
+#ifdef CONFIG_VE
+static void tcp_kill_ve_onesk(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	/* Check the assumed state of the socket. */
+	if (!sock_flag(sk, SOCK_DEAD)) {
+		static int printed;
+invalid:
+		if (!printed)
+			printk(KERN_DEBUG "Killing sk: dead %d, state %d, "
+				"wrseq %u unseq %u, wrqu %d.\n",
+				sock_flag(sk, SOCK_DEAD), sk->sk_state,
+				tp->write_seq, tp->snd_una,
+				!skb_queue_empty(&sk->sk_write_queue));
+		printed = 1;
+		return;
+	}
+
+	tcp_send_active_reset(sk, GFP_ATOMIC);
+	switch (sk->sk_state) {
+		case TCP_FIN_WAIT1:
+		case TCP_CLOSING:
+			/* In these 2 states the peer may want us to retransmit
+			 * some data and/or FIN.  Entering "resetting mode"
+			 * instead.
+			 */
+			tcp_time_wait(sk, TCP_CLOSE, 0);
+			break;
+		case TCP_FIN_WAIT2:
+			/* By some reason the socket may stay in this state
+			 * without turning into a TW bucket.  Fix it.
+			 */
+			tcp_time_wait(sk, TCP_FIN_WAIT2, 0);
+			break;
+		case TCP_LAST_ACK:
+			/* Just jump into CLOSED state. */
+			tcp_done(sk);
+			break;
+		default:
+			/* The socket must be already close()d. */
+			goto invalid;
+	}
+}
+
+void tcp_v4_kill_ve_sockets(struct ve_struct *envid)
+{
+	struct inet_ehash_bucket *head;
+	int i;
+
+	/* alive */
+	local_bh_disable();
+	head = tcp_hashinfo.ehash;
+	for (i = 0; i < tcp_hashinfo.ehash_size; i++) {
+		struct sock *sk;
+		struct hlist_node *node;
+more_work:
+		write_lock(&head[i].lock);
+		sk_for_each(sk, node, &head[i].chain) {
+			if (ve_accessible_strict(sk->owner_env, envid)) {
+				sock_hold(sk);
+				write_unlock(&head[i].lock);
+
+				bh_lock_sock(sk);
+				/* sk might have disappeared from the hash before
+				 * we got the lock */
+				if (sk->sk_state != TCP_CLOSE)
+					tcp_kill_ve_onesk(sk);
+				bh_unlock_sock(sk);
+				sock_put(sk);
+				goto more_work;
+			}
+		}
+		write_unlock(&head[i].lock);
+	}
+	local_bh_enable();
+}
+EXPORT_SYMBOL(tcp_v4_kill_ve_sockets);
+#endif
 
 EXPORT_SYMBOL(ipv4_specific);
 EXPORT_SYMBOL(tcp_hashinfo);

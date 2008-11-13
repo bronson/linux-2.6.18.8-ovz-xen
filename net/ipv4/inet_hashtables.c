@@ -29,7 +29,8 @@
  */
 struct inet_bind_bucket *inet_bind_bucket_create(kmem_cache_t *cachep,
 						 struct inet_bind_hashbucket *head,
-						 const unsigned short snum)
+						 const unsigned short snum,
+						 struct ve_struct *ve)
 {
 	struct inet_bind_bucket *tb = kmem_cache_alloc(cachep, SLAB_ATOMIC);
 
@@ -37,6 +38,7 @@ struct inet_bind_bucket *inet_bind_bucket_create(kmem_cache_t *cachep,
 		tb->port      = snum;
 		tb->fastreuse = 0;
 		INIT_HLIST_HEAD(&tb->owners);
+		tb->owner_env = ve;
 		hlist_add_head(&tb->node, &head->chain);
 	}
 	return tb;
@@ -66,10 +68,13 @@ void inet_bind_hash(struct sock *sk, struct inet_bind_bucket *tb,
  */
 static void __inet_put_port(struct inet_hashinfo *hashinfo, struct sock *sk)
 {
-	const int bhash = inet_bhashfn(inet_sk(sk)->num, hashinfo->bhash_size);
-	struct inet_bind_hashbucket *head = &hashinfo->bhash[bhash];
+	int bhash;
+	struct inet_bind_hashbucket *head;
 	struct inet_bind_bucket *tb;
 
+	bhash = inet_bhashfn(inet_sk(sk)->num, hashinfo->bhash_size,
+			VEID(sk->owner_env));
+	head = &hashinfo->bhash[bhash];
 	spin_lock(&head->lock);
 	tb = inet_csk(sk)->icsk_bind_hash;
 	__sk_del_bind_node(sk);
@@ -125,7 +130,8 @@ EXPORT_SYMBOL(inet_listen_wlock);
  * wildcarded during the search since they can never be otherwise.
  */
 struct sock *__inet_lookup_listener(const struct hlist_head *head, const u32 daddr,
-				    const unsigned short hnum, const int dif)
+				    const unsigned short hnum, const int dif,
+				    struct ve_struct *env)
 {
 	struct sock *result = NULL, *sk;
 	const struct hlist_node *node;
@@ -134,6 +140,8 @@ struct sock *__inet_lookup_listener(const struct hlist_head *head, const u32 dad
 	sk_for_each(sk, node, head) {
 		const struct inet_sock *inet = inet_sk(sk);
 
+		if (!ve_accessible_strict(sk->owner_env, env))
+			continue;
 		if (inet->num == hnum && !ipv6_only_sock(sk)) {
 			const __u32 rcv_saddr = inet->rcv_saddr;
 			int score = sk->sk_family == PF_INET ? 1 : 0;
@@ -164,7 +172,8 @@ EXPORT_SYMBOL_GPL(__inet_lookup_listener);
 /* called with local bh disabled */
 static int __inet_check_established(struct inet_timewait_death_row *death_row,
 				    struct sock *sk, __u16 lport,
-				    struct inet_timewait_sock **twp)
+				    struct inet_timewait_sock **twp,
+				    struct ve_struct *ve)
 {
 	struct inet_hashinfo *hinfo = death_row->hashinfo;
 	struct inet_sock *inet = inet_sk(sk);
@@ -173,11 +182,14 @@ static int __inet_check_established(struct inet_timewait_death_row *death_row,
 	int dif = sk->sk_bound_dev_if;
 	INET_ADDR_COOKIE(acookie, saddr, daddr)
 	const __u32 ports = INET_COMBINED_PORTS(inet->dport, lport);
-	unsigned int hash = inet_ehashfn(daddr, lport, saddr, inet->dport);
-	struct inet_ehash_bucket *head = inet_ehash_bucket(hinfo, hash);
+	unsigned int hash;
+	struct inet_ehash_bucket *head;
 	struct sock *sk2;
 	const struct hlist_node *node;
 	struct inet_timewait_sock *tw;
+
+	hash = inet_ehashfn(daddr, lport, saddr, inet->dport, VEID(ve));
+	head = inet_ehash_bucket(hinfo, hash);
 
 	prefetch(head->chain.first);
 	write_lock(&head->lock);
@@ -186,7 +198,8 @@ static int __inet_check_established(struct inet_timewait_death_row *death_row,
 	sk_for_each(sk2, node, &(head + hinfo->ehash_size)->chain) {
 		tw = inet_twsk(sk2);
 
-		if (INET_TW_MATCH(sk2, hash, acookie, saddr, daddr, ports, dif)) {
+		if (INET_TW_MATCH(sk2, hash, acookie, saddr, daddr,
+					ports, dif, ve)) {
 			if (twsk_unique(sk, sk2, twp))
 				goto unique;
 			else
@@ -197,7 +210,8 @@ static int __inet_check_established(struct inet_timewait_death_row *death_row,
 
 	/* And established part... */
 	sk_for_each(sk2, node, &head->chain) {
-		if (INET_MATCH(sk2, hash, acookie, saddr, daddr, ports, dif))
+		if (INET_MATCH(sk2, hash, acookie, saddr, daddr,
+					ports, dif, ve))
 			goto not_unique;
 	}
 
@@ -248,7 +262,9 @@ int inet_hash_connect(struct inet_timewait_death_row *death_row,
  	struct inet_bind_hashbucket *head;
  	struct inet_bind_bucket *tb;
 	int ret;
+	struct ve_struct *ve;
 
+	ve = sk->owner_env;
  	if (!snum) {
  		int low = sysctl_local_port_range[0];
  		int high = sysctl_local_port_range[1];
@@ -263,7 +279,8 @@ int inet_hash_connect(struct inet_timewait_death_row *death_row,
  		local_bh_disable();
 		for (i = 1; i <= range; i++) {
 			port = low + (i + offset) % range;
- 			head = &hinfo->bhash[inet_bhashfn(port, hinfo->bhash_size)];
+ 			head = &hinfo->bhash[inet_bhashfn(port,
+					hinfo->bhash_size, VEID(ve))];
  			spin_lock(&head->lock);
 
  			/* Does not bother with rcv_saddr checks,
@@ -271,19 +288,21 @@ int inet_hash_connect(struct inet_timewait_death_row *death_row,
  			 * unique enough.
  			 */
 			inet_bind_bucket_for_each(tb, node, &head->chain) {
- 				if (tb->port == port) {
+ 				if (tb->port == port &&
+				    ve_accessible_strict(tb->owner_env, ve)) {
  					BUG_TRAP(!hlist_empty(&tb->owners));
  					if (tb->fastreuse >= 0)
  						goto next_port;
  					if (!__inet_check_established(death_row,
 								      sk, port,
-								      &tw))
+								      &tw, ve))
  						goto ok;
  					goto next_port;
  				}
  			}
 
- 			tb = inet_bind_bucket_create(hinfo->bind_bucket_cachep, head, port);
+ 			tb = inet_bind_bucket_create(hinfo->bind_bucket_cachep,
+					head, port, ve);
  			if (!tb) {
  				spin_unlock(&head->lock);
  				break;
@@ -318,7 +337,7 @@ ok:
 		goto out;
  	}
 
- 	head = &hinfo->bhash[inet_bhashfn(snum, hinfo->bhash_size)];
+ 	head = &hinfo->bhash[inet_bhashfn(snum, hinfo->bhash_size, VEID(ve))];
  	tb  = inet_csk(sk)->icsk_bind_hash;
 	spin_lock_bh(&head->lock);
 	if (sk_head(&tb->owners) == sk && !sk->sk_bind_node.next) {
@@ -328,7 +347,7 @@ ok:
 	} else {
 		spin_unlock(&head->lock);
 		/* No definite answer... Walk to established hash table */
-		ret = __inet_check_established(death_row, sk, snum, NULL);
+		ret = __inet_check_established(death_row, sk, snum, NULL, ve);
 out:
 		local_bh_enable();
 		return ret;

@@ -167,7 +167,7 @@ static struct audit_parent *audit_init_parent(struct nameidata *ndp)
 	inotify_init_watch(&parent->wdata);
 	/* grab a ref so inotify watch hangs around until we take audit_filter_mutex */
 	get_inotify_watch(&parent->wdata);
-	wd = inotify_add_watch(audit_ih, &parent->wdata, ndp->dentry->d_inode,
+	wd = inotify_add_watch_dget(audit_ih, &parent->wdata, ndp->dentry, ndp->mnt,
 			       AUDIT_IN_WATCH);
 	if (wd < 0) {
 		audit_free_parent(&parent->wdata);

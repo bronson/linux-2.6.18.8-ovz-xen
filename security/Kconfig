@@ -4,6 +4,8 @@
 
 menu "Security options"
 
+source grsecurity/Kconfig
+
 config KEYS
 	bool "Enable access key retention support"
 	help
@@ -41,7 +43,7 @@ config KEYS_DEBUG_PROC_KEYS
 
 config SECURITY
 	bool "Enable different security models"
-	depends on SYSFS
+	depends on SYSFS && !VE
 	help
 	  This allows you to choose different security modules to be
 	  configured into your kernel.

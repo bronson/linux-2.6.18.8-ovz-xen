@@ -25,6 +25,7 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/mman.h>
+#include <linux/virtinfo.h>
 #include <linux/a.out.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
@@ -49,9 +50,12 @@
 #include <linux/acct.h>
 #include <linux/cn_proc.h>
 #include <linux/audit.h>
+#include <linux/grsecurity.h>
 
 #include <asm/uaccess.h>
 #include <asm/mmu_context.h>
+
+#include <ub/ub_vmpages.h>
 
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
@@ -63,6 +67,8 @@ int suid_dumpable = 0;
 
 EXPORT_SYMBOL(suid_dumpable);
 /* The maximal length of core_pattern is also specified in sysctl.c */
+
+int sysctl_at_vsyscall;
 
 static struct linux_binfmt *formats;
 static DEFINE_RWLOCK(binfmt_lock);
@@ -308,6 +314,10 @@ void install_arg_page(struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 	pte_t * pte;
 	spinlock_t *ptl;
+	struct page_beancounter *pb;
+
+	if (unlikely(pb_alloc(&pb)))
+		goto out_nopb;
 
 	if (unlikely(anon_vma_prepare(vma)))
 		goto out;
@@ -324,12 +334,17 @@ void install_arg_page(struct vm_area_struct *vma,
 	lru_cache_add_active(page);
 	set_pte_at(mm, address, pte, pte_mkdirty(pte_mkwrite(mk_pte(
 					page, vma->vm_page_prot))));
+	pb_add_ref(page, mm, &pb);
+	ub_unused_privvm_dec(mm, vma);
+	pb_free(&pb);
 	page_add_new_anon_rmap(page, vma, address);
 	pte_unmap_unlock(pte, ptl);
 
 	/* no need for flush_tlb */
 	return;
 out:
+	pb_free(&pb);
+out_nopb:
 	__free_page(page);
 	force_sig(SIGKILL, current);
 }
@@ -404,9 +419,14 @@ int setup_arg_pages(struct linux_binprm *bprm,
 		bprm->loader += stack_base;
 	bprm->exec += stack_base;
 
-	mpnt = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+	ret = -ENOMEM;
+	if (ub_memory_charge(mm, arg_size, VM_STACK_FLAGS | mm->def_flags,
+				NULL, UB_SOFT))
+		goto fail_charge;
+
+	mpnt = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL | __GFP_SOFT_UBC);
 	if (!mpnt)
-		return -ENOMEM;
+		goto fail_alloc;
 
 	memset(mpnt, 0, sizeof(*mpnt));
 
@@ -431,11 +451,8 @@ int setup_arg_pages(struct linux_binprm *bprm,
 			mpnt->vm_flags = VM_STACK_FLAGS;
 		mpnt->vm_flags |= mm->def_flags;
 		mpnt->vm_page_prot = protection_map[mpnt->vm_flags & 0x7];
-		if ((ret = insert_vm_struct(mm, mpnt))) {
-			up_write(&mm->mmap_sem);
-			kmem_cache_free(vm_area_cachep, mpnt);
-			return ret;
-		}
+		if ((ret = insert_vm_struct(mm, mpnt)))
+			goto fail_insert;
 		mm->stack_vm = mm->total_vm = vma_pages(mpnt);
 	}
 
@@ -450,6 +467,14 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	up_write(&mm->mmap_sem);
 	
 	return 0;
+
+fail_insert:
+	up_write(&mm->mmap_sem);
+	kmem_cache_free(vm_area_cachep, mpnt);
+fail_alloc:
+	ub_memory_uncharge(mm, arg_size, VM_STACK_FLAGS | mm->def_flags, NULL);
+fail_charge:
+	return ret;
 }
 
 EXPORT_SYMBOL(setup_arg_pages);
@@ -525,10 +550,11 @@ int kernel_read(struct file *file, unsigned long offset,
 
 EXPORT_SYMBOL(kernel_read);
 
-static int exec_mmap(struct mm_struct *mm)
+static int exec_mmap(struct linux_binprm *bprm)
 {
 	struct task_struct *tsk;
-	struct mm_struct * old_mm, *active_mm;
+	struct mm_struct *old_mm, *active_mm, *mm;
+	int ret;
 
 	/* Notify parent that we're no longer interested in the old VM */
 	tsk = current;
@@ -550,6 +576,10 @@ static int exec_mmap(struct mm_struct *mm)
 			return -EINTR;
 		}
 	}
+
+	ret = 0;
+	mm = bprm->mm;
+	mm->vps_dumpable = 1;
 	task_lock(tsk);
 	active_mm = tsk->active_mm;
 	tsk->mm = mm;
@@ -557,14 +587,24 @@ static int exec_mmap(struct mm_struct *mm)
 	activate_mm(active_mm, mm);
 	task_unlock(tsk);
 	arch_pick_mmap_layout(mm);
+	bprm->mm = NULL;		/* We're using it now */
+
+#ifdef CONFIG_VZ_GENCALLS
+	if (virtinfo_notifier_call(VITYPE_GENERAL, VIRTINFO_EXECMMAP,
+				bprm) & NOTIFY_FAIL) {
+		/* similar to binfmt_elf */
+		send_sig(SIGKILL, current, 0);
+		ret = -ENOMEM;
+	}
+#endif
 	if (old_mm) {
 		up_read(&old_mm->mmap_sem);
 		BUG_ON(active_mm != old_mm);
 		mmput(old_mm);
-		return 0;
+		return ret;
 	}
 	mmdrop(active_mm);
-	return 0;
+	return ret;
 }
 
 /*
@@ -704,7 +744,14 @@ static int de_thread(struct task_struct *tsk)
 		attach_pid(current, PIDTYPE_PID,  current->pid);
 		attach_pid(current, PIDTYPE_PGID, current->signal->pgrp);
 		attach_pid(current, PIDTYPE_SID,  current->signal->session);
+		set_virt_tgid(leader, virt_pid(current));
+		set_virt_pid(leader, virt_pid(current));
+		set_virt_pid(current, virt_tgid(current));
 		list_replace_rcu(&leader->tasks, &current->tasks);
+#ifdef CONFIG_VE
+		list_replace_rcu(&leader->ve_task_info.vetask_list,
+				&current->ve_task_info.vetask_list);
+#endif
 
 		current->group_leader = current;
 		leader->group_leader = current;
@@ -845,11 +892,9 @@ int flush_old_exec(struct linux_binprm * bprm)
 	/*
 	 * Release all of the old mmap stuff
 	 */
-	retval = exec_mmap(bprm->mm);
+	retval = exec_mmap(bprm);
 	if (retval)
 		goto mmap_failed;
-
-	bprm->mm = NULL;		/* We're using it now */
 
 	/* This is the point of no return */
 	put_files_struct(files);
@@ -883,9 +928,12 @@ int flush_old_exec(struct linux_binprm * bprm)
 	 */
 	current->mm->task_size = TASK_SIZE;
 
-	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid || 
-	    file_permission(bprm->file, MAY_READ) ||
-	    (bprm->interp_flags & BINPRM_FLAGS_ENFORCE_NONDUMP)) {
+	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid) {
+		suid_keys(current);
+		current->mm->dumpable = suid_dumpable;
+		current->pdeath_signal = 0;
+	} else if (file_permission(bprm->file, MAY_READ) ||
+			(bprm->interp_flags & BINPRM_FLAGS_ENFORCE_NONDUMP)) {
 		suid_keys(current);
 		current->mm->dumpable = suid_dumpable;
 	}
@@ -901,8 +949,7 @@ int flush_old_exec(struct linux_binprm * bprm)
 	return 0;
 
 mmap_failed:
-	put_files_struct(current->files);
-	current->files = files;
+	reset_files_struct(current, files);
 out:
 	return retval;
 }
@@ -977,8 +1024,10 @@ void compute_creds(struct linux_binprm *bprm)
 {
 	int unsafe;
 
-	if (bprm->e_uid != current->uid)
+	if (bprm->e_uid != current->uid) {
 		suid_keys(current);
+		current->pdeath_signal = 0;
+	}
 	exec_keys(current);
 
 	task_lock(current);
@@ -1133,6 +1182,10 @@ int do_execve(char * filename,
 	int retval;
 	int i;
 
+	retval = virtinfo_gencall(VIRTINFO_DOEXECVE, NULL);
+	if (retval)
+		return retval;
+
 	retval = -ENOMEM;
 	bprm = kzalloc(sizeof(*bprm), GFP_KERNEL);
 	if (!bprm)
@@ -1187,6 +1240,11 @@ int do_execve(char * filename,
 	retval = copy_strings(bprm->argc, argv, bprm);
 	if (retval < 0)
 		goto out;
+
+	if (!gr_tpe_allow(file)) {
+		retval = -EACCES;
+		goto out;
+	}
 
 	retval = search_binary_handler(bprm,regs);
 	if (retval >= 0) {
@@ -1278,7 +1336,7 @@ static void format_corename(char *corename, const char *pattern, long signr)
 			case 'p':
 				pid_in_pattern = 1;
 				rc = snprintf(out_ptr, out_end - out_ptr,
-					      "%d", current->tgid);
+					      "%d", virt_tgid(current));
 				if (rc > out_end - out_ptr)
 					goto out;
 				out_ptr += rc;
@@ -1322,7 +1380,7 @@ static void format_corename(char *corename, const char *pattern, long signr)
 			case 'h':
 				down_read(&uts_sem);
 				rc = snprintf(out_ptr, out_end - out_ptr,
-					      "%s", system_utsname.nodename);
+					      "%s", utsname()->nodename);
 				up_read(&uts_sem);
 				if (rc > out_end - out_ptr)
 					goto out;
@@ -1350,7 +1408,7 @@ static void format_corename(char *corename, const char *pattern, long signr)
 	if (!pid_in_pattern
             && (core_uses_pid || atomic_read(&current->mm->mm_users) != 1)) {
 		rc = snprintf(out_ptr, out_end - out_ptr,
-			      ".%d", current->tgid);
+			      ".%d", virt_tgid(current));
 		if (rc > out_end - out_ptr)
 			goto out;
 		out_ptr += rc;
@@ -1397,7 +1455,7 @@ static inline int zap_threads(struct task_struct *tsk, struct mm_struct *mm,
 		goto done;
 
 	rcu_read_lock();
-	for_each_process(g) {
+	for_each_process_ve(g) {
 		if (g == tsk->group_leader)
 			continue;
 
@@ -1472,7 +1530,7 @@ int do_coredump(long signr, int exit_code, struct pt_regs * regs)
 	if (!binfmt || !binfmt->core_dump)
 		goto fail;
 	down_write(&mm->mmap_sem);
-	if (!mm->dumpable) {
+	if (!mm->dumpable || mm->vps_dumpable != 1) {
 		up_write(&mm->mmap_sem);
 		goto fail;
 	}
@@ -1518,6 +1576,12 @@ int do_coredump(long signr, int exit_code, struct pt_regs * regs)
 		goto close_fail;
 
 	if (!S_ISREG(inode->i_mode))
+		goto close_fail;
+	/*
+	 * Dont allow local users get cute and trick others to coredump
+	 * into their pre-created files:
+	 */
+	if (inode->i_uid != current->fsuid)
 		goto close_fail;
 	if (!file->f_op)
 		goto close_fail;

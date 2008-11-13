@@ -31,12 +31,14 @@ static inline void pmd_free(pmd_t *pmd)
 
 static inline pmd_t *pmd_alloc_one (struct mm_struct *mm, unsigned long addr)
 {
-	return (pmd_t *)get_zeroed_page(GFP_KERNEL|__GFP_REPEAT);
+	return (pmd_t *)get_zeroed_page(GFP_KERNEL_UBC|__GFP_REPEAT|
+			__GFP_SOFT_UBC);
 }
 
 static inline pud_t *pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-	return (pud_t *)get_zeroed_page(GFP_KERNEL|__GFP_REPEAT);
+	return (pud_t *)get_zeroed_page(GFP_KERNEL_UBC|__GFP_REPEAT|
+			__GFP_SOFT_UBC);
 }
 
 static inline void pud_free (pud_t *pud)
@@ -74,7 +76,8 @@ static inline void pgd_list_del(pgd_t *pgd)
 static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
 	unsigned boundary;
-	pgd_t *pgd = (pgd_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+	pgd_t *pgd = (pgd_t *)__get_free_page(GFP_KERNEL_UBC|__GFP_REPEAT|
+			__GFP_SOFT_UBC);
 	if (!pgd)
 		return NULL;
 	pgd_list_add(pgd);
@@ -105,7 +108,8 @@ static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long ad
 
 static inline struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 {
-	void *p = (void *)get_zeroed_page(GFP_KERNEL|__GFP_REPEAT);
+	void *p = (void *)get_zeroed_page(GFP_KERNEL_UBC|__GFP_REPEAT|
+			__GFP_SOFT_UBC);
 	if (!p)
 		return NULL;
 	return virt_to_page(p);

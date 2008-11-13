@@ -709,7 +709,9 @@ int do_syscall_trace(struct pt_regs *regs, int entryexit)
 	/* the 0x80 provides a way for the tracing parent to distinguish
 	   between a syscall stop and SIGTRAP delivery */
 	/* Note that the debugger could change the result of test_thread_flag!*/
+	set_pn_state(current, entryexit ? PN_STOP_LEAVE : PN_STOP_ENTRY);
 	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD) ? 0x80:0));
+	clear_pn_state(current);
 
 	/*
 	 * this isn't the same as continuing with a signal, but it will do

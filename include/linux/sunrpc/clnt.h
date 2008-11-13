@@ -52,7 +52,8 @@ struct rpc_clnt {
 				cl_intr     : 1,/* interruptible */
 				cl_autobind : 1,/* use getport() */
 				cl_oneshot  : 1,/* dispose after use */
-				cl_dead     : 1;/* abandoned */
+				cl_dead     : 1,/* abandoned */
+				cl_broken   : 1;/* no responce for too long */
 
 	struct rpc_rtt *	cl_rtt;		/* RTO estimator data */
 	struct rpc_portmap *	cl_pmap;	/* port mapping */
@@ -66,6 +67,8 @@ struct rpc_clnt {
 	struct rpc_rtt		cl_rtt_default;
 	struct rpc_portmap	cl_pmap_default;
 	char			cl_inline_name[32];
+
+	unsigned long		cl_pr_time;
 };
 #define cl_timeout		cl_xprt->timeout
 #define cl_prog			cl_pmap->pm_prog

@@ -23,11 +23,6 @@ typedef struct {
 	unsigned long sig[_NSIG_WORDS];
 } sigset_t;
 
-
-struct pt_regs; 
-asmlinkage int do_signal(struct pt_regs *regs, sigset_t *oldset);
-
-
 #else
 /* Here we must cater to libcs that poke about in kernel headers.  */
 

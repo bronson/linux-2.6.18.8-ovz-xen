@@ -48,12 +48,15 @@ enum {LAST_NORM, LAST_ROOT, LAST_DOT, LAST_DOTDOT, LAST_BIND};
 #define LOOKUP_PARENT		16
 #define LOOKUP_NOALT		32
 #define LOOKUP_REVAL		64
+#define LOOKUP_STRICT		128	/* no symlinks or other filesystems */
+
 /*
  * Intent data
  */
 #define LOOKUP_OPEN		(0x0100)
 #define LOOKUP_CREATE		(0x0200)
 #define LOOKUP_ACCESS		(0x0400)
+#define LOOKUP_NOAREACHECK	(0x0800)	/* no area check on lookup */
 
 extern int FASTCALL(__user_walk(const char __user *, unsigned, struct nameidata *));
 extern int FASTCALL(__user_walk_fd(int dfd, const char __user *, unsigned, struct nameidata *));

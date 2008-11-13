@@ -259,11 +259,14 @@ static int dst_dev_event(struct notifier_block *this, unsigned long event, void 
 	switch (event) {
 	case NETDEV_UNREGISTER:
 	case NETDEV_DOWN:
-		spin_lock_bh(&dst_lock);
+		local_bh_disable();
+		dst_run_gc(0);
+		spin_lock(&dst_lock);
 		for (dst = dst_garbage_list; dst; dst = dst->next) {
 			dst_ifdown(dst, dev, event != NETDEV_DOWN);
 		}
-		spin_unlock_bh(&dst_lock);
+		spin_unlock(&dst_lock);
+		local_bh_enable();
 		break;
 	}
 	return NOTIFY_DONE;

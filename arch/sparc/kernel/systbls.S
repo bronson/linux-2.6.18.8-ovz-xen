@@ -78,7 +78,9 @@ sys_call_table:
 /*285*/	.long sys_mkdirat, sys_mknodat, sys_fchownat, sys_futimesat, sys_fstatat64
 /*290*/	.long sys_unlinkat, sys_renameat, sys_linkat, sys_symlinkat, sys_readlinkat
 /*295*/	.long sys_fchmodat, sys_faccessat, sys_pselect6, sys_ppoll, sys_unshare
-/*300*/	.long sys_set_robust_list, sys_get_robust_list
+/*300*/	.long sys_set_robust_list, sys_get_robust_list, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall
+/*305*/	.long sys_ni_syscall, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall, sys_ni_syscall
+/*310*/	.long sys_utimensat
 
 #ifdef CONFIG_SUNOS_EMUL
 	/* Now the SunOS syscall table. */

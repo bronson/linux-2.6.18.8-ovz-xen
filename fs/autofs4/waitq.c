@@ -101,27 +101,51 @@ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
 	/* Kernel protocol v4 missing and expire packets */
 	case autofs_ptype_missing:
 	{
-		struct autofs_packet_missing *mp = &pkt.missing;
+		if (sbi->flags & _AUTOFS_DEAMON_32BIT) {
+			struct autofs_packet_missing_32bit *mp = &pkt.missing_32bit;
 
-		pktsz = sizeof(*mp);
+			pktsz = sizeof(*mp);
 
-		mp->wait_queue_token = wq->wait_queue_token;
-		mp->len = wq->len;
-		memcpy(mp->name, wq->name, wq->len);
-		mp->name[wq->len] = '\0';
-		break;
+			mp->wait_queue_token = wq->wait_queue_token;
+			mp->len = wq->len;
+			memcpy(mp->name, wq->name, wq->len);
+			mp->name[wq->len] = '\0';
+			break;
+		} else {
+			struct autofs_packet_missing *mp = &pkt.missing;
+
+			pktsz = sizeof(*mp);
+
+			mp->wait_queue_token = wq->wait_queue_token;
+			mp->len = wq->len;
+			memcpy(mp->name, wq->name, wq->len);
+			mp->name[wq->len] = '\0';
+			break;
+		}
 	}
 	case autofs_ptype_expire_multi:
 	{
-		struct autofs_packet_expire_multi *ep = &pkt.expire_multi;
+		if (sbi->flags & _AUTOFS_DEAMON_32BIT) {
+			struct autofs_packet_expire_multi_32bit *ep = &pkt.expire_multi_32bit;
 
-		pktsz = sizeof(*ep);
+			pktsz = sizeof(*ep);
 
-		ep->wait_queue_token = wq->wait_queue_token;
-		ep->len = wq->len;
-		memcpy(ep->name, wq->name, wq->len);
-		ep->name[wq->len] = '\0';
-		break;
+			ep->wait_queue_token = wq->wait_queue_token;
+			ep->len = wq->len;
+			memcpy(ep->name, wq->name, wq->len);
+			ep->name[wq->len] = '\0';
+			break;
+		} else {
+			struct autofs_packet_expire_multi *ep = &pkt.expire_multi;
+
+			pktsz = sizeof(*ep);
+
+			ep->wait_queue_token = wq->wait_queue_token;
+			ep->len = wq->len;
+			memcpy(ep->name, wq->name, wq->len);
+			ep->name[wq->len] = '\0';
+			break;
+		}
 	}
 	/*
 	 * Kernel protocol v5 packet for handling indirect and direct
@@ -132,21 +156,39 @@ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
 	case autofs_ptype_missing_direct:
 	case autofs_ptype_expire_direct:
 	{
-		struct autofs_v5_packet *packet = &pkt.v5_packet;
+		if (sbi->flags & _AUTOFS_DEAMON_32BIT) {
+			struct autofs_v5_packet_32bit *packet = &pkt.v5_packet_32bit;
 
-		pktsz = sizeof(*packet);
+			pktsz = sizeof(*packet);
 
-		packet->wait_queue_token = wq->wait_queue_token;
-		packet->len = wq->len;
-		memcpy(packet->name, wq->name, wq->len);
-		packet->name[wq->len] = '\0';
-		packet->dev = wq->dev;
-		packet->ino = wq->ino;
-		packet->uid = wq->uid;
-		packet->gid = wq->gid;
-		packet->pid = wq->pid;
-		packet->tgid = wq->tgid;
-		break;
+			packet->wait_queue_token = wq->wait_queue_token;
+			packet->len = wq->len;
+			memcpy(packet->name, wq->name, wq->len);
+			packet->name[wq->len] = '\0';
+			packet->dev = wq->dev;
+			packet->ino = wq->ino;
+			packet->uid = wq->uid;
+			packet->gid = wq->gid;
+			packet->pid = wq->pid;
+			packet->tgid = wq->tgid;
+			break;
+		} else {
+			struct autofs_v5_packet *packet = &pkt.v5_packet;
+
+			pktsz = sizeof(*packet);
+
+			packet->wait_queue_token = wq->wait_queue_token;
+			packet->len = wq->len;
+			memcpy(packet->name, wq->name, wq->len);
+			packet->name[wq->len] = '\0';
+			packet->dev = wq->dev;
+			packet->ino = wq->ino;
+			packet->uid = wq->uid;
+			packet->gid = wq->gid;
+			packet->pid = wq->pid;
+			packet->tgid = wq->tgid;
+			break;
+		}
 	}
 	default:
 		printk("autofs4_notify_daemon: bad type %d!\n", type);

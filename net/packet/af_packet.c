@@ -78,6 +78,8 @@
 #include <linux/module.h>
 #include <linux/init.h>
 
+#include <ub/ub_net.h>
+
 #ifdef CONFIG_INET
 #include <net/inet_common.h>
 #endif
@@ -279,7 +281,8 @@ static int packet_rcv_spkt(struct sk_buff *skb, struct net_device *dev,  struct 
 	 *	so that this procedure is noop.
 	 */
 
-	if (skb->pkt_type == PACKET_LOOPBACK)
+	if (skb->pkt_type == PACKET_LOOPBACK ||
+			!ve_accessible(skb->owner_env, sk->owner_env))
 		goto out;
 
 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL)
@@ -471,6 +474,11 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 	sk = pt->af_packet_priv;
 	po = pkt_sk(sk);
 
+	if (!ve_accessible(skb->owner_env, sk->owner_env))
+		goto drop;
+
+	skb_orphan(skb);
+
 	skb->dev = dev;
 
 	if (dev->hard_header) {
@@ -530,6 +538,9 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 	if (pskb_trim(skb, snaplen))
 		goto drop_n_acct;
 
+	if (ub_sockrcvbuf_charge(sk, skb))
+		goto drop_n_acct;
+
 	skb_set_owner_r(skb, sk);
 	skb->dev = NULL;
 	dst_release(skb->dst);
@@ -580,6 +591,11 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev, struct packe
 	sk = pt->af_packet_priv;
 	po = pkt_sk(sk);
 
+	if (!ve_accessible(skb->owner_env, sk->owner_env))
+		goto drop;
+
+	skb_orphan(skb);
+
 	if (dev->hard_header) {
 		if (sk->sk_type != SOCK_DGRAM)
 			skb_push(skb, skb->data - skb->mac.raw);
@@ -625,6 +641,12 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev, struct packe
 		snaplen = po->frame_size - macoff;
 		if ((int)snaplen < 0)
 			snaplen = 0;
+	}
+
+	if (copy_skb &&
+	    ub_sockrcvbuf_charge(sk, copy_skb)) {
+		spin_lock(&sk->sk_receive_queue.lock);
+		goto ring_is_full;
 	}
 
 	spin_lock(&sk->sk_receive_queue.lock);
@@ -1007,6 +1029,8 @@ static int packet_create(struct socket *sock, int protocol)
 	sk = sk_alloc(PF_PACKET, GFP_KERNEL, &packet_proto, 1);
 	if (sk == NULL)
 		goto out;
+	if (ub_other_sock_charge(sk))
+		goto out_free;
 
 	sock->ops = &packet_ops;
 #ifdef CONFIG_SOCK_PACKET
@@ -1045,6 +1069,9 @@ static int packet_create(struct socket *sock, int protocol)
 	sk_add_node(sk, &packet_sklist);
 	write_unlock_bh(&packet_sklist_lock);
 	return(0);
+
+out_free:
+	sk_free(sk);
 out:
 	return err;
 }
@@ -1427,10 +1454,15 @@ static int packet_notifier(struct notifier_block *this, unsigned long msg, void 
 	struct sock *sk;
 	struct hlist_node *node;
 	struct net_device *dev = (struct net_device*)data;
+	struct ve_struct *ve;
 
+	ve = get_exec_env();
 	read_lock(&packet_sklist_lock);
 	sk_for_each(sk, node, &packet_sklist) {
 		struct packet_sock *po = pkt_sk(sk);
+
+		if (!ve_accessible_strict(sk->owner_env, ve))
+			continue;
 
 		switch (msg) {
 		case NETDEV_UNREGISTER:
@@ -1842,6 +1874,8 @@ static inline struct sock *packet_seq_idx(loff_t off)
 	struct hlist_node *node;
 
 	sk_for_each(s, node, &packet_sklist) {
+		if (!ve_accessible(s->owner_env, get_exec_env()))
+			continue;
 		if (!off--)
 			return s;
 	}
@@ -1857,9 +1891,14 @@ static void *packet_seq_start(struct seq_file *seq, loff_t *pos)
 static void *packet_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	++*pos;
-	return  (v == SEQ_START_TOKEN) 
-		? sk_head(&packet_sklist) 
-		: sk_next((struct sock*)v) ;
+	do {
+		v = (v == SEQ_START_TOKEN) 
+			? sk_head(&packet_sklist) 
+			: sk_next((struct sock*)v);
+	} while (v != NULL &&
+			!ve_accessible(((struct sock*)v)->owner_env,
+				get_exec_env()));
+	return v;
 }
 
 static void packet_seq_stop(struct seq_file *seq, void *v)
@@ -1915,7 +1954,7 @@ static struct file_operations packet_seq_fops = {
 
 static void __exit packet_exit(void)
 {
-	proc_net_remove("packet");
+	remove_proc_glob_entry("net/packet", NULL);
 	unregister_netdevice_notifier(&packet_netdev_notifier);
 	sock_unregister(PF_PACKET);
 	proto_unregister(&packet_proto);
@@ -1930,7 +1969,7 @@ static int __init packet_init(void)
 
 	sock_register(&packet_family_ops);
 	register_netdevice_notifier(&packet_netdev_notifier);
-	proc_net_fops_create("packet", 0, &packet_seq_fops);
+	proc_glob_fops_create("net/packet", 0, &packet_seq_fops);
 out:
 	return rc;
 }
