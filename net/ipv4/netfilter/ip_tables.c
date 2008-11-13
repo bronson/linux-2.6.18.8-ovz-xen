@@ -516,10 +516,10 @@ static inline int check_match(struct ipt_entry_match *m, const char *name,
 
 static inline int
 find_check_match(struct ipt_entry_match *m,
-	const char *name,
-	const struct ipt_ip *ip,
-	unsigned int hookmask,
-	unsigned int *i)
+	    const char *name,
+	    const struct ipt_ip *ip,
+	    unsigned int hookmask,
+	    unsigned int *i)
 {
 	struct ipt_match *match;
 	int ret;

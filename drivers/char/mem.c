@@ -697,8 +697,6 @@ struct vm_operations_struct zero_vm_ops =
 
 static int mmap_zero(struct file * file, struct vm_area_struct * vma)
 {
-	int err;
-
 	if (vma->vm_flags & VM_SHARED)
 		return shmem_zero_setup(vma);
 	vma->vm_ops = &zero_vm_ops;

@@ -333,8 +333,6 @@
 
 #define NR_SYSCALLS		513
 
-#define NR_SYSCALLS		302
-
 #ifdef __KERNEL__
 /* WARNING: You MAY NOT add syscall numbers larger than 301, since
  *          all of the syscall tables in the Sparc kernel are
