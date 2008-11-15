@@ -12,6 +12,8 @@ obj-$(CONFIG_PPC_85xx)		+= 85xx/
 obj-$(CONFIG_PPC_86xx)		+= 86xx/
 obj-$(CONFIG_PPC_PSERIES)	+= pseries/
 obj-$(CONFIG_PPC_ISERIES)	+= iseries/
+# must occur before xen hosting platforms
+obj-$(CONFIG_PPC_XEN)		+= xen/
 obj-$(CONFIG_PPC_MAPLE)		+= maple/
 obj-$(CONFIG_PPC_CELL)		+= cell/
 obj-$(CONFIG_EMBEDDED6xx)	+= embedded6xx/

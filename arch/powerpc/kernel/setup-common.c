@@ -387,6 +387,12 @@ void __init smp_setup_cpu_maps(void)
 		}
 	}
 
+	if (machine_is(xen)) {
+		/* something more inteligent perhaps? */
+		for (cpu = 0; cpu < NR_CPUS; cpu++)
+			cpu_set(cpu, cpu_possible_map);
+	}
+
 #ifdef CONFIG_PPC64
 	/*
 	 * On pSeries LPAR, we need to know how many cpus

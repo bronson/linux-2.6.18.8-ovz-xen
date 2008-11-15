@@ -30,6 +30,9 @@
 #include <linux/smp_lock.h>
 #include <linux/threads.h>
 #include <linux/bitops.h>
+#ifdef CONFIG_XEN
+#include <linux/cpu.h>
+#endif
 
 #include <asm/delay.h>
 #include <asm/intrinsics.h>
@@ -69,6 +72,13 @@ int
 assign_irq_vector (int irq)
 {
 	int pos, vector;
+
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		extern int xen_assign_irq_vector(int);
+		return xen_assign_irq_vector(irq);
+	}
+#endif
  again:
 	pos = find_first_zero_bit(ia64_vector_mask, IA64_NUM_DEVICE_VECTORS);
 	vector = IA64_FIRST_DEVICE_VECTOR + pos;
@@ -87,6 +97,13 @@ free_irq_vector (int vector)
 	if (vector < IA64_FIRST_DEVICE_VECTOR || vector > IA64_LAST_DEVICE_VECTOR)
 		return;
 
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		extern void xen_free_irq_vector(int);
+		xen_free_irq_vector(vector);
+		return;
+	}
+#endif
 	pos = vector - IA64_FIRST_DEVICE_VECTOR;
 	if (!test_and_clear_bit(pos, ia64_vector_mask))
 		printk(KERN_WARNING "%s: double free!\n", __FUNCTION__);
@@ -240,11 +257,339 @@ static struct irqaction ipi_irqaction = {
 };
 #endif
 
+#ifdef CONFIG_XEN
+#include <xen/evtchn.h>
+#include <xen/interface/callback.h>
+
+static DEFINE_PER_CPU(int, timer_irq) = -1;
+static DEFINE_PER_CPU(int, ipi_irq) = -1;
+static DEFINE_PER_CPU(int, resched_irq) = -1;
+static DEFINE_PER_CPU(int, cmc_irq) = -1;
+static DEFINE_PER_CPU(int, cmcp_irq) = -1;
+static DEFINE_PER_CPU(int, cpep_irq) = -1;
+static char timer_name[NR_CPUS][15];
+static char ipi_name[NR_CPUS][15];
+static char resched_name[NR_CPUS][15];
+static char cmc_name[NR_CPUS][15];
+static char cmcp_name[NR_CPUS][15];
+static char cpep_name[NR_CPUS][15];
+
+struct saved_irq {
+	unsigned int irq;
+	struct irqaction *action;
+};
+/* 16 should be far optimistic value, since only several percpu irqs
+ * are registered early.
+ */
+#define MAX_LATE_IRQ	16
+static struct saved_irq saved_percpu_irqs[MAX_LATE_IRQ];
+static unsigned short late_irq_cnt = 0;
+static unsigned short saved_irq_cnt = 0;
+static int xen_slab_ready = 0;
+
+#ifdef CONFIG_SMP
+/* Dummy stub. Though we may check RESCHEDULE_VECTOR before __do_IRQ,
+ * it ends up to issue several memory accesses upon percpu data and
+ * thus adds unnecessary traffic to other paths.
+ */
+static irqreturn_t
+handle_reschedule(int irq, void *dev_id, struct pt_regs *regs)
+{
+
+	return IRQ_HANDLED;
+}
+
+static struct irqaction resched_irqaction = {
+	.handler =	handle_reschedule,
+	.flags =	SA_INTERRUPT,
+	.name =		"RESCHED"
+};
+#endif
+
+/*
+ * This is xen version percpu irq registration, which needs bind
+ * to xen specific evtchn sub-system. One trick here is that xen
+ * evtchn binding interface depends on kmalloc because related
+ * port needs to be freed at device/cpu down. So we cache the
+ * registration on BSP before slab is ready and then deal them
+ * at later point. For rest instances happening after slab ready,
+ * we hook them to xen evtchn immediately.
+ *
+ * FIXME: MCA is not supported by far, and thus "nomca" boot param is
+ * required.
+ */
+static void
+xen_register_percpu_irq(unsigned int cpu, unsigned int vec,
+			 struct irqaction *action, int save)
+{
+	irq_desc_t *desc;
+	int irq = 0;
+
+	if (xen_slab_ready) {
+		switch (vec) {
+		case IA64_TIMER_VECTOR:
+			sprintf(timer_name[cpu], "%s%d", action->name, cpu);
+			irq = bind_virq_to_irqhandler(VIRQ_ITC, cpu,
+				action->handler, action->flags,
+				timer_name[cpu], action->dev_id);
+			per_cpu(timer_irq,cpu) = irq;
+			break;
+		case IA64_IPI_RESCHEDULE:
+			sprintf(resched_name[cpu], "%s%d", action->name, cpu);
+			irq = bind_ipi_to_irqhandler(RESCHEDULE_VECTOR, cpu,
+				action->handler, action->flags,
+				resched_name[cpu], action->dev_id);
+			per_cpu(resched_irq,cpu) = irq;
+			break;
+		case IA64_IPI_VECTOR:
+			sprintf(ipi_name[cpu], "%s%d", action->name, cpu);
+			irq = bind_ipi_to_irqhandler(IPI_VECTOR, cpu,
+				action->handler, action->flags,
+				ipi_name[cpu], action->dev_id);
+			per_cpu(ipi_irq,cpu) = irq;
+			break;
+		case IA64_CMC_VECTOR:
+			sprintf(cmc_name[cpu], "%s%d", action->name, cpu);
+			irq = bind_virq_to_irqhandler(VIRQ_MCA_CMC, cpu,
+			                              action->handler,
+			                              action->flags,
+			                              cmc_name[cpu],
+			                              action->dev_id);
+			per_cpu(cmc_irq,cpu) = irq;
+			break;
+		case IA64_CMCP_VECTOR:
+			sprintf(cmcp_name[cpu], "%s%d", action->name, cpu);
+			irq = bind_ipi_to_irqhandler(CMCP_VECTOR, cpu,
+			                             action->handler,
+			                             action->flags,
+			                             cmcp_name[cpu],
+			                             action->dev_id);
+			per_cpu(cmcp_irq,cpu) = irq;
+			break;
+		case IA64_CPEP_VECTOR:
+			sprintf(cpep_name[cpu], "%s%d", action->name, cpu);
+			irq = bind_ipi_to_irqhandler(CPEP_VECTOR, cpu,
+			                             action->handler,
+			                             action->flags,
+			                             cpep_name[cpu],
+			                             action->dev_id);
+			per_cpu(cpep_irq,cpu) = irq;
+			break;
+		case IA64_CPE_VECTOR:
+		case IA64_MCA_RENDEZ_VECTOR:
+		case IA64_PERFMON_VECTOR:
+		case IA64_MCA_WAKEUP_VECTOR:
+		case IA64_SPURIOUS_INT_VECTOR:
+			/* No need to complain, these aren't supported. */
+			break;
+		default:
+			printk(KERN_WARNING "Percpu irq %d is unsupported "
+			       "by xen!\n", vec);
+			break;
+		}
+		BUG_ON(irq < 0);
+
+		if (irq > 0) {
+			/*
+			 * Mark percpu.  Without this, migrate_irqs() will
+			 * mark the interrupt for migrations and trigger it
+			 * on cpu hotplug.
+			 */
+			desc = irq_desc + irq;
+			desc->status |= IRQ_PER_CPU;
+		}
+	} 
+
+	/* For BSP, we cache registered percpu irqs, and then re-walk
+	 * them when initializing APs
+	 */
+	if (!cpu && save) {
+		BUG_ON(saved_irq_cnt == MAX_LATE_IRQ);
+		saved_percpu_irqs[saved_irq_cnt].irq = vec;
+		saved_percpu_irqs[saved_irq_cnt].action = action;
+		saved_irq_cnt++;
+		if (!xen_slab_ready)
+			late_irq_cnt++;
+	}
+}
+
+static void
+xen_bind_early_percpu_irq (void)
+{
+	int i;
+
+	xen_slab_ready = 1;
+	/* There's no race when accessing this cached array, since only
+	 * BSP will face with such step shortly
+	 */
+	for (i = 0; i < late_irq_cnt; i++)
+		xen_register_percpu_irq(smp_processor_id(),
+					saved_percpu_irqs[i].irq,
+		                        saved_percpu_irqs[i].action, 0);
+}
+
+/* FIXME: There's no obvious point to check whether slab is ready. So
+ * a hack is used here by utilizing a late time hook.
+ */
+extern void (*late_time_init)(void);
+extern char xen_event_callback;
+extern void xen_init_IRQ(void);
+
+#ifdef CONFIG_HOTPLUG_CPU
+static int __devinit
+unbind_evtchn_callback(struct notifier_block *nfb,
+                       unsigned long action, void *hcpu)
+{
+	unsigned int cpu = (unsigned long)hcpu;
+
+	if (action == CPU_DEAD) {
+		/* Unregister evtchn.  */
+		if (per_cpu(cpep_irq,cpu) >= 0) {
+			unbind_from_irqhandler(per_cpu(cpep_irq, cpu), NULL);
+			per_cpu(cpep_irq, cpu) = -1;
+		}
+		if (per_cpu(cmcp_irq,cpu) >= 0) {
+			unbind_from_irqhandler(per_cpu(cmcp_irq, cpu), NULL);
+			per_cpu(cmcp_irq, cpu) = -1;
+		}
+		if (per_cpu(cmc_irq,cpu) >= 0) {
+			unbind_from_irqhandler(per_cpu(cmc_irq, cpu), NULL);
+			per_cpu(cmc_irq, cpu) = -1;
+		}
+		if (per_cpu(ipi_irq,cpu) >= 0) {
+			unbind_from_irqhandler (per_cpu(ipi_irq, cpu), NULL);
+			per_cpu(ipi_irq, cpu) = -1;
+		}
+		if (per_cpu(resched_irq,cpu) >= 0) {
+			unbind_from_irqhandler (per_cpu(resched_irq, cpu),
+						NULL);
+			per_cpu(resched_irq, cpu) = -1;
+		}
+		if (per_cpu(timer_irq,cpu) >= 0) {
+			unbind_from_irqhandler (per_cpu(timer_irq, cpu), NULL);
+			per_cpu(timer_irq, cpu) = -1;
+		}
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block unbind_evtchn_notifier = {
+	.notifier_call = unbind_evtchn_callback,
+	.priority = 0
+};
+#endif
+
+DECLARE_PER_CPU(int, ipi_to_irq[NR_IPIS]);
+void xen_smp_intr_init_early(unsigned int cpu)
+{
+#ifdef CONFIG_SMP
+	unsigned int i;
+
+	for (i = 0; i < saved_irq_cnt; i++)
+		xen_register_percpu_irq(cpu, saved_percpu_irqs[i].irq,
+		                        saved_percpu_irqs[i].action, 0);
+#endif
+}
+
+void xen_smp_intr_init(void)
+{
+#ifdef CONFIG_SMP
+	unsigned int cpu = smp_processor_id();
+	struct callback_register event = {
+		.type = CALLBACKTYPE_event,
+		.address = (unsigned long)&xen_event_callback,
+	};
+
+	if (cpu == 0) {
+		/* Initialization was already done for boot cpu.  */
+#ifdef CONFIG_HOTPLUG_CPU
+		/* Register the notifier only once.  */
+		register_cpu_notifier(&unbind_evtchn_notifier);
+#endif
+		return;
+	}
+
+	/* This should be piggyback when setup vcpu guest context */
+	BUG_ON(HYPERVISOR_callback_op(CALLBACKOP_register, &event));
+#endif /* CONFIG_SMP */
+}
+
+void
+xen_irq_init(void)
+{
+	struct callback_register event = {
+		.type = CALLBACKTYPE_event,
+		.address = (unsigned long)&xen_event_callback,
+	};
+
+	xen_init_IRQ();
+	BUG_ON(HYPERVISOR_callback_op(CALLBACKOP_register, &event));
+	late_time_init = xen_bind_early_percpu_irq;
+#ifdef CONFIG_SMP
+	register_percpu_irq(IA64_IPI_RESCHEDULE, &resched_irqaction);
+#endif
+}
+
+void
+xen_platform_send_ipi(int cpu, int vector, int delivery_mode, int redirect)
+{
+	int irq = -1;
+
+#ifdef CONFIG_SMP
+	/* TODO: we need to call vcpu_up here */
+	if (unlikely(vector == ap_wakeup_vector)) {
+		extern void xen_send_ipi (int cpu, int vec);
+
+		/* XXX
+		 * This should be in __cpu_up(cpu) in ia64 smpboot.c
+		 * like x86. But don't want to modify it,
+		 * keep it untouched.
+		 */
+		xen_smp_intr_init_early(cpu);
+
+		xen_send_ipi (cpu, vector);
+		//vcpu_prepare_and_up(cpu);
+		return;
+	}
+#endif
+
+	switch (vector) {
+		case IA64_IPI_VECTOR:
+			irq = per_cpu(ipi_to_irq, cpu)[IPI_VECTOR];
+			break;
+		case IA64_IPI_RESCHEDULE:
+			irq = per_cpu(ipi_to_irq, cpu)[RESCHEDULE_VECTOR];
+			break;
+		case IA64_CMCP_VECTOR:
+			irq = per_cpu(ipi_to_irq, cpu)[CMCP_VECTOR];
+			break;
+		case IA64_CPEP_VECTOR:
+			irq = per_cpu(ipi_to_irq, cpu)[CPEP_VECTOR];
+			break;
+		default:
+			printk(KERN_WARNING "Unsupported IPI type 0x%x\n",
+			       vector);
+			irq = 0;
+			break;
+	}		
+	
+	BUG_ON(irq < 0);
+	notify_remote_via_irq(irq);
+	return;
+}
+#endif /* CONFIG_XEN */
+
 void
 register_percpu_irq (ia64_vector vec, struct irqaction *action)
 {
 	irq_desc_t *desc;
 	unsigned int irq;
+
+#ifdef CONFIG_XEN
+	if (is_running_on_xen())
+		return xen_register_percpu_irq(smp_processor_id(), 
+					       vec, action, 1);
+#endif
 
 	for (irq = 0; irq < NR_IRQS; ++irq)
 		if (irq_to_vector(irq) == vec) {
@@ -267,6 +612,10 @@ init_IRQ (void)
 	pfm_init_percpu();
 #endif
 	platform_irq_init();
+#ifdef CONFIG_XEN
+	if (is_running_on_xen() && !ia64_platform_is("xen"))
+		xen_irq_init();
+#endif
 }
 
 void
@@ -275,6 +624,13 @@ ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect)
 	void __iomem *ipi_addr;
 	unsigned long ipi_data;
 	unsigned long phys_cpu_id;
+
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		xen_platform_send_ipi(cpu, vector, delivery_mode, redirect);
+		return;
+	}
+#endif
 
 #ifdef CONFIG_SMP
 	phys_cpu_id = cpu_physical_id(cpu);

@@ -112,6 +112,7 @@ void bio_free(struct bio *bio, struct bio_set *bio_set)
 
 	BIO_BUG_ON(pool_idx >= BIOVEC_NR_POOLS);
 
+	if (bio->bi_io_vec)
 	mempool_free(bio->bi_io_vec, bio_set->bvec_pools[pool_idx]);
 	mempool_free(bio, bio_set->bio_pool);
 }

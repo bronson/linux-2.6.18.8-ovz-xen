@@ -826,6 +826,11 @@ config PROC_VMCORE
         help
         Exports the dump image of crashed kernel in ELF format.
 
+config PROC_IOMEM_MACHINE
+	bool
+	depends on PROC_FS && EXPERIMENTAL && KEXEC && XEN && IA64
+	default y
+
 config SYSFS
 	bool "sysfs file system support" if EMBEDDED
 	default y
@@ -865,6 +870,7 @@ config TMPFS
 config HUGETLBFS
 	bool "HugeTLB file system support"
 	depends X86 || IA64 || PPC64 || SPARC64 || SUPERH || BROKEN
+	depends on !XEN
 	help
 	  hugetlbfs is a filesystem backing for HugeTLB pages, based on
 	  ramfs. For architectures that support it, say Y here and read

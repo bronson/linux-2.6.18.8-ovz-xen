@@ -127,10 +127,10 @@ static inline struct nf_bridge_info *nf_bridge_alloc(struct sk_buff *skb)
 
 static inline void nf_bridge_save_header(struct sk_buff *skb)
 {
-        int header_size = 16;
+        int header_size = ETH_HLEN;
 
 	if (skb->protocol == htons(ETH_P_8021Q))
-		header_size = 18;
+		header_size += VLAN_HLEN;
 
 	memcpy(skb->nf_bridge->data, skb->data - header_size, header_size);
 }

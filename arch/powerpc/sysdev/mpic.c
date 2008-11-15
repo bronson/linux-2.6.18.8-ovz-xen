@@ -765,6 +765,9 @@ static int mpic_host_map(struct irq_host *h, unsigned int virq,
 	else if (hw >= MPIC_VEC_IPI_0) {
 		WARN_ON(!(mpic->flags & MPIC_PRIMARY));
 
+		if (mpic->flags & MPIC_SKIP_IPI_INIT)
+			return 0;
+
 		DBG("mpic: mapping as IPI\n");
 		set_irq_chip_data(virq, mpic);
 		set_irq_chip_and_handler(virq, &mpic->hc_ipi,
@@ -1019,6 +1022,9 @@ void __init mpic_init(struct mpic *mpic)
 			   (MPIC_VEC_TIMER_0 + i));
 	}
 
+	if (mpic->flags & MPIC_SKIP_IPI_INIT)
+		goto ipi_bailout;
+
 	/* Initialize IPIs to our reserved vectors and mark them disabled for now */
 	mpic_test_broken_ipi(mpic);
 	for (i = 0; i < 4; i++) {
@@ -1028,6 +1034,7 @@ void __init mpic_init(struct mpic *mpic)
 			       (MPIC_VEC_IPI_0 + i));
 	}
 
+ipi_bailout:
 	/* Initialize interrupt sources */
 	if (mpic->irq_count == 0)
 		mpic->irq_count = mpic->num_sources;

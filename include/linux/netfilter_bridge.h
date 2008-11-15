@@ -7,6 +7,7 @@
 #include <linux/netfilter.h>
 #if defined(__KERNEL__) && defined(CONFIG_BRIDGE_NETFILTER)
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #endif
 
 /* Bridge Hooks */
@@ -54,16 +55,19 @@ int nf_bridge_maybe_copy_header(struct sk_buff *skb)
 
 	if (skb->nf_bridge) {
 		if (skb->protocol == __constant_htons(ETH_P_8021Q)) {
-			err = skb_cow(skb, 18);
+			int header_size = ETH_HLEN + VLAN_HLEN;
+
+			err = skb_cow(skb, header_size);
 			if (err)
 				return err;
-			memcpy(skb->data - 18, skb->nf_bridge->data, 18);
-			skb_push(skb, 4);
+			memcpy(skb->data - header_size, skb->nf_bridge->data,
+			       header_size);
+			skb_push(skb, VLAN_HLEN);
 		} else {
-			err = skb_cow(skb, 16);
+			err = skb_cow(skb, ETH_HLEN);
 			if (err)
 				return err;
-			memcpy(skb->data - 16, skb->nf_bridge->data, 16);
+			memcpy(skb->data - ETH_HLEN, skb->nf_bridge->data, ETH_HLEN);
 		}
 	}
 	return 0;

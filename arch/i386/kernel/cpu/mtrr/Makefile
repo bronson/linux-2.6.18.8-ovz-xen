@@ -3,3 +3,4 @@ obj-y		+= amd.o
 obj-y		+= cyrix.o
 obj-y		+= centaur.o
 
+obj-$(CONFIG_XEN) := main.o if.o

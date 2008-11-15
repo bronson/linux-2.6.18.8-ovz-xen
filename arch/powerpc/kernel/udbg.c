@@ -45,6 +45,9 @@ void __init udbg_early_init(void)
 #elif defined(CONFIG_PPC_EARLY_DEBUG_ISERIES)
 	/* For iSeries - hit Ctrl-x Ctrl-x to see the output */
 	udbg_init_iseries();
+#elif defined(CONFIG_PPC_EARLY_DEBUG_XEN_DOM0) || \
+	defined(CONFIG_PPC_EARLY_DEBUG_XEN_DOMU)
+	udbg_init_xen();
 #endif
 }
 

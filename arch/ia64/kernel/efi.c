@@ -26,6 +26,7 @@
 #include <linux/types.h>
 #include <linux/time.h>
 #include <linux/efi.h>
+#include <linux/kexec.h>
 
 #include <asm/io.h>
 #include <asm/kregs.h>
@@ -34,6 +35,11 @@
 #include <asm/processor.h>
 #include <asm/mca.h>
 
+#ifdef CONFIG_PROC_IOMEM_MACHINE
+#include <xen/interface/memory.h>
+#include <asm/hypercall.h>
+#endif
+
 #define EFI_DEBUG	0
 
 extern efi_status_t efi_call_phys (void *, ...);
@@ -41,7 +47,7 @@ extern efi_status_t efi_call_phys (void *, ...);
 struct efi efi;
 EXPORT_SYMBOL(efi);
 static efi_runtime_services_t *runtime;
-static unsigned long mem_limit = ~0UL, max_addr = ~0UL;
+static unsigned long mem_limit = ~0UL, max_addr = ~0UL, min_addr = 0UL;
 
 #define efi_call_virt(f, args...)	(*(f))(args)
 
@@ -421,6 +427,8 @@ efi_init (void)
 			mem_limit = memparse(cp + 4, &cp);
 		} else if (memcmp(cp, "max_addr=", 9) == 0) {
 			max_addr = GRANULEROUNDDOWN(memparse(cp + 9, &cp));
+		} else if (memcmp(cp, "min_addr=", 9) == 0) {
+			min_addr = GRANULEROUNDDOWN(memparse(cp + 9, &cp));
 		} else {
 			while (*cp != ' ' && *cp)
 				++cp;
@@ -428,6 +436,8 @@ efi_init (void)
 				++cp;
 		}
 	}
+	if (min_addr != 0UL)
+		printk(KERN_INFO "Ignoring memory below %luMB\n", min_addr >> 20);
 	if (max_addr != ~0UL)
 		printk(KERN_INFO "Ignoring memory above %luMB\n", max_addr >> 20);
 
@@ -894,7 +904,8 @@ find_memmap_space (void)
 		as = max(contig_low, md->phys_addr);
 		ae = min(contig_high, efi_md_end(md));
 
-		/* keep within max_addr= command line arg */
+		/* keep within max_addr= and min_addr= command line arg */
+		as = max(as, min_addr);
 		ae = min(ae, max_addr);
 		if (ae <= as)
 			continue;
@@ -1004,7 +1015,8 @@ efi_memmap_init(unsigned long *s, unsigned long *e)
 		} else
 			ae = efi_md_end(md);
 
-		/* keep within max_addr= command line arg */
+		/* keep within max_addr= and min_addr= command line arg */
+		as = max(as, min_addr);
 		ae = min(ae, max_addr);
 		if (ae <= as)
 			continue;
@@ -1033,20 +1045,21 @@ efi_memmap_init(unsigned long *s, unsigned long *e)
 	*e = (u64)++k;
 }
 
-void
-efi_initialize_iomem_resources(struct resource *code_resource,
-			       struct resource *data_resource)
+#define EFI_INITIALISE_PHYS 0x1
+#define EFI_INITIALISE_MACH 0x2
+#define EFI_INITIALISE_ALL  (EFI_INITIALISE_PHYS|EFI_INITIALISE_MACH)
+
+static void
+efi_initialize_resources(void *efi_map_start, void *efi_map_end,
+			 u64 efi_desc_size, struct resource *root_resource,
+			 struct resource *code_resource,
+			 struct resource *data_resource, unsigned flag)
 {
 	struct resource *res;
-	void *efi_map_start, *efi_map_end, *p;
+	void *p;
 	efi_memory_desc_t *md;
-	u64 efi_desc_size;
 	char *name;
 	unsigned long flags;
-
-	efi_map_start = __va(ia64_boot_param->efi_memmap);
-	efi_map_end   = efi_map_start + ia64_boot_param->efi_memmap_size;
-	efi_desc_size = ia64_boot_param->efi_memdesc_size;
 
 	res = NULL;
 
@@ -1106,7 +1119,7 @@ efi_initialize_iomem_resources(struct resource *code_resource,
 		res->end = md->phys_addr + (md->num_pages << EFI_PAGE_SHIFT) - 1;
 		res->flags = flags;
 
-		if (insert_resource(&iomem_resource, res) < 0)
+		if (insert_resource(root_resource, res) < 0)
 			kfree(res);
 		else {
 			/*
@@ -1114,8 +1127,135 @@ efi_initialize_iomem_resources(struct resource *code_resource,
 			 * kernel data so we try it repeatedly and
 			 * let the resource manager test it.
 			 */
+			if (flag & EFI_INITIALISE_PHYS) {
 			insert_resource(res, code_resource);
 			insert_resource(res, data_resource);
 		}
+#ifdef CONFIG_KEXEC
+			if (flag & EFI_INITIALISE_MACH) {
+				insert_resource(res, &efi_memmap_res);
+				insert_resource(res, &boot_param_res);
+				if (crashk_res.end > crashk_res.start)
+					insert_resource(res, &crashk_res);
+#ifdef CONFIG_XEN
+				if (is_initial_xendomain())
+					xen_machine_kexec_register_resources(
+								res);
+#endif
+			}
+#endif
+		}
 	}
 }
+
+#ifdef CONFIG_PROC_IOMEM_MACHINE
+static int
+efi_initialize_iomem_machine_resources(void)
+{
+	unsigned long size;
+	xen_memory_map_t memmap;
+	xen_ia64_memmap_info_t *memmap_info = NULL;
+	void *efi_map_start, *efi_map_end;
+	u64 efi_desc_size;
+	int ret;
+
+	/* It would be nice if it wasn't neccessary to loop like this */
+	for (size = 1024; 1; size += 1024) {
+		memmap_info = kmalloc(size, GFP_KERNEL);
+		if (memmap_info == NULL)
+			return -ENOMEM;
+
+		memmap.nr_entries = size;
+		set_xen_guest_handle(memmap.buffer, memmap_info);
+		ret = HYPERVISOR_memory_op(XENMEM_machine_memory_map, &memmap);
+		if (!ret)
+			break;
+
+		kfree(memmap_info);
+	}
+
+	efi_map_start = &memmap_info->memdesc;
+	efi_map_end = efi_map_start + memmap_info->efi_memmap_size;
+	efi_desc_size = memmap_info->efi_memdesc_size;
+	efi_initialize_resources(efi_map_start, efi_map_end, efi_desc_size,
+				 &iomem_machine_resource, NULL, NULL,
+				 EFI_INITIALISE_MACH);
+
+	kfree(memmap_info);
+}
+#endif
+
+void
+efi_initialize_iomem_resources(struct resource *code_resource,
+			       struct resource *data_resource)
+{
+	void *efi_map_start, *efi_map_end;
+	u64 efi_desc_size;
+
+	efi_map_start = __va(ia64_boot_param->efi_memmap);
+	efi_map_end   = efi_map_start + ia64_boot_param->efi_memmap_size;
+	efi_desc_size = ia64_boot_param->efi_memdesc_size;
+
+#ifdef CONFIG_PROC_IOMEM_MACHINE
+	if (is_initial_xendomain()) {
+		efi_initialize_resources(efi_map_start, efi_map_end,
+					 efi_desc_size, &iomem_resource,
+					 code_resource, data_resource,
+					 EFI_INITIALISE_PHYS);
+		efi_initialize_iomem_machine_resources();
+	}
+	else
+#endif
+		efi_initialize_resources(efi_map_start, efi_map_end,
+					 efi_desc_size, &iomem_resource,
+					 code_resource, data_resource,
+					 EFI_INITIALISE_ALL);
+}
+
+
+
+#ifdef CONFIG_KEXEC
+/* find a block of memory aligned to 64M exclude reserved regions
+   rsvd_regions are sorted
+ */
+unsigned long
+kdump_find_rsvd_region (unsigned long size,
+		struct rsvd_region *r, int n)
+{
+  int i;
+  u64 start, end;
+  u64 alignment = 1UL << _PAGE_SIZE_64M;
+  void *efi_map_start, *efi_map_end, *p;
+  efi_memory_desc_t *md;
+  u64 efi_desc_size;
+
+  efi_map_start = __va(ia64_boot_param->efi_memmap);
+  efi_map_end   = efi_map_start + ia64_boot_param->efi_memmap_size;
+  efi_desc_size = ia64_boot_param->efi_memdesc_size;
+
+  for (p = efi_map_start; p < efi_map_end; p += efi_desc_size) {
+	  md = p;
+	  if (!efi_wb(md))
+		  continue;
+	  start = ALIGN(md->phys_addr, alignment);
+	  end = efi_md_end(md);
+	  for (i = 0; i < n; i++) {
+		if (__pa(r[i].start) >= start && __pa(r[i].end) < end) {
+			if (__pa(r[i].start) > start + size)
+				return start;
+			start = ALIGN(__pa(r[i].end), alignment);
+			if (i < n-1 && __pa(r[i+1].start) < start + size)
+				continue;
+			else
+				break;
+		}
+	  }
+	  if (end > start + size)
+		return start;
+  }
+
+  printk(KERN_WARNING "Cannot reserve 0x%lx byte of memory for crashdump\n",
+	size);
+  return ~0UL;
+}
+#endif

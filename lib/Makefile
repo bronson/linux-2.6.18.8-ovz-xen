@@ -52,6 +52,9 @@ obj-$(CONFIG_SMP) += percpu_counter.o
 obj-$(CONFIG_AUDIT_GENERIC) += audit.o
 
 obj-$(CONFIG_SWIOTLB) += swiotlb.o
+ifeq ($(CONFIG_IA64),y)
+swiotlb-$(CONFIG_XEN) := ../arch/ia64/xen/swiotlb.o
+endif
 
 hostprogs-y	:= gen_crc32table
 clean-files	:= crc32table.h

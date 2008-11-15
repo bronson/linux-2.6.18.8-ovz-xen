@@ -42,6 +42,7 @@ extern void __init udbg_init_debug_lpar(void);
 extern void __init udbg_init_pmac_realmode(void);
 extern void __init udbg_init_maple_realmode(void);
 extern void __init udbg_init_iseries(void);
+extern void __init udbg_init_xen(void);
 extern void __init udbg_init_rtas_panel(void);
 extern void __init udbg_init_rtas_console(void);
 

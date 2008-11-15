@@ -305,6 +305,8 @@ struct mpic
 #define MPIC_SPV_EOI			0x00000020
 /* No passthrough disable */
 #define MPIC_NO_PTHROU_DIS		0x00000040
+/* Skip reset of IPI vectors during init */
+#define MPIC_SKIP_IPI_INIT		0x00000080
 
 /* MPIC HW modification ID */
 #define MPIC_REGSET_MASK		0xf0000000

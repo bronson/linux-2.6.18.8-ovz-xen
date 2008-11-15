@@ -2399,6 +2399,8 @@ config MYRI10GE
 	  <file:Documentation/networking/net-modules.txt>.  The module
 	  will be called myri10ge.
 
+source "drivers/net/sfc/Kconfig"
+
 endmenu
 
 source "drivers/net/tokenring/Kconfig"

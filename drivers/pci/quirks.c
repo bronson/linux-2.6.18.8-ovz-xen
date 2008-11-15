@@ -23,6 +23,40 @@
 #include <linux/acpi.h>
 #include "pci.h"
 
+/* A global flag which signals if we should page-align PCI mem windows. */
+int pci_mem_align = 0;
+
+static int __init set_pci_mem_align(char *str)
+{
+	pci_mem_align = 1;
+	return 1;
+}
+__setup("pci-mem-align", set_pci_mem_align);
+
+/* This quirk function enables us to force all memory resources which are 
+ * assigned to PCI devices, to be page-aligned.
+ */
+static void __devinit quirk_align_mem_resources(struct pci_dev *dev)
+{
+	int i;
+	struct resource *r;
+	resource_size_t old_start;
+
+	if (!pci_mem_align)
+		return;
+
+	for (i=0; i < DEVICE_COUNT_RESOURCE; i++) {
+		r = &dev->resource[i];
+		if ((r == NULL) || !(r->flags & IORESOURCE_MEM))
+			continue;
+
+		old_start = r->start;
+		r->start = (r->start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+		r->end = r->end - (old_start - r->start);
+	}
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, quirk_align_mem_resources);
+
 /* The Mellanox Tavor device gives false positive parity errors
  * Mark this device with a broken_parity_status, to allow
  * PCI scanning code to "skip" this now blacklisted device.
@@ -839,6 +873,25 @@ static void __init quirk_disable_pxb(struct pci_dev *pdev)
 }
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82454NX,	quirk_disable_pxb );
 
+static void __devinit quirk_sb600_sata(struct pci_dev *pdev)
+{
+	/* set sb600/sb700/sb800 sata to ahci mode */
+	u8 tmp;
+
+	pci_read_config_byte(pdev, PCI_CLASS_DEVICE, &tmp);
+	if (tmp == 0x01) {
+		pci_read_config_byte(pdev, 0x40, &tmp);
+		pci_write_config_byte(pdev, 0x40, tmp|1);
+		pci_write_config_byte(pdev, 0x9, 1);
+		pci_write_config_byte(pdev, 0xa, 6);
+		pci_write_config_byte(pdev, 0x40, tmp);
+
+		pdev->class = PCI_CLASS_STORAGE_SATA_AHCI;
+		dev_info(&pdev->dev, "set SATA to AHCI mode\n");
+	}
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP700_SATA, quirk_sb600_sata);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP600_SATA, quirk_sb600_sata);
 
 /*
  *	Serverworks CSB5 IDE does not fully support native mode
@@ -1494,10 +1547,11 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETMOS, PCI_ANY_ID, quirk_netmos);
 
 static void __devinit quirk_e100_interrupt(struct pci_dev *dev)
 {
-	u16 command;
+	u16 command, pmcsr;
 	u32 bar;
 	u8 __iomem *csr;
 	u8 cmd_hi;
+	int pm;
 
 	switch (dev->device) {
 	/* PCI IDs taken from drivers/net/e100.c */
@@ -1531,6 +1585,17 @@ static void __devinit quirk_e100_interrupt(struct pci_dev *dev)
 
 	if (!(command & PCI_COMMAND_MEMORY) || !bar)
 		return;
+
+        /*
+         * Check that the device is in the D0 power state. If it's not,
+         * there is no point to look any further.
+         */
+        pm = pci_find_capability(dev, PCI_CAP_ID_PM);
+        if (pm) {
+                pci_read_config_word(dev, pm + PCI_PM_CTRL, &pmcsr);
+                if ((pmcsr & PCI_PM_CTRL_STATE_MASK) != PCI_D0)
+                        return;
+        }
 
 	csr = ioremap(bar, 8);
 	if (!csr) {

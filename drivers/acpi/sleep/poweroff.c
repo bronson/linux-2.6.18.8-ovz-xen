@@ -20,6 +20,7 @@
 int acpi_sleep_prepare(u32 acpi_state)
 {
 #ifdef CONFIG_ACPI_SLEEP
+#ifndef CONFIG_ACPI_PV_SLEEP
 	/* do we have a wakeup address for S2 and S3? */
 	if (acpi_state == ACPI_STATE_S3) {
 		if (!acpi_wakeup_address) {
@@ -30,6 +31,7 @@ int acpi_sleep_prepare(u32 acpi_state)
 							     acpi_wakeup_address));
 
 	}
+#endif
 	ACPI_FLUSH_CPU_CACHE();
 	acpi_enable_wakeup_device_prep(acpi_state);
 #endif

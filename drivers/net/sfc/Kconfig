@@ -1,0 +1,35 @@
+config SFC
+	tristate "Solarflare Solarstorm SFC4000 support"
+	depends on PCI && INET
+	select MII
+	help
+	  This driver supports 10-gigabit Ethernet cards based on
+	  the Solarflare Communications Solarstorm SFC4000 controller.
+
+	  To compile this driver as a module, choose M here.  The module
+	  will be called sfc.
+
+config SFC_DEBUGFS
+	bool "Solarflare Solarstorm SFC4000 debugging support"
+	depends on SFC && DEBUG_FS
+	default N
+	help
+	  This option creates an "sfc" subdirectory of debugfs with
+	  debugging information for the SFC4000 driver.
+
+	  If unsure, say N.
+
+config SFC_MTD
+	depends on SFC && MTD && MTD_PARTITIONS
+	tristate "Solarflare Solarstorm SFC4000 flash/EEPROM support"
+	help
+	  This module exposes the on-board flash and/or EEPROM memory as
+	  MTD devices (e.g. /dev/mtd1).  This makes it possible to upload a
+	  new boot ROM to the NIC.
+
+config SFC_RESOURCE
+	depends on SFC && X86
+	tristate "Solarflare Solarstorm SFC4000 resource driver"
+	help
+	  This module provides the SFC resource manager driver.
+

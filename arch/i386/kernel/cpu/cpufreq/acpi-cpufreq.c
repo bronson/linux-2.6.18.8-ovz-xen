@@ -568,6 +568,17 @@ acpi_cpufreq_init (void)
 {
 	dprintk("acpi_cpufreq_init\n");
 
+#ifdef CONFIG_XEN
+	/*
+	 * This effectively blocks in-kernel cpufreq driver to interfere
+	 * external control logic
+	 */
+	if (processor_pmperf_external()) {
+		printk("CPUFREQ is controllerd externally...exit then!\n");
+		return -1;
+	}
+#endif /* CONFIG_XEN */
+
 	acpi_cpufreq_early_init_acpi();
 
 	return cpufreq_register_driver(&acpi_cpufreq_driver);

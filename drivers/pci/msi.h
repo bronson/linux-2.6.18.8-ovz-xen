@@ -84,6 +84,11 @@ extern int vector_irq[NR_VECTORS];
 extern void (*interrupt[NR_IRQS])(void);
 extern int pci_vector_resources(int last, int nr_released);
 
+#ifdef CONFIG_XEN
+extern int unregister_msi_get_owner(int (*func)(struct pci_dev *dev));
+extern int register_msi_get_owner(int (*func)(struct pci_dev *dev));
+#endif
+
 /*
  * MSI-X Address Register
  */

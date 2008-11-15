@@ -183,6 +183,12 @@ SECTIONS
 	  __start_gate_section = .;
 	  *(.data.gate)
 	  __stop_gate_section = .;
+#if defined(CONFIG_XEN)
+	  . = ALIGN(PAGE_SIZE);
+	  __start_xen_gate_section = .;
+	  *(.data.gate.xen)
+	  __stop_xen_gate_section = .;
+#endif
 	}
   . = ALIGN(PAGE_SIZE);		/* make sure the gate page doesn't expose kernel data */
 

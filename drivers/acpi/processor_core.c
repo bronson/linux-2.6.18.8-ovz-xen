@@ -474,8 +474,14 @@ static int acpi_processor_get_info(struct acpi_processor *pr)
 	 *  they are physically not present.
 	 */
 	if (cpu_index == -1) {
+#ifdef CONFIG_XEN
+		if (ACPI_FAILURE
+		    (acpi_processor_hotadd_init(pr->handle, &pr->id)) &&
+		    !processor_cntl_external()) {
+#else
 		if (ACPI_FAILURE
 		    (acpi_processor_hotadd_init(pr->handle, &pr->id))) {
+#endif /* CONFIG_XEN */
 			printk(KERN_ERR PREFIX
 				    "Getting cpuindex for acpiid 0x%x\n",
 				    pr->acpi_id);
@@ -517,7 +523,11 @@ static int acpi_processor_get_info(struct acpi_processor *pr)
 	return 0;
 }
 
+#ifdef CONFIG_XEN
+static void *processor_device_array[NR_ACPI_CPUS];
+#else
 static void *processor_device_array[NR_CPUS];
+#endif /* CONFIG_XEN */
 
 static int acpi_processor_start(struct acpi_device *device)
 {
@@ -529,27 +539,48 @@ static int acpi_processor_start(struct acpi_device *device)
 	pr = acpi_driver_data(device);
 
 	result = acpi_processor_get_info(pr);
+#ifdef CONFIG_XEN
+	if (result || 
+	    ((pr->id == -1) && !processor_cntl_external())) {
+#else
 	if (result) {
+#endif /* CONFIG_XEN */
 		/* Processor is physically not present */
 		return 0;
 	}
 
+#ifdef CONFIG_XEN
+	BUG_ON(!processor_cntl_external() &&
+	       ((pr->id >= NR_CPUS) || (pr->id < 0)));
+#else
 	BUG_ON((pr->id >= NR_CPUS) || (pr->id < 0));
+#endif /* CONFIG_XEN */
 
 	/*
 	 * Buggy BIOS check
 	 * ACPI id of processors can be reported wrongly by the BIOS.
 	 * Don't trust it blindly
 	 */
+#ifdef CONFIG_XEN
+	if (processor_device_array[pr->acpi_id] != NULL &&
+	    processor_device_array[pr->acpi_id] != (void *)device) {
+#else
 	if (processor_device_array[pr->id] != NULL &&
 	    processor_device_array[pr->id] != (void *)device) {
+#endif /* CONFIG_XEN */
 		printk(KERN_WARNING "BIOS reported wrong ACPI id"
 			"for the processor\n");
 		return -ENODEV;
 	}
+#ifdef CONFIG_XEN
+	processor_device_array[pr->acpi_id] = (void *)device;
+	if (pr->id != -1)
+		processors[pr->id] = pr;
+#else
 	processor_device_array[pr->id] = (void *)device;
 
 	processors[pr->id] = pr;
+#endif /* CONFIG_XEN */
 
 	result = acpi_processor_add_fs(device);
 	if (result)
@@ -563,6 +594,10 @@ static int acpi_processor_start(struct acpi_device *device)
 	acpi_processor_set_pdc(pr);
 
 	acpi_processor_power_init(pr, device);
+
+#ifdef CONFIG_PROCESSOR_EXTERNAL_CONTROL
+	processor_extcntl_init(pr);
+#endif
 
 	if (pr->flags.throttling) {
 		printk(KERN_INFO PREFIX "%s [%s] (supports",
@@ -656,7 +691,13 @@ static int acpi_processor_remove(struct acpi_device *device, int type)
 
 	acpi_processor_remove_fs(device);
 
+#ifdef CONFIG_XEN
+	if (pr->id != -1)
 	processors[pr->id] = NULL;
+#else
+	processors[pr->id] = NULL;
+#endif /* CONFIG_XEN */
+
 
 	kfree(pr);
 
@@ -710,6 +751,12 @@ int acpi_processor_device_add(acpi_handle handle, struct acpi_device **device)
 	if (!pr)
 		return -ENODEV;
 
+#ifdef CONFIG_XEN
+	if (processor_cntl_external())
+		processor_notify_external(pr,
+			PROCESSOR_HOTPLUG, HOTPLUG_TYPE_ADD);
+#endif /* CONFIG_XEN */
+
 	if ((pr->id >= 0) && (pr->id < NR_CPUS)) {
 		kobject_uevent(&(*device)->kobj, KOBJ_ONLINE);
 	}
@@ -748,6 +795,12 @@ acpi_processor_hotplug_notify(acpi_handle handle, u32 event, void *data)
 			break;
 		}
 
+#ifdef CONFIG_XEN
+		if (processor_cntl_external())
+			processor_notify_external(pr,
+					PROCESSOR_HOTPLUG, HOTPLUG_TYPE_ADD);
+#endif /* CONFIG_XEN */
+
 		if (pr->id >= 0 && (pr->id < NR_CPUS)) {
 			kobject_uevent(&device->kobj, KOBJ_OFFLINE);
 			break;
@@ -777,8 +830,20 @@ acpi_processor_hotplug_notify(acpi_handle handle, u32 event, void *data)
 			return;
 		}
 
+#ifdef CONFIG_XEN
+		if ((pr->id >= 0) && (pr->id < NR_CPUS)
+		    && (cpu_present(pr->id)))
+#else
 		if ((pr->id < NR_CPUS) && (cpu_present(pr->id)))
+#endif /* CONFIG_XEN */
 			kobject_uevent(&device->kobj, KOBJ_OFFLINE);
+
+#ifdef CONFIG_XEN
+		if (processor_cntl_external())
+			processor_notify_external(pr, PROCESSOR_HOTPLUG,
+							HOTPLUG_TYPE_REMOVE);
+#endif /* CONFIG_XEN */
+
 		break;
 	default:
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
@@ -843,6 +908,11 @@ static acpi_status acpi_processor_hotadd_init(acpi_handle handle, int *p_cpu)
 
 static int acpi_processor_handle_eject(struct acpi_processor *pr)
 {
+#ifdef CONFIG_XEN
+	if (pr->id == -1)
+		return (0);
+#endif /* CONFIG_XEN */
+
 	if (cpu_online(pr->id)) {
 		return (-EINVAL);
 	}

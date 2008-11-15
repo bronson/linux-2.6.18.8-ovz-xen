@@ -31,6 +31,13 @@
 #error KEXEC_ARCH not defined
 #endif
 
+#ifndef KEXEC_ARCH_HAS_PAGE_MACROS
+#define kexec_page_to_pfn(page)  page_to_pfn(page)
+#define kexec_pfn_to_page(pfn)   pfn_to_page(pfn)
+#define kexec_virt_to_phys(addr) virt_to_phys(addr)
+#define kexec_phys_to_virt(addr) phys_to_virt(addr)
+#endif
+
 /*
  * This structure is used to hold the arguments that are used when loading
  * kernel binaries.
@@ -91,6 +98,12 @@ struct kimage {
 extern NORET_TYPE void machine_kexec(struct kimage *image) ATTRIB_NORET;
 extern int machine_kexec_prepare(struct kimage *image);
 extern void machine_kexec_cleanup(struct kimage *image);
+#ifdef CONFIG_XEN
+extern int xen_machine_kexec_load(struct kimage *image);
+extern void xen_machine_kexec_unload(struct kimage *image);
+extern void xen_machine_kexec_setup_resources(void);
+extern void xen_machine_kexec_register_resources(struct resource *res);
+#endif
 extern asmlinkage long sys_kexec_load(unsigned long entry,
 					unsigned long nr_segments,
 					struct kexec_segment __user *segments,
@@ -107,6 +120,10 @@ extern void crash_kexec(struct pt_regs *);
 int kexec_should_crash(struct task_struct *);
 extern struct kimage *kexec_image;
 extern struct kimage *kexec_crash_image;
+
+#ifndef kexec_flush_icache_page
+#define kexec_flush_icache_page(page)
+#endif
 
 #define KEXEC_ON_CRASH  0x00000001
 #define KEXEC_ARCH_MASK 0xffff0000
@@ -130,6 +147,7 @@ extern struct kimage *kexec_crash_image;
 extern struct resource crashk_res;
 typedef u32 note_buf_t[MAX_NOTE_BYTES/4];
 extern note_buf_t *crash_notes;
+
 
 #else /* !CONFIG_KEXEC */
 struct pt_regs;

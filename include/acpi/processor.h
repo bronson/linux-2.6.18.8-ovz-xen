@@ -21,6 +21,10 @@
 #define ACPI_PSD_REV0_REVISION		0 /* Support for _PSD as in ACPI 3.0 */
 #define ACPI_PSD_REV0_ENTRIES		5
 
+#ifdef CONFIG_XEN
+#define NR_ACPI_CPUS			256
+#endif /* CONFIG_XEN */
+
 /*
  * Types of coordination defined in ACPI 3.0. Same macros can be used across
  * P, C and T states
@@ -32,6 +36,17 @@
 /* Power Management */
 
 struct acpi_processor_cx;
+
+#ifdef CONFIG_PROCESSOR_EXTERNAL_CONTROL
+struct acpi_csd_package {
+	acpi_integer num_entries;
+	acpi_integer revision;
+	acpi_integer domain;
+	acpi_integer coord_type;
+	acpi_integer num_processors;
+	acpi_integer index;
+} __attribute__ ((packed));
+#endif
 
 struct acpi_power_register {
 	u8 descriptor;
@@ -63,6 +78,12 @@ struct acpi_processor_cx {
 	u32 power;
 	u32 usage;
 	u64 time;
+#ifdef CONFIG_PROCESSOR_EXTERNAL_CONTROL
+	/* Require raw information for external control logic */
+	struct acpi_power_register reg;
+	u32 csd_count;
+	struct acpi_csd_package *domain_info;
+#endif
 	struct acpi_processor_cx_policy promotion;
 	struct acpi_processor_cx_policy demotion;
 };
@@ -274,5 +295,81 @@ static inline void acpi_thermal_cpufreq_exit(void)
 	return;
 }
 #endif
+
+#ifdef CONFIG_XEN
+/* 
+ * Following are interfaces geared to external processor PM control
+ * logic like a VMM
+ */
+/* Events notified to external control logic */
+#define PROCESSOR_PM_INIT	1
+#define PROCESSOR_PM_CHANGE	2
+#define PROCESSOR_HOTPLUG	3
+
+/* Objects for the PM envents */
+#define PM_TYPE_IDLE		0
+#define PM_TYPE_PERF		1
+#define PM_TYPE_THR		2
+#define PM_TYPE_MAX		3
+
+/* Processor hotplug events */
+#define HOTPLUG_TYPE_ADD	0
+#define HOTPLUG_TYPE_REMOVE	1
+
+#ifdef CONFIG_PROCESSOR_EXTERNAL_CONTROL
+struct processor_extcntl_ops {
+	/* Transfer processor PM events to external control logic */
+	int (*pm_ops[PM_TYPE_MAX])(struct acpi_processor *pr, int event);
+	/* Notify physical processor status to external control logic */
+	int (*hotplug)(struct acpi_processor *pr, int event);
+};
+extern struct processor_extcntl_ops *processor_extcntl_ops;
+
+static inline int processor_cntl_external(void)
+{
+	return (processor_extcntl_ops != NULL);
+}
+
+static inline int processor_pm_external(void)
+{
+	return processor_cntl_external() &&
+		(processor_extcntl_ops->pm_ops[PM_TYPE_IDLE] != NULL);
+}
+
+static inline int processor_pmperf_external(void)
+{
+	return processor_cntl_external() &&
+		(processor_extcntl_ops->pm_ops[PM_TYPE_PERF] != NULL);
+}
+
+static inline int processor_pmthr_external(void)
+{
+	return processor_cntl_external() &&
+		(processor_extcntl_ops->pm_ops[PM_TYPE_THR] != NULL);
+}
+
+extern int processor_notify_external(struct acpi_processor *pr,
+			int event, int type);
+extern int processor_register_extcntl(struct processor_extcntl_ops *ops);
+extern int processor_unregister_extcntl(struct processor_extcntl_ops *ops);
+extern int processor_extcntl_init(struct acpi_processor *pr);
+extern int acpi_processor_get_performance_info(struct acpi_processor *pr);
+extern int acpi_processor_get_psd(struct acpi_processor *pr);
+#else
+static inline int processor_cntl_external(void) {return 0;}
+static inline int processor_pm_external(void) {return 0;}
+static inline int processor_pmperf_external(void) {return 0;}
+static inline int processor_pmthr_external(void) {return 0;}
+static inline int processor_notify_external(struct acpi_processor *pr,
+			int event, int type)
+{
+	return -EINVAL;
+}
+static inline int processor_extcntl_init(struct acpi_processor *pr)
+{
+	return -EINVAL;
+}
+#endif /* CONFIG_PROCESSOR_EXTERNAL_CONTROL */
+#endif /* CONFIG_XEN */
 
 #endif

@@ -493,6 +493,16 @@ struct request *elv_next_request(request_queue_t *q)
 	int ret;
 
 	while ((rq = __elv_next_request(q)) != NULL) {
+		/*
+		 * Kill the empty barrier place holder, the driver must
+		 * not ever see it.
+		 */
+		if (blk_empty_barrier(rq)) {
+			blkdev_dequeue_request(rq);
+			end_that_request_chunk(rq, 1, 0);
+			end_that_request_last(rq, 1);
+			continue;
+		}
 		if (!(rq->flags & REQ_STARTED)) {
 			elevator_t *e = q->elevator;
 

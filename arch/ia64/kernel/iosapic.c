@@ -159,6 +159,75 @@ static unsigned char pcat_compat __devinitdata;	/* 8259 compatibility flag */
 static int iosapic_kmalloc_ok;
 static LIST_HEAD(free_rte_list);
 
+#ifdef CONFIG_XEN
+#include <xen/interface/xen.h>
+#include <xen/interface/physdev.h>
+#include <asm/hypervisor.h>
+static inline unsigned int xen_iosapic_read(char __iomem *iosapic, unsigned int reg)
+{
+	struct physdev_apic apic_op;
+	int ret;
+
+	apic_op.apic_physbase = (unsigned long)iosapic -
+					__IA64_UNCACHED_OFFSET;
+	apic_op.reg = reg;
+	ret = HYPERVISOR_physdev_op(PHYSDEVOP_apic_read, &apic_op);
+	if (ret)
+		return ret;
+	return apic_op.value;
+}
+
+static inline void xen_iosapic_write(char __iomem *iosapic, unsigned int reg, u32 val)
+{
+	struct physdev_apic apic_op;
+
+	apic_op.apic_physbase = (unsigned long)iosapic - 
+					__IA64_UNCACHED_OFFSET;
+	apic_op.reg = reg;
+	apic_op.value = val;
+	HYPERVISOR_physdev_op(PHYSDEVOP_apic_write, &apic_op);
+}
+
+static inline unsigned int iosapic_read(char __iomem *iosapic, unsigned int reg)
+{
+	if (!is_running_on_xen()) {
+		writel(reg, iosapic + IOSAPIC_REG_SELECT);
+		return readl(iosapic + IOSAPIC_WINDOW);
+	} else
+		return xen_iosapic_read(iosapic, reg);
+}
+
+static inline void iosapic_write(char __iomem *iosapic, unsigned int reg, u32 val)
+{
+	if (!is_running_on_xen()) {
+		writel(reg, iosapic + IOSAPIC_REG_SELECT);
+		writel(val, iosapic + IOSAPIC_WINDOW);
+	} else
+		xen_iosapic_write(iosapic, reg, val);
+}
+
+int xen_assign_irq_vector(int irq)
+{
+	struct physdev_irq irq_op;
+
+	irq_op.irq = irq;
+	if (HYPERVISOR_physdev_op(PHYSDEVOP_alloc_irq_vector, &irq_op))
+		return -ENOSPC;
+
+	return irq_op.vector;
+}
+
+void xen_free_irq_vector(int vector)
+{
+	struct physdev_irq irq_op;
+
+	irq_op.vector = vector;
+	if (HYPERVISOR_physdev_op(PHYSDEVOP_free_irq_vector, &irq_op))
+		printk(KERN_WARNING "%s: xen_free_irq_vecotr fail vector=%d\n",
+		       __FUNCTION__, vector);
+}
+#endif /* XEN */
+
 /*
  * Find an IOSAPIC associated with a GSI
  */
@@ -287,6 +356,27 @@ nop (unsigned int irq)
 {
 	/* do nothing... */
 }
+
+
+#ifdef CONFIG_KEXEC
+void
+kexec_disable_iosapic(void)
+{
+	struct iosapic_intr_info *info;
+	struct iosapic_rte_info *rte;
+	u8 vec = 0;
+	for (info = iosapic_intr_info; info <
+			iosapic_intr_info + IA64_NUM_VECTORS; ++info, ++vec) {
+		list_for_each_entry(rte, &info->rtes,
+				rte_list) {
+			iosapic_write(rte->addr,
+					IOSAPIC_RTE_LOW(rte->rte_index),
+					IOSAPIC_MASK|vec);
+			iosapic_eoi(rte->addr, vec);
+		}
+	}
+}
+#endif
 
 static void
 mask_irq (unsigned int irq)
@@ -653,6 +743,9 @@ register_intr (unsigned int gsi, int vector, unsigned char delivery,
 	iosapic_intr_info[vector].dmode    = delivery;
 	iosapic_intr_info[vector].trigger  = trigger;
 
+	if (is_running_on_xen())
+		return 0;
+
 	if (trigger == IOSAPIC_EDGE)
 		irq_type = &irq_type_iosapic_edge;
 	else
@@ -1015,6 +1108,9 @@ iosapic_system_init (int system_pcat_compat)
 	}
 
 	pcat_compat = system_pcat_compat;
+	if (is_running_on_xen())
+		return;
+
 	if (pcat_compat) {
 		/*
 		 * Disable the compatibility mode interrupts (8259 style),

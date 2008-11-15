@@ -28,6 +28,24 @@ SECTIONS
   . = GATE_ADDR + 0x500;
 
   .data.patch			: {
+#ifdef __XEN_IA64_VDSO_PARAVIRT
+#define __start_gate_mckinley_e9_patchlist \
+	__start_gate_mckinley_e9_patchlist_xen
+#define __end_gate_mckinley_e9_patchlist \
+	__end_gate_mckinley_e9_patchlist_xen
+#define __start_gate_vtop_patchlist \
+	__start_gate_vtop_patchlist_xen
+#define __end_gate_vtop_patchlist \
+	__end_gate_vtop_patchlist_xen
+#define __start_gate_fsyscall_patchlist \
+	__start_gate_fsyscall_patchlist_xen
+#define __end_gate_fsyscall_patchlist \
+	__end_gate_fsyscall_patchlist_xen
+#define __start_gate_brl_fsys_bubble_down_patchlist \
+	__start_gate_brl_fsys_bubble_down_patchlist_xen
+#define __end_gate_brl_fsys_bubble_down_patchlist \
+	__end_gate_brl_fsys_bubble_down_patchlist_xen
+#endif
 				    __start_gate_mckinley_e9_patchlist = .;
 				    *(.data.patch.mckinley_e9)
 				    __end_gate_mckinley_e9_patchlist = .;

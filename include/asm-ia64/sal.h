@@ -42,6 +42,9 @@
 #include <asm/pal.h>
 #include <asm/system.h>
 #include <asm/fpu.h>
+#ifdef CONFIG_XEN
+#include <asm/xen/xencomm.h>
+#endif
 
 extern spinlock_t sal_lock;
 
@@ -686,10 +689,43 @@ ia64_sal_clear_state_info (u64 sal_info_type)
 /* Get the processor and platform information logged by SAL with respect to the machine
  * state at the time of the MCAs, INITs, CMCs, or CPEs.
  */
+#ifdef CONFIG_XEN
+static inline u64 ia64_sal_get_state_info_size (u64 sal_info_type);
+typedef struct ia64_mca_xencomm_t {
+	void *record;
+	struct xencomm_handle *handle;
+	struct list_head list;
+} ia64_mca_xencomm_t;
+extern struct list_head ia64_mca_xencomm_list;
+extern spinlock_t ia64_mca_xencomm_lock;
+#endif
+
 static inline u64
 ia64_sal_get_state_info (u64 sal_info_type, u64 *sal_info)
 {
 	struct ia64_sal_retval isrv;
+#ifdef CONFIG_XEN
+	if (is_running_on_xen()) {
+		ia64_mca_xencomm_t *entry;
+		struct xencomm_handle *desc = NULL;
+		unsigned long flags;
+
+		spin_lock_irqsave(&ia64_mca_xencomm_lock, flags);
+		list_for_each_entry(entry, &ia64_mca_xencomm_list, list) {
+			if (entry->record == sal_info) {
+				desc = entry->handle;
+				break;
+			}
+		}
+		spin_unlock_irqrestore(&ia64_mca_xencomm_lock, flags);
+
+		if (desc == NULL)
+			return 0;
+
+		SAL_CALL_REENTRANT(isrv, SAL_GET_STATE_INFO, sal_info_type, 0,
+		                   desc, 0, 0, 0, 0);
+	} else
+#endif
 	SAL_CALL_REENTRANT(isrv, SAL_GET_STATE_INFO, sal_info_type, 0,
 	              sal_info, 0, 0, 0, 0);
 	if (isrv.status)

@@ -98,6 +98,8 @@
 #define PG_uncached		31	/* Page has been mapped as uncached */
 #endif
 
+#define PG_foreign		20	/* Page is owned by foreign allocator. */
+
 /*
  * Manipulation of page state flags
  */
@@ -246,6 +248,19 @@
 #define PageUncached(page)	test_bit(PG_uncached, &(page)->flags)
 #define SetPageUncached(page)	set_bit(PG_uncached, &(page)->flags)
 #define ClearPageUncached(page)	clear_bit(PG_uncached, &(page)->flags)
+
+#define PageForeign(page)	test_bit(PG_foreign, &(page)->flags)
+#define SetPageForeign(_page, dtor) do {		\
+	set_bit(PG_foreign, &(_page)->flags);		\
+	BUG_ON((dtor) == (void (*)(struct page *))0);	\
+	(_page)->index = (long)(dtor);			\
+} while (0)
+#define ClearPageForeign(page) do {			\
+	clear_bit(PG_foreign, &(page)->flags);		\
+	(page)->index = 0;				\
+} while (0)
+#define PageForeignDestructor(_page)			\
+	((void (*)(struct page *))(_page)->index)(_page)
 
 struct page;	/* forward declaration */
 

@@ -13,6 +13,7 @@
 #define ACPI_PDC_SMP_C_SWCOORD		(0x0040)
 #define ACPI_PDC_SMP_T_SWCOORD		(0x0080)
 #define ACPI_PDC_C_C1_FFH		(0x0100)
+#define ACPI_PDC_C_C2C3_FFH		(0x0200)
 
 #define ACPI_PDC_EST_CAPABILITY_SMP	(ACPI_PDC_SMP_C1PT | \
 					 ACPI_PDC_C_C1_HALT | \
@@ -25,6 +26,8 @@
 
 #define ACPI_PDC_C_CAPABILITY_SMP	(ACPI_PDC_SMP_C2C3 | \
 					 ACPI_PDC_SMP_C1PT | \
-					 ACPI_PDC_C_C1_HALT)
+					 ACPI_PDC_C_C1_HALT | \
+					 ACPI_PDC_C_C1_FFH | \
+					 ACPI_PDC_C_C2C3_FFH)
 
 #endif				/* __PDC_INTEL_H__ */

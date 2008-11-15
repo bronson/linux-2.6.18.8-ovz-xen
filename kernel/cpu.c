@@ -48,7 +48,10 @@ EXPORT_SYMBOL_GPL(lock_cpu_hotplug);
 
 void unlock_cpu_hotplug(void)
 {
+/* cpufreq lock-takers fixed in mainline; shut up until dom0 kernel catches up*/
+#ifdef CONFIG_XEN
 	WARN_ON(recursive != current);
+#endif
 	if (recursive_depth) {
 		recursive_depth--;
 		return;

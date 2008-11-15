@@ -23,6 +23,10 @@
 #include <asm/pgtable.h>
 #include <asm/unistd.h>
 
+#ifdef CONFIG_XEN
+#include <xen/interface/callback.h>
+#endif
+
 /*
  * Should the kernel map a VDSO page into processes and pass its
  * address down to glibc upon exec()?
@@ -44,6 +48,7 @@ extern asmlinkage void sysenter_entry(void);
 
 void enable_sep_cpu(void)
 {
+#ifndef CONFIG_XEN
 	int cpu = get_cpu();
 	struct tss_struct *tss = &per_cpu(init_tss, cpu);
 
@@ -57,6 +62,35 @@ void enable_sep_cpu(void)
 	wrmsr(MSR_IA32_SYSENTER_CS, __KERNEL_CS, 0);
 	wrmsr(MSR_IA32_SYSENTER_ESP, tss->esp1, 0);
 	wrmsr(MSR_IA32_SYSENTER_EIP, (unsigned long) sysenter_entry, 0);
+#else
+	extern asmlinkage void sysenter_entry_pv(void);
+	static struct callback_register sysenter = {
+		.type = CALLBACKTYPE_sysenter,
+		.address = { __KERNEL_CS, (unsigned long)sysenter_entry_pv },
+	};
+
+	if (!boot_cpu_has(X86_FEATURE_SEP))
+		return;
+
+	get_cpu();
+
+	if (xen_feature(XENFEAT_supervisor_mode_kernel))
+		sysenter.address.eip = (unsigned long)sysenter_entry;
+
+	switch (HYPERVISOR_callback_op(CALLBACKOP_register, &sysenter)) {
+	case 0:
+		break;
+#if CONFIG_XEN_COMPAT < 0x030200
+	case -ENOSYS:
+		sysenter.type = CALLBACKTYPE_sysenter_deprecated;
+		if (HYPERVISOR_callback_op(CALLBACKOP_register, &sysenter) == 0)
+			break;
+#endif
+	default:
+		clear_bit(X86_FEATURE_SEP, boot_cpu_data.x86_capability);
+		break;
+	}
+#endif
 	put_cpu();	
 }
 
@@ -75,11 +109,6 @@ int __init sysenter_setup(void)
 #ifdef CONFIG_COMPAT_VDSO
 	__set_fixmap(FIX_VDSO, __pa(syscall_page), PAGE_READONLY);
 	printk("Compat vDSO mapped to %08lx.\n", __fix_to_virt(FIX_VDSO));
-#else
-	/*
-	 * In the non-compat case the ELF coredumping code needs the fixmap:
-	 */
-	__set_fixmap(FIX_VDSO, __pa(syscall_page), PAGE_KERNEL_RO);
 #endif
 
 	if (!boot_cpu_has(X86_FEATURE_SEP)) {
@@ -142,6 +171,13 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int exstack)
 	vma->vm_end = addr + PAGE_SIZE;
 	/* MAYWRITE to allow gdb to COW and set breakpoints */
 	vma->vm_flags = VM_READ|VM_EXEC|VM_MAYREAD|VM_MAYEXEC|VM_MAYWRITE;
+	/*
+	 * Make sure the vDSO gets into every core dump.
+	 * Dumping its contents makes post-mortem fully interpretable later
+	 * without matching up the same kernel and hardware config to see
+	 * what PC values meant.
+	 */
+	vma->vm_flags |= VM_ALWAYSDUMP;
 	vma->vm_flags |= mm->def_flags;
 	vma->vm_page_prot = protection_map[vma->vm_flags & 7];
 	vma->vm_ops = &syscall_vm_ops;

@@ -160,6 +160,20 @@ config PPC_EARLY_DEBUG_ISERIES
 	  Select this to enable early debugging for legacy iSeries. You need
 	  to hit "Ctrl-x Ctrl-x" to see the messages on the console.
 
+config PPC_EARLY_DEBUG_XEN_DOM0
+	bool "Xen Dom0 Console"
+	depends on PPC_XEN
+	help
+	  Select this to enable early debugging for Xen Dom0. Setting
+	  this will result in a kernel that may not work as a DomU.
+
+config PPC_EARLY_DEBUG_XEN_DOMU
+	bool "Xen DomU Console"
+	depends on PPC_XEN && XEN_UNPRIVILEGED_GUEST
+	help
+	  Select this to enable early debugging for Xen DomU. Setting
+	  this will result in a kernel that may not work as a Dom0.
+
 endchoice
 
 endmenu

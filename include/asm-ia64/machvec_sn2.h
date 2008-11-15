@@ -67,6 +67,7 @@ extern ia64_mv_dma_sync_sg_for_device	sn_dma_sync_sg_for_device;
 extern ia64_mv_dma_mapping_error	sn_dma_mapping_error;
 extern ia64_mv_dma_supported		sn_dma_supported;
 extern ia64_mv_migrate_t		sn_migrate;
+extern ia64_mv_kernel_launch_event_t	sn_kernel_launch_event;
 extern ia64_mv_msi_init_t		sn_msi_init;
 
 
@@ -119,6 +120,7 @@ extern ia64_mv_msi_init_t		sn_msi_init;
 #define platform_dma_mapping_error		sn_dma_mapping_error
 #define platform_dma_supported		sn_dma_supported
 #define platform_migrate		sn_migrate
+#define platform_kernel_launch_event    sn_kernel_launch_event
 #ifdef CONFIG_PCI_MSI
 #define platform_msi_init		sn_msi_init
 #else

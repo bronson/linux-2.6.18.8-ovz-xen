@@ -91,7 +91,14 @@ static int acpi_pm_enter(suspend_state_t pm_state)
 		break;
 
 	case PM_SUSPEND_MEM:
+#ifdef CONFIG_ACPI_PV_SLEEP
+		/* Hyperviosr will save and restore CPU context
+		 * and then we can skip low level housekeeping here.
+		 */
+		acpi_enter_sleep_state(acpi_state);
+#else
 		do_suspend_lowlevel();
+#endif
 		break;
 
 	case PM_SUSPEND_DISK:
@@ -145,10 +152,12 @@ static int acpi_pm_finish(suspend_state_t pm_state)
 	/* reset firmware waking vector */
 	acpi_set_firmware_waking_vector((acpi_physical_address) 0);
 
+#ifndef CONFIG_ACPI_PV_SLEEP
 	if (init_8259A_after_S1) {
 		printk("Broken toshiba laptop -> kicking interrupts\n");
 		init_8259A(0);
 	}
+#endif
 	return 0;
 }
 

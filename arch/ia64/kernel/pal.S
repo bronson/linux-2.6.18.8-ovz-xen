@@ -16,6 +16,7 @@
 #include <asm/processor.h>
 
 	.data
+	.globl pal_entry_point
 pal_entry_point:
 	data8 ia64_pal_default_handler
 	.text
@@ -53,7 +54,7 @@ END(ia64_pal_default_handler)
  * in4	       1 ==> clear psr.ic,  0 ==> don't clear psr.ic
  *
  */
-GLOBAL_ENTRY(ia64_pal_call_static)
+GLOBAL_ENTRY(__ia64_pal_call_static)
 	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(5)
 	alloc loc1 = ar.pfs,5,5,0,0
 	movl loc2 = pal_entry_point
@@ -90,7 +91,7 @@ GLOBAL_ENTRY(ia64_pal_call_static)
 	;;
 	srlz.d				// seralize restoration of psr.l
 	br.ret.sptk.many b0
-END(ia64_pal_call_static)
+END(__ia64_pal_call_static)
 
 /*
  * Make a PAL call using the stacked registers calling convention.

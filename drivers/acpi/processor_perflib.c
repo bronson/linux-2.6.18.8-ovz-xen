@@ -136,6 +136,11 @@ int acpi_processor_ppc_has_changed(struct acpi_processor *pr)
 	int ret = acpi_processor_get_platform_limit(pr);
 	if (ret < 0)
 		return (ret);
+#ifdef CONFIG_XEN
+	else if (processor_pmperf_external())
+		return processor_notify_external(pr,
+				PROCESSOR_PM_CHANGE, PM_TYPE_PERF);
+#endif /* CONFIG_XEN */
 	else
 		return cpufreq_update_policy(pr->id);
 }
@@ -299,7 +304,11 @@ static int acpi_processor_get_performance_states(struct acpi_processor *pr)
 	return result;
 }
 
+#ifndef CONFIG_PROCESSOR_EXTERNAL_CONTROL
 static int acpi_processor_get_performance_info(struct acpi_processor *pr)
+#else
+int acpi_processor_get_performance_info(struct acpi_processor *pr)
+#endif
 {
 	int result = 0;
 	acpi_status status = AE_OK;
@@ -538,7 +547,11 @@ static void acpi_cpufreq_remove_file(struct acpi_processor *pr)
 }
 #endif				/* CONFIG_X86_ACPI_CPUFREQ_PROC_INTF */
 
+#ifndef CONFIG_PROCESSOR_EXTERNAL_CONTROL
 static int acpi_processor_get_psd(struct acpi_processor	*pr)
+#else
+int acpi_processor_get_psd(struct acpi_processor *pr)
+#endif
 {
 	int result = 0;
 	acpi_status status = AE_OK;
