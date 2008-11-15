@@ -1,3 +1,37 @@
+This is a Linux kernel that can run OpenVZ on a Xen node.
+
+A description of the branches:
+
+stable: Stable Linux, 2.6.18.8 as of this writing.
+linode: stable plus Linode's 2.6.18.8-linode10 patches.
+openvz-orig: OpenVZ's ovz028stab056.1 patch against 2.6.18
+openvz-rebase: openvz rebased on top of stable
+openvz-linode: merge of the linode and openvz-rebase branches.
+master: a stable branch of openvz-linode.
+
+
+
+ 2.6.18 --> openvz-orig ---
+      \                    \
+       2.6.18.8 --------------> openvz-rebase ----
+            \                                     \
+             ----------> linode ------------------------> openvz-linode
+                                                               \
+                                                                -----> master
+
+
+- Take 2.6.18, apply OpenVZ patch, call it openvz-orig
+- Rebase it onto 2.6.18.8, call it openvz-rebase
+- Take 2.6.18.8, apply Linode patch, call it linode
+- Merge openvz-rebase and linode, call it openvz-linode
+- When it works, throw it on master
+
+
+I can be reached at bronson at rinspin.com.
+
+
+-------------------------------------------------------------------------
+
 	Linux kernel release 2.6.xx <http://kernel.org>
 
 These are the release notes for Linux version 2.6.  Read them carefully,
