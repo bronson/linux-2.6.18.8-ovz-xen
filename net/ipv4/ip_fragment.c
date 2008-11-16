@@ -96,6 +96,7 @@ struct ipq {
 	int             iif;
 	unsigned int    rid;
 	struct inet_peer *peer;
+	struct ve_struct *owner_env;
 };
 
 /* Hash table. */
@@ -181,7 +182,8 @@ static __inline__ void frag_free_queue(struct ipq *qp, int *work)
 
 static __inline__ struct ipq *frag_alloc_queue(void)
 {
-	struct ipq *qp = kmalloc(sizeof(struct ipq), GFP_ATOMIC);
+	struct ipq *qp = kmalloc(sizeof(struct ipq) + sizeof(void *),
+				GFP_ATOMIC);
 
 	if(!qp)
 		return NULL;
@@ -277,6 +279,9 @@ static void ip_evictor(void)
 static void ip_expire(unsigned long arg)
 {
 	struct ipq *qp = (struct ipq *) arg;
+	struct ve_struct *envid;
+
+	envid = set_exec_env(qp->owner_env);
 
 	spin_lock(&qp->lock);
 
@@ -299,6 +304,8 @@ static void ip_expire(unsigned long arg)
 out:
 	spin_unlock(&qp->lock);
 	ipq_put(qp, NULL);
+
+	(void)set_exec_env(envid);
 }
 
 /* Creation primitives. */
@@ -324,7 +331,8 @@ static struct ipq *ip_frag_intern(struct ipq *qp_in)
 		   qp->saddr == qp_in->saddr	&&
 		   qp->daddr == qp_in->daddr	&&
 		   qp->protocol == qp_in->protocol &&
-		   qp->user == qp_in->user) {
+		   qp->user == qp_in->user	&&
+		   qp->owner_env == get_exec_env()) {
 			atomic_inc(&qp->refcnt);
 			write_unlock(&ipfrag_lock);
 			qp_in->last_in |= COMPLETE;
@@ -373,6 +381,7 @@ static struct ipq *ip_frag_create(struct iphdr *iph, u32 user)
 	qp->timer.function = ip_expire;		/* expire function	*/
 	spin_lock_init(&qp->lock);
 	atomic_set(&qp->refcnt, 1);
+	qp->owner_env = get_exec_env();
 
 	return ip_frag_intern(qp);
 
@@ -401,7 +410,8 @@ static inline struct ipq *ip_find(struct iphdr *iph, u32 user)
 		   qp->saddr == saddr	&&
 		   qp->daddr == daddr	&&
 		   qp->protocol == protocol &&
-		   qp->user == user) {
+		   qp->user == user	&&
+		   qp->owner_env == get_exec_env()) {
 			atomic_inc(&qp->refcnt);
 			read_unlock(&ipfrag_lock);
 			return qp;
@@ -723,6 +733,9 @@ struct sk_buff *ip_defrag(struct sk_buff *skb, u32 user)
 		    qp->meat == qp->len)
 			ret = ip_frag_reasm(qp, dev);
 
+		if (ret)
+			ret->owner_env = skb->owner_env;
+
 		spin_unlock(&qp->lock);
 		ipq_put(qp, NULL);
 		return ret;
@@ -732,6 +745,49 @@ struct sk_buff *ip_defrag(struct sk_buff *skb, u32 user)
 	kfree_skb(skb);
 	return NULL;
 }
+
+#ifdef CONFIG_VE
+/* XXX */
+void ip_fragment_cleanup(struct ve_struct *envid)
+{
+	int i, progress;
+
+	/* All operations with fragment queues are performed from NET_RX/TX
+	 * soft interrupts or from timer context.  --Den */
+	local_bh_disable();
+	do {
+		progress = 0;
+		for (i = 0; i < IPQ_HASHSZ; i++) {
+			struct ipq *qp;
+			struct hlist_node *p, *n;
+
+			if (hlist_empty(&ipq_hash[i]))
+				continue;
+inner_restart:
+			read_lock(&ipfrag_lock);
+			hlist_for_each_entry_safe(qp, p, n,
+					&ipq_hash[i], list) {
+				if (!ve_accessible_strict(qp->owner_env, envid))
+					continue;
+				atomic_inc(&qp->refcnt);
+				read_unlock(&ipfrag_lock);
+
+				spin_lock(&qp->lock);
+				if (!(qp->last_in&COMPLETE))
+					ipq_kill(qp);
+				spin_unlock(&qp->lock);
+
+				ipq_put(qp, NULL);
+				progress = 1;
+				goto inner_restart;
+			}
+			read_unlock(&ipfrag_lock);
+		}
+	} while(progress);
+	local_bh_enable();
+}
+EXPORT_SYMBOL(ip_fragment_cleanup);
+#endif
 
 void ipfrag_init(void)
 {

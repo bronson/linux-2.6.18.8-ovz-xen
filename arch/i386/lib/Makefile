@@ -7,4 +7,7 @@ lib-y = checksum.o delay.o usercopy.o getuser.o putuser.o memcpy.o strstr.o \
 	bitops.o
 
 lib-$(CONFIG_X86_USE_3DNOW) += mmx.o
+
 lib-$(CONFIG_XEN_SCRUB_PAGES) += scrub.o
+
+obj-$(CONFIG_SMP) += cpuid-on-cpu.o msr-on-cpu.o

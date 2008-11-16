@@ -589,6 +589,7 @@ static __kprobes int dummy_nmi_callback(struct pt_regs * regs, int cpu)
 }
  
 static nmi_callback_t nmi_callback = dummy_nmi_callback;
+static nmi_callback_t nmi_ipi_callback = dummy_nmi_callback;
  
 asmlinkage __kprobes void do_nmi(struct pt_regs * regs, long error_code)
 {
@@ -598,7 +599,19 @@ asmlinkage __kprobes void do_nmi(struct pt_regs * regs, long error_code)
 	add_pda(__nmi_count,1);
 	if (!rcu_dereference(nmi_callback)(regs, cpu))
 		default_do_nmi(regs);
+
+	nmi_ipi_callback(regs, cpu);
 	nmi_exit();
+}
+
+void set_nmi_ipi_callback(nmi_callback_t callback)
+{
+	nmi_ipi_callback = callback;
+}
+
+void unset_nmi_ipi_callback(void)
+{
+	nmi_ipi_callback = dummy_nmi_callback;
 }
 
 void set_nmi_callback(nmi_callback_t callback)

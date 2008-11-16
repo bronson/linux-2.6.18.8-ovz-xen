@@ -428,12 +428,13 @@ static inline struct raw6_sock *raw6_sk(const struct sock *sk)
 #define inet_v6_ipv6only(__sk)		0
 #endif /* defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE) */
 
-#define INET6_MATCH(__sk, __hash, __saddr, __daddr, __ports, __dif)\
+#define INET6_MATCH(__sk, __hash, __saddr, __daddr, __ports, __dif,__ve)\
 	(((__sk)->sk_hash == (__hash))				&& \
 	 ((*((__u32 *)&(inet_sk(__sk)->dport))) == (__ports))  	&& \
 	 ((__sk)->sk_family		== AF_INET6)		&& \
 	 ipv6_addr_equal(&inet6_sk(__sk)->daddr, (__saddr))	&& \
 	 ipv6_addr_equal(&inet6_sk(__sk)->rcv_saddr, (__daddr))	&& \
+	 ve_accessible_strict((__sk)->owner_env, (__ve))	&& \
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
 
 #endif /* __KERNEL__ */

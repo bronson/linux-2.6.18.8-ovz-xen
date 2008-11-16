@@ -71,8 +71,13 @@ static struct kobj_type ktype_class = {
 };
 
 /* Hotplug events for classes go to the class_obj subsys */
-static decl_subsys(class, &ktype_class, NULL);
+decl_subsys(class, &ktype_class, NULL);
 
+#ifndef CONFIG_VE
+#define visible_class_subsys class_subsys
+#else
+#define visible_class_subsys (*get_exec_env()->class_subsys)
+#endif
 
 int class_create_file(struct class * cls, const struct class_attribute * attr)
 {
@@ -148,7 +153,7 @@ int class_register(struct class * cls)
 	if (error)
 		return error;
 
-	subsys_set_kset(cls, class_subsys);
+	subsys_set_kset(cls, visible_class_subsys);
 
 	error = subsystem_register(&cls->subsys);
 	if (!error) {
@@ -420,8 +425,13 @@ static struct kset_uevent_ops class_uevent_ops = {
 	.uevent =	class_uevent,
 };
 
-static decl_subsys(class_obj, &ktype_class_device, &class_uevent_ops);
+decl_subsys(class_obj, &ktype_class_device, &class_uevent_ops);
 
+#ifndef CONFIG_VE
+#define visible_class_obj_subsys class_obj_subsys
+#else
+#define visible_class_obj_subsys (*get_exec_env()->class_obj_subsys)
+#endif
 
 static int class_device_add_attrs(struct class_device * cd)
 {
@@ -499,7 +509,7 @@ static ssize_t store_uevent(struct class_device *class_dev,
 
 void class_device_initialize(struct class_device *class_dev)
 {
-	kobj_set_kset_s(class_dev, class_obj_subsys);
+	kobj_set_kset_s(class_dev, visible_class_obj_subsys);
 	kobject_init(&class_dev->kobj);
 	INIT_LIST_HEAD(&class_dev->node);
 }
@@ -877,12 +887,19 @@ void class_interface_unregister(struct class_interface *class_intf)
 	class_put(parent);
 }
 
-
+void prepare_sysfs_classes(void)
+{
+#ifdef CONFIG_VE
+	get_ve0()->class_subsys = &class_subsys;
+	get_ve0()->class_obj_subsys = &class_obj_subsys;
+#endif
+}
 
 int __init classes_init(void)
 {
 	int retval;
 
+	prepare_sysfs_classes();
 	retval = subsystem_register(&class_subsys);
 	if (retval)
 		return retval;
@@ -918,3 +935,6 @@ EXPORT_SYMBOL_GPL(class_device_remove_bin_file);
 
 EXPORT_SYMBOL_GPL(class_interface_register);
 EXPORT_SYMBOL_GPL(class_interface_unregister);
+
+EXPORT_SYMBOL(class_subsys);
+EXPORT_SYMBOL(class_obj_subsys);

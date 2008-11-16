@@ -307,7 +307,7 @@ void kill_off_processes_tt(void)
 	int me;
 
 	me = os_getpid();
-        for_each_process(p){
+        for_each_process_all(p){
 		if(p->thread.mode.tt.extern_pid != me) 
 			os_kill_process(p->thread.mode.tt.extern_pid, 0);
 	}
@@ -450,7 +450,7 @@ int is_valid_pid(int pid)
 	struct task_struct *task;
 
         read_lock(&tasklist_lock);
-        for_each_process(task){
+        for_each_process_all(task){
                 if(task->thread.mode.tt.extern_pid == pid){
 			read_unlock(&tasklist_lock);
 			return(1);

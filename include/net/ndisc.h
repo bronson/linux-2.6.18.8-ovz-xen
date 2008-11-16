@@ -51,7 +51,20 @@ struct net_device;
 struct net_proto_family;
 struct sk_buff;
 
-extern struct neigh_table nd_tbl;
+#ifdef CONFIG_VE
+#define nd_tbl		(*(get_exec_env()->ve_nd_tbl))
+#else
+#define nd_tbl		global_nd_tbl
+extern struct neigh_table global_nd_tbl;
+#endif
+
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+extern int ve_ndisc_init(struct ve_struct *ve);
+extern void ve_ndisc_fini(struct ve_struct *ve);
+#else
+#define ve_ndisc_init(ve)	(0)
+#define ve_ndisc_fini(ve)	do { } while (0)
+#endif
 
 struct nd_msg {
         struct icmp6hdr	icmph;
@@ -129,6 +142,7 @@ extern int 			ndisc_ifinfo_sysctl_change(struct ctl_table *ctl,
 extern void 			inet6_ifinfo_notify(int event,
 						    struct inet6_dev *idev);
 
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 static inline struct neighbour * ndisc_get_neigh(struct net_device *dev, struct in6_addr *addr)
 {
 
@@ -137,6 +151,7 @@ static inline struct neighbour * ndisc_get_neigh(struct net_device *dev, struct 
 
 	return NULL;
 }
+#endif
 
 
 #endif /* __KERNEL__ */

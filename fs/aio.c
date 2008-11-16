@@ -46,13 +46,16 @@
 #endif
 
 /*------ sysctl variables----*/
-static DEFINE_SPINLOCK(aio_nr_lock);
+DEFINE_SPINLOCK(aio_nr_lock);
 unsigned long aio_nr;		/* current system wide number of aio requests */
 unsigned long aio_max_nr = 0x10000; /* system wide maximum number of aio requests */
+EXPORT_SYMBOL_GPL(aio_nr_lock);
+EXPORT_SYMBOL_GPL(aio_nr);
 /*----end sysctl variables---*/
 
 static kmem_cache_t	*kiocb_cachep;
-static kmem_cache_t	*kioctx_cachep;
+kmem_cache_t	*kioctx_cachep;
+EXPORT_SYMBOL_GPL(kioctx_cachep);
 
 static struct workqueue_struct *aio_wq;
 
@@ -63,7 +66,7 @@ static DECLARE_WORK(fput_work, aio_fput_routine, NULL);
 static DEFINE_SPINLOCK(fput_lock);
 static LIST_HEAD(fput_head);
 
-static void aio_kick_handler(void *);
+void aio_kick_handler(void *);
 static void aio_queue_work(struct kioctx *);
 
 /* aio_setup
@@ -297,7 +300,7 @@ static void aio_cancel_all(struct kioctx *ctx)
 	spin_unlock_irq(&ctx->ctx_lock);
 }
 
-static void wait_for_all_aios(struct kioctx *ctx)
+void wait_for_all_aios(struct kioctx *ctx)
 {
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
@@ -314,6 +317,7 @@ static void wait_for_all_aios(struct kioctx *ctx)
 	__set_task_state(tsk, TASK_RUNNING);
 	remove_wait_queue(&ctx->wait, &wait);
 }
+EXPORT_SYMBOL_GPL(wait_for_all_aios);
 
 /* wait_on_sync_kiocb:
  *	Waits on the given sync kiocb to complete.
@@ -860,7 +864,7 @@ static inline void aio_run_all_iocbs(struct kioctx *ctx)
  *      space.
  * Run on aiod's context.
  */
-static void aio_kick_handler(void *data)
+void aio_kick_handler(void *data)
 {
 	struct kioctx *ctx = data;
 	mm_segment_t oldfs = get_fs();
@@ -879,6 +883,7 @@ static void aio_kick_handler(void *data)
 	if (requeue)
 		queue_work(aio_wq, &ctx->wq);
 }
+EXPORT_SYMBOL_GPL(aio_kick_handler);
 
 
 /*

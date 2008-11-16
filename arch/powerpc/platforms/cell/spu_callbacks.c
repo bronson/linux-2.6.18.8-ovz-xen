@@ -46,6 +46,9 @@ void *spu_syscall_table[] = {
 #define PPC_SYS_SPU(func)	ppc_##func,
 #define SYSX_SPU(f, f3264, f32)	f,
 
+#define SYS_SKIP(from, to) [from ... to] =
+#define SYS_SKIP_END()
+
 #include <asm/systbl.h>
 };
 

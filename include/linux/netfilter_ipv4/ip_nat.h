@@ -72,6 +72,8 @@ extern unsigned int ip_nat_setup_info(struct ip_conntrack *conntrack,
 extern int ip_nat_used_tuple(const struct ip_conntrack_tuple *tuple,
 			     const struct ip_conntrack *ignored_conntrack);
 
+extern void ip_nat_hash_conntrack(struct ip_conntrack *conntrack);
+
 /* Calculate relative checksum. */
 extern u_int16_t ip_nat_cheat_check(u_int32_t oldvalinv,
 				    u_int32_t newval,

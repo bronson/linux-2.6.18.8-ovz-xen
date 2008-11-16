@@ -86,6 +86,8 @@
 #define PG_nosave_free		18	/* Free, should not be written */
 #define PG_buddy		19	/* Page is free, on buddy lists */
 
+#define PG_checkpointed		21	/* Page transferred */
+
 
 #if (BITS_PER_LONG > 32)
 /*
@@ -261,6 +263,8 @@
 } while (0)
 #define PageForeignDestructor(_page)			\
 	((void (*)(struct page *))(_page)->index)(_page)
+
+#define ClearPageCheckpointed(page) clear_bit(PG_checkpointed, &(page)->flags)
 
 struct page;	/* forward declaration */
 

@@ -104,6 +104,10 @@ static inline long do_shmat(int shmid, char __user *shmaddr,
 }
 #endif
 
+int sysvipc_walk_shm(int (*func)(struct shmid_kernel*, void *), void *arg);
+struct file * sysvipc_setup_shm(key_t key, int shmid, size_t size, int shmflg);
+void shm_clean_ns(struct ipc_namespace *ns);
+
 #endif /* __KERNEL__ */
 
 #endif /* _LINUX_SHM_H_ */

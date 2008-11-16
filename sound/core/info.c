@@ -544,7 +544,7 @@ int __init snd_info_init(void)
 {
 	struct proc_dir_entry *p;
 
-	p = snd_create_proc_entry("asound", S_IFDIR | S_IRUGO | S_IXUGO, &proc_root);
+	p = snd_create_proc_entry("asound", S_IFDIR | S_IRUGO | S_IXUGO, NULL);
 	if (p == NULL)
 		return -ENOMEM;
 	snd_proc_root = p;

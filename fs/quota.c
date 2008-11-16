@@ -81,11 +81,11 @@ static int generic_quotactl_valid(struct super_block *sb, int type, int cmd, qid
 	if (cmd == Q_GETQUOTA) {
 		if (((type == USRQUOTA && current->euid != id) ||
 		     (type == GRPQUOTA && !in_egroup_p(id))) &&
-		    !capable(CAP_SYS_ADMIN))
+		    !capable(CAP_VE_SYS_ADMIN))
 			return -EPERM;
 	}
 	else if (cmd != Q_GETFMT && cmd != Q_SYNC && cmd != Q_GETINFO)
-		if (!capable(CAP_SYS_ADMIN))
+		if (!capable(CAP_VE_SYS_ADMIN))
 			return -EPERM;
 
 	return 0;
@@ -132,10 +132,10 @@ static int xqm_quotactl_valid(struct super_block *sb, int type, int cmd, qid_t i
 	if (cmd == Q_XGETQUOTA) {
 		if (((type == XQM_USRQUOTA && current->euid != id) ||
 		     (type == XQM_GRPQUOTA && !in_egroup_p(id))) &&
-		     !capable(CAP_SYS_ADMIN))
+		     !capable(CAP_VE_SYS_ADMIN))
 			return -EPERM;
 	} else if (cmd != Q_XGETQSTAT && cmd != Q_XQUOTASYNC) {
-		if (!capable(CAP_SYS_ADMIN))
+		if (!capable(CAP_VE_SYS_ADMIN))
 			return -EPERM;
 	}
 
@@ -180,7 +180,8 @@ static void quota_sync_sb(struct super_block *sb, int type)
 			continue;
 		if (!sb_has_quota_enabled(sb, cnt))
 			continue;
-		discard[cnt] = igrab(sb_dqopt(sb)->files[cnt]);
+		if (sb_dqopt(sb)->files[cnt])
+			discard[cnt] = igrab(sb_dqopt(sb)->files[cnt]);
 	}
 	mutex_unlock(&sb_dqopt(sb)->dqonoff_mutex);
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
@@ -216,7 +217,7 @@ restart:
 		sb->s_count++;
 		spin_unlock(&sb_lock);
 		down_read(&sb->s_umount);
-		if (sb->s_root && sb->s_qcop->quota_sync)
+		if (sb->s_root && sb->s_qcop && sb->s_qcop->quota_sync)
 			quota_sync_sb(sb, type);
 		up_read(&sb->s_umount);
 		spin_lock(&sb_lock);
@@ -337,6 +338,208 @@ static int do_quotactl(struct super_block *sb, int type, int cmd, qid_t id, void
 	return 0;
 }
 
+static struct super_block *quota_get_sb(const char __user *special)
+{
+	struct super_block *sb;
+	struct block_device *bdev;
+	char *tmp;
+
+	tmp = getname(special);
+	if (IS_ERR(tmp))
+		return (struct super_block *)tmp;
+	bdev = lookup_bdev(tmp, FMODE_QUOTACTL);
+	putname(tmp);
+	if (IS_ERR(bdev))
+		return (struct super_block *)bdev;
+	sb = get_super(bdev);
+	bdput(bdev);
+	if (!sb)
+		return ERR_PTR(-ENODEV);
+	return sb;
+}
+
+#ifdef CONFIG_QUOTA_COMPAT
+
+struct compat_dqinfo {
+	unsigned int dqi_bgrace;
+	unsigned int dqi_igrace;
+	unsigned int dqi_flags;
+	unsigned int dqi_blocks;
+	unsigned int dqi_free_blk;
+	unsigned int dqi_free_entry;
+};
+
+struct compat_dqstats {
+	__u32 lookups;
+	__u32 drops;
+	__u32 reads;
+	__u32 writes;
+	__u32 cache_hits;
+	__u32 allocated_dquots;
+	__u32 free_dquots;
+	__u32 syncs;
+	__u32 version;
+};
+
+asmlinkage long sys_quotactl(unsigned int cmd, const char __user *special, qid_t id, void __user *addr);
+static long compat_quotactl(unsigned int cmds, unsigned int type,
+		const char __user *special, qid_t id,
+		void __user *addr)
+{
+	struct super_block *sb;
+	long ret;
+
+	sb = NULL;
+	switch (cmds) {
+		case QC_QUOTAON:
+			return sys_quotactl(QCMD(Q_QUOTAON, type),
+					special, id, addr);
+
+		case QC_QUOTAOFF:
+			return sys_quotactl(QCMD(Q_QUOTAOFF, type),
+					special, id, addr);
+
+		case QC_SYNC:
+			return sys_quotactl(QCMD(Q_SYNC, type),
+					special, id, addr);
+
+		case QC_GETQUOTA: {
+			struct if_dqblk idq;
+			struct compat_v2_dqblk cdq;
+
+			sb = quota_get_sb(special);
+			ret = PTR_ERR(sb);
+			if (IS_ERR(sb))
+				break;
+			ret = check_quotactl_valid(sb, type, Q_GETQUOTA, id);
+			if (ret)
+				break;
+			ret = sb->s_qcop->get_dqblk(sb, type, id, &idq);
+			if (ret)
+				break;
+			cdq.dqb_ihardlimit = idq.dqb_ihardlimit;
+			cdq.dqb_isoftlimit = idq.dqb_isoftlimit;
+			cdq.dqb_curinodes = idq.dqb_curinodes;
+			cdq.dqb_bhardlimit = idq.dqb_bhardlimit;
+			cdq.dqb_bsoftlimit = idq.dqb_bsoftlimit;
+			cdq.dqb_curspace = idq.dqb_curspace;
+			cdq.dqb_btime = idq.dqb_btime;
+			cdq.dqb_itime = idq.dqb_itime;
+			ret = 0;
+			if (copy_to_user(addr, &cdq, sizeof(cdq)))
+				ret = -EFAULT;
+			break;
+		}
+
+		case QC_SETQUOTA:
+		case QC_SETUSE:
+		case QC_SETQLIM: {
+			struct if_dqblk idq;
+			struct compat_v2_dqblk cdq;
+
+			sb = quota_get_sb(special);
+			ret = PTR_ERR(sb);
+			if (IS_ERR(sb))
+				break;
+			ret = check_quotactl_valid(sb, type, Q_SETQUOTA, id);
+			if (ret)
+				break;
+			ret = -EFAULT;
+			if (copy_from_user(&cdq, addr, sizeof(cdq)))
+				break;
+			idq.dqb_ihardlimit = cdq.dqb_ihardlimit;
+			idq.dqb_isoftlimit = cdq.dqb_isoftlimit;
+			idq.dqb_curinodes = cdq.dqb_curinodes;
+			idq.dqb_bhardlimit = cdq.dqb_bhardlimit;
+			idq.dqb_bsoftlimit = cdq.dqb_bsoftlimit;
+			idq.dqb_curspace = cdq.dqb_curspace;
+			idq.dqb_valid = 0;
+			if (cmds == QC_SETQUOTA || cmds == QC_SETQLIM)
+				idq.dqb_valid |= QIF_LIMITS;
+			if (cmds == QC_SETQUOTA || cmds == QC_SETUSE)
+				idq.dqb_valid |= QIF_USAGE;
+			ret = sb->s_qcop->set_dqblk(sb, type, id, &idq);
+			break;
+		}
+
+		case QC_GETINFO: {
+			struct if_dqinfo iinf;
+			struct compat_dqinfo cinf;
+
+			sb = quota_get_sb(special);
+			ret = PTR_ERR(sb);
+			if (IS_ERR(sb))
+				break;
+			ret = check_quotactl_valid(sb, type, Q_GETQUOTA, id);
+			if (ret)
+				break;
+			ret = sb->s_qcop->get_info(sb, type, &iinf);
+			if (ret)
+				break;
+			cinf.dqi_bgrace = iinf.dqi_bgrace;
+			cinf.dqi_igrace = iinf.dqi_igrace;
+			cinf.dqi_flags = 0;
+			if (iinf.dqi_flags & DQF_INFO_DIRTY)
+				cinf.dqi_flags |= 0x0010;
+			cinf.dqi_blocks = 0;
+			cinf.dqi_free_blk = 0;
+			cinf.dqi_free_entry = 0;
+			ret = 0;
+			if (copy_to_user(addr, &cinf, sizeof(cinf)))
+				ret = -EFAULT;
+			break;
+		}
+
+		case QC_SETINFO:
+		case QC_SETGRACE:
+		case QC_SETFLAGS: {
+			struct if_dqinfo iinf;
+			struct compat_dqinfo cinf;
+
+			sb = quota_get_sb(special);
+			ret = PTR_ERR(sb);
+			if (IS_ERR(sb))
+				break;
+			ret = check_quotactl_valid(sb, type, Q_SETINFO, id);
+			if (ret)
+				break;
+			ret = -EFAULT;
+			if (copy_from_user(&cinf, addr, sizeof(cinf)))
+				break;
+			iinf.dqi_bgrace = cinf.dqi_bgrace;
+			iinf.dqi_igrace = cinf.dqi_igrace;
+			iinf.dqi_flags = cinf.dqi_flags;
+			iinf.dqi_valid = 0;
+			if (cmds == QC_SETINFO || cmds == QC_SETGRACE)
+				iinf.dqi_valid |= IIF_BGRACE | IIF_IGRACE;
+			if (cmds == QC_SETINFO || cmds == QC_SETFLAGS)
+				iinf.dqi_valid |= IIF_FLAGS;
+			ret = sb->s_qcop->set_info(sb, type, &iinf);
+			break;
+		}
+
+		case QC_GETSTATS: {
+			struct compat_dqstats stat;
+
+			memset(&stat, 0, sizeof(stat));
+			stat.version = 6*10000+5*100+0;
+			ret = 0;
+			if (copy_to_user(addr, &stat, sizeof(stat)))
+				ret = -EFAULT;
+			break;
+		}
+
+		default:
+			ret = -ENOSYS;
+			break;
+	}
+	if (sb && !IS_ERR(sb))
+		drop_super(sb);
+	return ret;
+}
+
+#endif
+
 /*
  * This is the system call interface. This communicates with
  * the user-level programs. Currently this only supports diskquota
@@ -347,25 +550,20 @@ asmlinkage long sys_quotactl(unsigned int cmd, const char __user *special, qid_t
 {
 	uint cmds, type;
 	struct super_block *sb = NULL;
-	struct block_device *bdev;
-	char *tmp;
 	int ret;
 
 	cmds = cmd >> SUBCMDSHIFT;
 	type = cmd & SUBCMDMASK;
 
+#ifdef CONFIG_QUOTA_COMPAT
+	if (cmds >= 0x0100 && cmds < 0x3000)
+		return compat_quotactl(cmds, type, special, id, addr);
+#endif
+
 	if (cmds != Q_SYNC || special) {
-		tmp = getname(special);
-		if (IS_ERR(tmp))
-			return PTR_ERR(tmp);
-		bdev = lookup_bdev(tmp);
-		putname(tmp);
-		if (IS_ERR(bdev))
-			return PTR_ERR(bdev);
-		sb = get_super(bdev);
-		bdput(bdev);
-		if (!sb)
-			return -ENODEV;
+		sb = quota_get_sb(special);
+		if (IS_ERR(sb))
+			return PTR_ERR(sb);
 	}
 
 	ret = check_quotactl_valid(sb, type, cmds, id);

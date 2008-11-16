@@ -446,9 +446,11 @@ beyond_if:
 #endif
 	start_thread(regs, ex.a_entry, current->mm->start_stack);
 	if (unlikely(current->ptrace & PT_PTRACED)) {
-		if (current->ptrace & PT_TRACE_EXEC)
+		if (current->ptrace & PT_TRACE_EXEC) {
+			set_pn_state(current, PN_STOP_EXEC);
 			ptrace_notify ((PTRACE_EVENT_EXEC << 8) | SIGTRAP);
-		else
+			clear_pn_state(current);
+		} else
 			send_sig(SIGTRAP, current, 0);
 	}
 	return 0;

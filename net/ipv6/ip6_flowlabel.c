@@ -415,6 +415,9 @@ int ipv6_flowlabel_opt(struct sock *sk, char __user *optval, int optlen)
 	struct ipv6_fl_socklist *sfl, **sflp;
 	struct ip6_flowlabel *fl;
 
+	if (!ve_is_super(get_exec_env()))
+		return -EPERM;
+
 	if (optlen < sizeof(freq))
 		return -EINVAL;
 

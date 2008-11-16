@@ -953,6 +953,7 @@ config NR_CPUS
 config HIGHMEM
 	bool "High memory support"
 
+source "kernel/Kconfig.fairsched"
 source kernel/Kconfig.hz
 source kernel/Kconfig.preempt
 source "mm/Kconfig"
@@ -1418,6 +1419,10 @@ source "arch/powerpc/oprofile/Kconfig"
 
 source "arch/ppc/Kconfig.debug"
 
+source "kernel/Kconfig.openvz"
+
 source "security/Kconfig"
+
+source "kernel/ub/Kconfig"
 
 source "crypto/Kconfig"

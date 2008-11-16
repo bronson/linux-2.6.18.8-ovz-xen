@@ -75,6 +75,9 @@
 #include <linux/cpuset.h>
 #include <linux/rcupdate.h>
 #include <linux/delayacct.h>
+#include <linux/fairsched.h>
+
+#include <ub/beancounter.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -161,8 +164,14 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 	struct group_info *group_info;
 	int g;
 	struct fdtable *fdt = NULL;
+	pid_t pid, ppid, tgid, vpid;
+
+	pid = get_task_pid(p);
+	tgid = get_task_tgid(p);
 
 	read_lock(&tasklist_lock);
+	ppid = get_task_ppid(p);
+	vpid = (pid_alive(p) ? virt_pid(p) : 0);
 	buffer += sprintf(buffer,
 		"State:\t%s\n"
 		"SleepAVG:\t%lu%%\n"
@@ -170,13 +179,19 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 		"Pid:\t%d\n"
 		"PPid:\t%d\n"
 		"TracerPid:\t%d\n"
+#ifdef CONFIG_FAIRSCHED
+		"FNid:\t%d\n"
+#endif
 		"Uid:\t%d\t%d\t%d\t%d\n"
 		"Gid:\t%d\t%d\t%d\t%d\n",
 		get_task_state(p),
 		(p->sleep_avg/1024)*100/(1020000000/1024),
-	       	p->tgid,
-		p->pid, pid_alive(p) ? p->group_leader->real_parent->tgid : 0,
-		pid_alive(p) && p->ptrace ? p->parent->pid : 0,
+	       	tgid,
+		pid, ppid,
+		pid_alive(p) && p->ptrace ? get_task_pid(p->parent) : 0,
+#ifdef CONFIG_FAIRSCHED
+		task_fairsched_node_id(p),
+#endif
 		p->uid, p->euid, p->suid, p->fsuid,
 		p->gid, p->egid, p->sgid, p->fsgid);
 	read_unlock(&tasklist_lock);
@@ -199,6 +214,16 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 	put_group_info(group_info);
 
 	buffer += sprintf(buffer, "\n");
+
+#ifdef CONFIG_VE
+	buffer += sprintf(buffer,
+			"envID:\t%d\n"
+			"VPid:\t%d\n"
+			"PNState:\t%u\n"
+			"StopState:\t%u\n",
+			VE_TASK_INFO(p)->owner_env->veid,
+			vpid, p->pn_state, p->stopped_state);
+#endif
 	return buffer;
 }
 
@@ -244,7 +269,7 @@ static void collect_sigign_sigcatch(struct task_struct *p, sigset_t *ign,
 
 static inline char * task_sig(struct task_struct *p, char *buffer)
 {
-	sigset_t pending, shpending, blocked, ignored, caught;
+	sigset_t pending, shpending, blocked, ignored, caught, saved;
 	int num_threads = 0;
 	unsigned long qsize = 0;
 	unsigned long qlim = 0;
@@ -254,6 +279,7 @@ static inline char * task_sig(struct task_struct *p, char *buffer)
 	sigemptyset(&blocked);
 	sigemptyset(&ignored);
 	sigemptyset(&caught);
+	sigemptyset(&saved);
 
 	/* Gather all the data with the appropriate locks held */
 	read_lock(&tasklist_lock);
@@ -262,6 +288,7 @@ static inline char * task_sig(struct task_struct *p, char *buffer)
 		pending = p->pending.signal;
 		shpending = p->signal->shared_pending.signal;
 		blocked = p->blocked;
+		saved = p->saved_sigmask;
 		collect_sigign_sigcatch(p, &ignored, &caught);
 		num_threads = atomic_read(&p->signal->count);
 		qsize = atomic_read(&p->user->sigpending);
@@ -279,6 +306,7 @@ static inline char * task_sig(struct task_struct *p, char *buffer)
 	buffer = render_sigset_t("SigBlk:\t", &blocked, buffer);
 	buffer = render_sigset_t("SigIgn:\t", &ignored, buffer);
 	buffer = render_sigset_t("SigCgt:\t", &caught, buffer);
+	buffer = render_sigset_t("SigSvd:\t", &saved, buffer);
 
 	return buffer;
 }
@@ -293,10 +321,27 @@ static inline char *task_cap(struct task_struct *p, char *buffer)
 			    cap_t(p->cap_effective));
 }
 
+#ifdef CONFIG_USER_RESOURCE
+static inline void ub_dump_task_info(struct task_struct *tsk,
+		char *stsk, int ltsk, char *smm, int lmm)
+{
+	print_ub_uid(tsk->task_bc.task_ub, stsk, ltsk);
+	task_lock(tsk);
+	if (tsk->mm)
+		print_ub_uid(tsk->mm->mm_ub, smm, lmm);
+	else
+		strncpy(smm, "N/A", lmm);
+	task_unlock(tsk);
+}
+#endif
+
 int proc_pid_status(struct task_struct *task, char * buffer)
 {
 	char * orig = buffer;
 	struct mm_struct *mm = get_task_mm(task);
+#ifdef CONFIG_USER_RESOURCE
+	char tsk_ub_info[64], mm_ub_info[64];
+#endif
 
 	buffer = task_name(task, buffer);
 	buffer = task_state(task, buffer);
@@ -310,6 +355,14 @@ int proc_pid_status(struct task_struct *task, char * buffer)
 	buffer = cpuset_task_status_allowed(task, buffer);
 #if defined(CONFIG_S390)
 	buffer = task_show_regs(task, buffer);
+#endif
+#ifdef CONFIG_USER_RESOURCE
+	ub_dump_task_info(task,
+			tsk_ub_info, sizeof(tsk_ub_info),
+			mm_ub_info, sizeof(mm_ub_info));
+
+	buffer += sprintf(buffer, "TaskUB:\t%s\n", tsk_ub_info);
+	buffer += sprintf(buffer, "MMUB:\t%s\n", mm_ub_info);
 #endif
 	return buffer - orig;
 }
@@ -332,6 +385,10 @@ static int do_task_stat(struct task_struct *task, char * buffer, int whole)
 	unsigned long rsslim = 0;
 	struct task_struct *t;
 	char tcomm[sizeof(task->comm)];
+#ifdef CONFIG_USER_RESOURCE
+	char ub_task_info[64];
+	char ub_mm_info[64];
+#endif
 
 	state = *get_task_state(task);
 	vsize = eip = esp = 0;
@@ -369,11 +426,11 @@ static int do_task_stat(struct task_struct *task, char * buffer, int whole)
 	}
 	if (task->signal) {
 		if (task->signal->tty) {
-			tty_pgrp = task->signal->tty->pgrp;
+			tty_pgrp = pid_to_vpid(task->signal->tty->pgrp);
 			tty_nr = new_encode_dev(tty_devnum(task->signal->tty));
 		}
-		pgid = process_group(task);
-		sid = task->signal->session;
+		pgid = get_task_pgid(task);
+		sid = get_task_sid(task);
 		cmin_flt = task->signal->cmin_flt;
 		cmaj_flt = task->signal->cmaj_flt;
 		cutime = task->signal->cutime;
@@ -386,7 +443,7 @@ static int do_task_stat(struct task_struct *task, char * buffer, int whole)
 			stime = cputime_add(stime, task->signal->stime);
 		}
 	}
-	ppid = pid_alive(task) ? task->group_leader->real_parent->tgid : 0;
+	ppid = get_task_ppid(task);
 	read_unlock(&tasklist_lock);
 
 	if (!whole || num_threads<2)
@@ -403,17 +460,34 @@ static int do_task_stat(struct task_struct *task, char * buffer, int whole)
 	priority = task_prio(task);
 	nice = task_nice(task);
 
+#ifndef CONFIG_VE
 	/* Temporary variable needed for gcc-2.96 */
 	/* convert timespec -> nsec*/
 	start_time = (unsigned long long)task->start_time.tv_sec * NSEC_PER_SEC
 				+ task->start_time.tv_nsec;
 	/* convert nsec -> ticks */
 	start_time = nsec_to_clock_t(start_time);
+#else
+	start_time = ve_relative_clock(&task->start_time);
+#endif
+
+#ifdef CONFIG_USER_RESOURCE
+	ub_dump_task_info(task,
+			ub_task_info, sizeof(ub_task_info),
+			ub_mm_info, sizeof(ub_mm_info));
+#endif
 
 	res = sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
 %lu %lu %lu %lu %lu %ld %ld %ld %ld %d 0 %llu %lu %ld %lu %lu %lu %lu %lu \
-%lu %lu %lu %lu %lu %lu %lu %lu %d %d %lu %lu %llu\n",
-		task->pid,
+%lu %lu %lu %lu %lu %lu %lu %lu %d %d %lu %lu %llu"
+#ifdef CONFIG_VE
+	" 0 0 0 0 0 0 0 %d %u"
+#endif
+#ifdef CONFIG_USER_RESOURCE
+	" %s %s"
+#endif
+	"\n",
+		get_task_pid(task),
 		tcomm,
 		state,
 		ppid,
@@ -457,7 +531,16 @@ static int do_task_stat(struct task_struct *task, char * buffer, int whole)
 		task_cpu(task),
 		task->rt_priority,
 		task->policy,
-		(unsigned long long)delayacct_blkio_ticks(task));
+		(unsigned long long)delayacct_blkio_ticks(task)
+#ifdef CONFIG_VE
+		, virt_pid(task),
+		VEID(VE_TASK_INFO(task)->owner_env)
+#endif
+#ifdef CONFIG_USER_RESOURCE
+		, ub_task_info,
+		ub_mm_info
+#endif
+		);
 	if(mm)
 		mmput(mm);
 	return res;

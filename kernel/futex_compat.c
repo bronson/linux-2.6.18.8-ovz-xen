@@ -116,7 +116,7 @@ compat_sys_get_robust_list(int pid, compat_uptr_t *head_ptr,
 
 		ret = -ESRCH;
 		read_lock(&tasklist_lock);
-		p = find_task_by_pid(pid);
+		p = find_task_by_pid_ve(pid);
 		if (!p)
 			goto err_unlock;
 		ret = -EPERM;

@@ -14,6 +14,7 @@ static int errno;
 #include <linux/delay.h>
 #include <asm/oplib.h>
 #include <asm/ebus.h>
+#include <asm/unistd.h>
 
 #include "bbc_i2c.h"
 #include "max1617.h"

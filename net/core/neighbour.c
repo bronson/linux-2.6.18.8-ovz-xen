@@ -33,6 +33,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/random.h>
 #include <linux/string.h>
+#include <ub/beancounter.h>
 
 #define NEIGH_DEBUG 1
 
@@ -242,6 +243,7 @@ static struct neighbour *neigh_alloc(struct neigh_table *tbl)
 	int entries;
 
 	entries = atomic_inc_return(&tbl->entries) - 1;
+	n = ERR_PTR(-ENOBUFS);
 	if (entries >= tbl->gc_thresh3 ||
 	    (entries >= tbl->gc_thresh2 &&
 	     time_after(now, tbl->last_flush + 5 * HZ))) {
@@ -252,7 +254,7 @@ static struct neighbour *neigh_alloc(struct neigh_table *tbl)
 
 	n = kmem_cache_alloc(tbl->kmem_cachep, SLAB_ATOMIC);
 	if (!n)
-		goto out_entries;
+		goto out_nomem;
 
 	memset(n, 0, tbl->entry_size);
 
@@ -273,6 +275,8 @@ static struct neighbour *neigh_alloc(struct neigh_table *tbl)
 out:
 	return n;
 
+out_nomem:
+	n = ERR_PTR(-ENOMEM);
 out_entries:
 	atomic_dec(&tbl->entries);
 	goto out;
@@ -385,12 +389,11 @@ struct neighbour *neigh_create(struct neigh_table *tbl, const void *pkey,
 	u32 hash_val;
 	int key_len = tbl->key_len;
 	int error;
-	struct neighbour *n1, *rc, *n = neigh_alloc(tbl);
+	struct neighbour *n1, *rc, *n;
 
-	if (!n) {
-		rc = ERR_PTR(-ENOBUFS);
+	rc = n = neigh_alloc(tbl);
+	if (IS_ERR(n))
 		goto out;
-	}
 
 	memcpy(n->primary_key, pkey, key_len);
 	n->dev = dev;
@@ -636,6 +639,8 @@ static void neigh_periodic_timer(unsigned long arg)
 	struct neigh_table *tbl = (struct neigh_table *)arg;
 	struct neighbour *n, **np;
 	unsigned long expire, now = jiffies;
+	struct ve_struct *env = set_exec_env(tbl->owner_env);
+	struct user_beancounter *ub = set_exec_ub(tbl->owner_ub);
 
 	NEIGH_CACHE_STAT_INC(tbl, periodic_gc_runs);
 
@@ -697,6 +702,8 @@ next_elt:
  	mod_timer(&tbl->gc_timer, now + expire);
 
 	write_unlock(&tbl->lock);
+	set_exec_ub(ub);
+	set_exec_env(env);
 }
 
 static __inline__ int neigh_max_probes(struct neighbour *n)
@@ -724,6 +731,11 @@ static void neigh_timer_handler(unsigned long arg)
 	struct neighbour *neigh = (struct neighbour *)arg;
 	unsigned state;
 	int notify = 0;
+	struct ve_struct *env;
+	struct user_beancounter *ub;
+
+	env = set_exec_env(neigh->dev->owner_env);
+	ub = set_exec_ub(netdev_bc(neigh->dev)->exec_ub);
 
 	write_lock(&neigh->lock);
 
@@ -830,6 +842,8 @@ out:
 		neigh_app_notify(neigh);
 #endif
 	neigh_release(neigh);
+	(void)set_exec_ub(ub);
+	(void)set_exec_env(env);
 }
 
 int __neigh_event_send(struct neighbour *neigh, struct sk_buff *skb)
@@ -1207,6 +1221,9 @@ static void neigh_proxy_process(unsigned long arg)
 	unsigned long now = jiffies;
 	struct sk_buff *skb;
 
+	struct ve_struct *env = set_exec_env(tbl->owner_env);
+	struct user_beancounter *ub = set_exec_ub(tbl->owner_ub);
+
 	spin_lock(&tbl->proxy_queue.lock);
 
 	skb = tbl->proxy_queue.next;
@@ -1218,6 +1235,7 @@ static void neigh_proxy_process(unsigned long arg)
 		skb = skb->next;
 		if (tdif <= 0) {
 			struct net_device *dev = back->dev;
+
 			__skb_unlink(back, &tbl->proxy_queue);
 			if (tbl->proxy_redo && netif_running(dev))
 				tbl->proxy_redo(back);
@@ -1225,6 +1243,7 @@ static void neigh_proxy_process(unsigned long arg)
 				kfree_skb(back);
 
 			dev_put(dev);
+
 		} else if (!sched_next || tdif < sched_next)
 			sched_next = tdif;
 	}
@@ -1232,6 +1251,8 @@ static void neigh_proxy_process(unsigned long arg)
 	if (sched_next)
 		mod_timer(&tbl->proxy_timer, jiffies + sched_next);
 	spin_unlock(&tbl->proxy_queue.lock);
+	(void)set_exec_ub(ub);
+	(void)set_exec_env(env);
 }
 
 void pneigh_enqueue(struct neigh_table *tbl, struct neigh_parms *p,
@@ -1327,12 +1348,17 @@ void neigh_parms_destroy(struct neigh_parms *parms)
 	kfree(parms);
 }
 
-void neigh_table_init_no_netlink(struct neigh_table *tbl)
+struct lock_class_key neigh_table_proxy_queue_class;
+
+int neigh_table_init_no_netlink(struct neigh_table *tbl)
 {
 	unsigned long now = jiffies;
 	unsigned long phsize;
 
+	atomic_set(&tbl->entries, 0);
+	tbl->hash_chain_gc = 0;
 	atomic_set(&tbl->parms.refcnt, 1);
+	tbl->parms.next = NULL;
 	INIT_RCU_HEAD(&tbl->parms.rcu_head);
 	tbl->parms.reachable_time =
 			  neigh_rand_reach_time(tbl->parms.base_reachable_time);
@@ -1340,22 +1366,30 @@ void neigh_table_init_no_netlink(struct neigh_table *tbl)
 	if (!tbl->kmem_cachep)
 		tbl->kmem_cachep = kmem_cache_create(tbl->id,
 						     tbl->entry_size,
-						     0, SLAB_HWCACHE_ALIGN,
+						     0, SLAB_HWCACHE_ALIGN | SLAB_UBC,
 						     NULL, NULL);
 
 	if (!tbl->kmem_cachep)
-		panic("cannot create neighbour cache");
+		return -ENOMEM;
+
+	tbl->owner_env = get_ve(get_exec_env());
+	tbl->owner_ub = get_beancounter(get_exec_ub());
 
 	tbl->stats = alloc_percpu(struct neigh_statistics);
 	if (!tbl->stats)
-		panic("cannot create neighbour cache statistics");
+		goto out;
 	
 #ifdef CONFIG_PROC_FS
-	tbl->pde = create_proc_entry(tbl->id, 0, proc_net_stat);
-	if (!tbl->pde) 
-		panic("cannot create neighbour proc dir entry");
-	tbl->pde->proc_fops = &neigh_stat_seq_fops;
-	tbl->pde->data = tbl;
+	if (ve_is_super(get_exec_env())) {
+		char name[strlen(tbl->id) + sizeof("net/stat/")];
+		strcpy(name, "net/stat/");
+		strcat(name, tbl->id);
+		tbl->pde = create_proc_glob_entry(name, S_IRUGO, NULL);
+		if (tbl->pde) {
+			tbl->pde->proc_fops = &neigh_stat_seq_fops;
+			tbl->pde->data = tbl;
+		}
+	}
 #endif
 
 	tbl->hash_mask = 1;
@@ -1365,7 +1399,7 @@ void neigh_table_init_no_netlink(struct neigh_table *tbl)
 	tbl->phash_buckets = kzalloc(phsize, GFP_KERNEL);
 
 	if (!tbl->hash_buckets || !tbl->phash_buckets)
-		panic("cannot allocate neighbour cache hashes");
+		goto nomem;
 
 	get_random_bytes(&tbl->hash_rnd, sizeof(tbl->hash_rnd));
 
@@ -1379,19 +1413,44 @@ void neigh_table_init_no_netlink(struct neigh_table *tbl)
 	init_timer(&tbl->proxy_timer);
 	tbl->proxy_timer.data	  = (unsigned long)tbl;
 	tbl->proxy_timer.function = neigh_proxy_process;
-	skb_queue_head_init(&tbl->proxy_queue);
+	skb_queue_head_init_class(&tbl->proxy_queue,
+			&neigh_table_proxy_queue_class);
 
 	tbl->last_flush = now;
 	tbl->last_rand	= now + tbl->parms.reachable_time * 20;
+	return 0;
+
+nomem:
+	if (tbl->hash_buckets) {
+		neigh_hash_free(tbl->hash_buckets, tbl->hash_mask + 1);
+		tbl->hash_buckets = NULL;
+	}
+	if (tbl->phash_buckets) {
+		kfree(tbl->phash_buckets);
+		tbl->phash_buckets = NULL;
+	}
+	if (tbl->stats) {
+		free_percpu(tbl->stats);
+		tbl->stats = NULL;
+	}
+out:
+	put_beancounter(tbl->owner_ub);
+	put_ve(tbl->owner_env);
+	return -ENOMEM;
 }
 
-void neigh_table_init(struct neigh_table *tbl)
+int neigh_table_init(struct neigh_table *tbl)
 {
 	struct neigh_table *tmp;
+	int err;
 
-	neigh_table_init_no_netlink(tbl);
+	err = neigh_table_init_no_netlink(tbl);
+	if (err)
+		return err;
 	write_lock(&neigh_tbl_lock);
 	for (tmp = neigh_tables; tmp; tmp = tmp->next) {
+		if (!ve_accessible_strict(tmp->owner_env, get_exec_env()))
+			continue;
 		if (tmp->family == tbl->family)
 			break;
 	}
@@ -1404,6 +1463,7 @@ void neigh_table_init(struct neigh_table *tbl)
 		       "family %d\n", tbl->family);
 		dump_stack();
 	}
+	return 0;
 }
 
 int neigh_table_clear(struct neigh_table *tbl)
@@ -1417,6 +1477,15 @@ int neigh_table_clear(struct neigh_table *tbl)
 	neigh_ifdown(tbl, NULL);
 	if (atomic_read(&tbl->entries))
 		printk(KERN_CRIT "neighbour leakage\n");
+#ifdef CONFIG_PROC_FS
+	if (ve_is_super(get_exec_env())) {
+		char name[strlen(tbl->id) + sizeof("net/stat/")];
+		strcpy(name, "net/stat/");
+		strcat(name, tbl->id);
+		remove_proc_glob_entry(name, NULL);
+	}
+#endif
+
 	write_lock(&neigh_tbl_lock);
 	for (tp = &neigh_tables; *tp; tp = &(*tp)->next) {
 		if (*tp == tbl) {
@@ -1434,6 +1503,9 @@ int neigh_table_clear(struct neigh_table *tbl)
 
 	free_percpu(tbl->stats);
 	tbl->stats = NULL;
+
+	put_beancounter(tbl->owner_ub);
+	put_ve(tbl->owner_env);
 
 	return 0;
 }
@@ -1456,6 +1528,8 @@ int neigh_delete(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 		struct neighbour *n;
 
 		if (tbl->family != ndm->ndm_family)
+			continue;
+		if (!ve_accessible_strict(tbl->owner_env, get_exec_env()))
 			continue;
 		read_unlock(&neigh_tbl_lock);
 
@@ -1509,6 +1583,8 @@ int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 		struct neighbour *n;
 
 		if (tbl->family != ndm->ndm_family)
+			continue;
+		if (!ve_accessible_strict(tbl->owner_env, get_exec_env()))
 			continue;
 		read_unlock(&neigh_tbl_lock);
 
@@ -1742,6 +1818,9 @@ int neightbl_set(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 		if (ndtmsg->ndtm_family && tbl->family != ndtmsg->ndtm_family)
 			continue;
 
+		if (!ve_accessible_strict(tbl->owner_env, get_exec_env()))
+			continue;
+
 		if (!rtattr_strcmp(tb[NDTA_NAME - 1], tbl->id))
 			break;
 	}
@@ -1963,6 +2042,8 @@ int neigh_dump_info(struct sk_buff *skb, struct netlink_callback *cb)
 	s_t = cb->args[0];
 
 	for (tbl = neigh_tables, t = 0; tbl; tbl = tbl->next, t++) {
+		if (!ve_accessible_strict(tbl->owner_env, get_exec_env()))
+			continue;
 		if (t < s_t || (family && tbl->family != family))
 			continue;
 		if (t > s_t)
@@ -2552,11 +2633,12 @@ int neigh_sysctl_register(struct net_device *dev, struct neigh_parms *p,
 			  int p_id, int pdev_id, char *p_name, 
 			  proc_handler *handler, ctl_handler *strategy)
 {
-	struct neigh_sysctl_table *t = kmalloc(sizeof(*t), GFP_KERNEL);
+	struct neigh_sysctl_table *t;
 	const char *dev_name_source = NULL;
 	char *dev_name = NULL;
 	int err = 0;
 
+	t = kmalloc(sizeof(*t), GFP_KERNEL);
 	if (!t)
 		return -ENOBUFS;
 	memcpy(t, &neigh_sysctl_template, sizeof(*t));

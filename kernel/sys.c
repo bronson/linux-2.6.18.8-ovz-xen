@@ -10,6 +10,7 @@
 #include <linux/mman.h>
 #include <linux/smp_lock.h>
 #include <linux/notifier.h>
+#include <linux/virtinfo.h>
 #include <linux/reboot.h>
 #include <linux/prctl.h>
 #include <linux/highuid.h>
@@ -434,6 +435,102 @@ int unregister_reboot_notifier(struct notifier_block * nb)
 
 EXPORT_SYMBOL(unregister_reboot_notifier);
 
+DECLARE_MUTEX(virtinfo_sem);
+EXPORT_SYMBOL(virtinfo_sem);
+static struct vnotifier_block *virtinfo_chain[VIRT_TYPES];
+
+void __virtinfo_notifier_register(int type, struct vnotifier_block *nb)
+{
+	struct vnotifier_block **p;
+
+	for (p = &virtinfo_chain[type];
+	     *p != NULL && nb->priority < (*p)->priority;
+	     p = &(*p)->next);
+	nb->next = *p;
+	smp_wmb();
+	*p = nb;
+}
+
+EXPORT_SYMBOL(__virtinfo_notifier_register);
+
+void virtinfo_notifier_register(int type, struct vnotifier_block *nb)
+{
+	down(&virtinfo_sem);
+	__virtinfo_notifier_register(type, nb);
+	up(&virtinfo_sem);
+}
+
+EXPORT_SYMBOL(virtinfo_notifier_register);
+
+struct virtinfo_cnt_struct {
+	volatile unsigned long exit[NR_CPUS];
+	volatile unsigned long entry;
+};
+static DEFINE_PER_CPU(struct virtinfo_cnt_struct, virtcnt);
+
+void virtinfo_notifier_unregister(int type, struct vnotifier_block *nb)
+{
+	struct vnotifier_block **p;
+	int entry_cpu, exit_cpu;
+	unsigned long cnt, ent;
+
+	down(&virtinfo_sem);
+	for (p = &virtinfo_chain[type]; *p != nb; p = &(*p)->next);
+	*p = nb->next;
+	smp_mb();
+
+	for_each_cpu_mask(entry_cpu, cpu_possible_map) {
+		while (1) {
+			cnt = 0;
+			for_each_cpu_mask(exit_cpu, cpu_possible_map)
+				cnt +=
+				    per_cpu(virtcnt, entry_cpu).exit[exit_cpu];
+			smp_rmb();
+			ent = per_cpu(virtcnt, entry_cpu).entry;
+			if (cnt == ent)
+				break;
+			__set_current_state(TASK_UNINTERRUPTIBLE);
+			schedule_timeout(HZ / 100);
+		}
+	}
+	up(&virtinfo_sem);
+}
+
+EXPORT_SYMBOL(virtinfo_notifier_unregister);
+
+int virtinfo_notifier_call(int type, unsigned long n, void *data)
+{
+	int ret;
+	int entry_cpu, exit_cpu;
+	struct vnotifier_block *nb;
+
+	entry_cpu = get_cpu();
+	per_cpu(virtcnt, entry_cpu).entry++;
+	smp_wmb();
+	put_cpu();
+
+	nb = virtinfo_chain[type];
+	ret = NOTIFY_DONE;
+	while (nb)
+	{
+		ret = nb->notifier_call(nb, n, data, ret);
+		if(ret & NOTIFY_STOP_MASK) {
+			ret &= ~NOTIFY_STOP_MASK;
+			break;
+		}
+		nb = nb->next;
+	}
+
+	exit_cpu = get_cpu();
+	smp_wmb();
+	per_cpu(virtcnt, entry_cpu).exit[exit_cpu]++;
+	put_cpu();
+
+	return ret;
+}
+
+EXPORT_SYMBOL(virtinfo_notifier_call);
+
 static int set_one_prio(struct task_struct *p, int niceval, int error)
 {
 	int no_nice;
@@ -479,17 +576,19 @@ asmlinkage long sys_setpriority(int which, int who, int niceval)
 	switch (which) {
 		case PRIO_PROCESS:
 			if (!who)
-				who = current->pid;
-			p = find_task_by_pid(who);
+				who = virt_pid(current);
+			p = find_task_by_pid_ve(who);
 			if (p)
 				error = set_one_prio(p, niceval, error);
 			break;
 		case PRIO_PGRP:
 			if (!who)
 				who = process_group(current);
-			do_each_task_pid(who, PIDTYPE_PGID, p) {
+			else
+				who = vpid_to_pid(who);
+			do_each_task_pid_ve(who, PIDTYPE_PGID, p) {
 				error = set_one_prio(p, niceval, error);
-			} while_each_task_pid(who, PIDTYPE_PGID, p);
+			} while_each_task_pid_ve(who, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
 			user = current->user;
@@ -499,10 +598,10 @@ asmlinkage long sys_setpriority(int which, int who, int niceval)
 				if ((who != current->uid) && !(user = find_user(who)))
 					goto out_unlock;	/* No processes for this user */
 
-			do_each_thread(g, p)
+			do_each_thread_ve(g, p)
 				if (p->uid == who)
 					error = set_one_prio(p, niceval, error);
-			while_each_thread(g, p);
+			while_each_thread_ve(g, p);
 			if (who != current->uid)
 				free_uid(user);		/* For find_user() */
 			break;
@@ -532,8 +631,11 @@ asmlinkage long sys_getpriority(int which, int who)
 	switch (which) {
 		case PRIO_PROCESS:
 			if (!who)
-				who = current->pid;
-			p = find_task_by_pid(who);
+				who = virt_pid(current);
+			if (!ve_is_super(get_exec_env()) &&
+			    !is_virtual_pid(who))
+				break;
+			p = find_task_by_pid_ve(who);
 			if (p) {
 				niceval = 20 - task_nice(p);
 				if (niceval > retval)
@@ -543,11 +645,13 @@ asmlinkage long sys_getpriority(int which, int who)
 		case PRIO_PGRP:
 			if (!who)
 				who = process_group(current);
-			do_each_task_pid(who, PIDTYPE_PGID, p) {
+			else
+				who = vpid_to_pid(who);
+			do_each_task_pid_ve(who, PIDTYPE_PGID, p) {
 				niceval = 20 - task_nice(p);
 				if (niceval > retval)
 					retval = niceval;
-			} while_each_task_pid(who, PIDTYPE_PGID, p);
+			} while_each_task_pid_ve(who, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
 			user = current->user;
@@ -557,13 +661,13 @@ asmlinkage long sys_getpriority(int which, int who)
 				if ((who != current->uid) && !(user = find_user(who)))
 					goto out_unlock;	/* No processes for this user */
 
-			do_each_thread(g, p)
+			do_each_thread_ve(g, p)
 				if (p->uid == who) {
 					niceval = 20 - task_nice(p);
 					if (niceval > retval)
 						retval = niceval;
 				}
-			while_each_thread(g, p);
+			while_each_thread_ve(g, p);
 			if (who != current->uid)
 				free_uid(user);		/* for find_user() */
 			break;
@@ -693,6 +797,24 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
 			magic2 != LINUX_REBOOT_MAGIC2B &&
 	                magic2 != LINUX_REBOOT_MAGIC2C))
 		return -EINVAL;
+
+#ifdef CONFIG_VE
+	if (!ve_is_super(get_exec_env()))
+		switch (cmd) {
+		case LINUX_REBOOT_CMD_RESTART:
+		case LINUX_REBOOT_CMD_HALT:
+		case LINUX_REBOOT_CMD_POWER_OFF:
+		case LINUX_REBOOT_CMD_RESTART2:
+			force_sig(SIGKILL, get_exec_env()->init_entry);
+
+		case LINUX_REBOOT_CMD_CAD_ON:
+		case LINUX_REBOOT_CMD_CAD_OFF:
+			return 0;
+
+		default:
+			return -EINVAL;
+		}
+#endif
 
 	/* Instead of trying to make the power_off code look like
 	 * halt when pm_power_off is not set do it the easy way.
@@ -883,7 +1005,7 @@ asmlinkage long sys_setgid(gid_t gid)
 	return 0;
 }
   
-static int set_user(uid_t new_ruid, int dumpclear)
+int set_user(uid_t new_ruid, int dumpclear)
 {
 	struct user_struct *new_user;
 
@@ -893,7 +1015,7 @@ static int set_user(uid_t new_ruid, int dumpclear)
 
 	if (atomic_read(&new_user->processes) >=
 				current->signal->rlim[RLIMIT_NPROC].rlim_cur &&
-			new_user != &root_user) {
+			new_ruid != 0) {
 		free_uid(new_user);
 		return -EAGAIN;
 	}
@@ -908,6 +1030,7 @@ static int set_user(uid_t new_ruid, int dumpclear)
 	current->uid = new_ruid;
 	return 0;
 }
+EXPORT_SYMBOL(set_user);
 
 /*
  * Unprivileged users may change the real uid to the effective uid
@@ -1196,8 +1319,27 @@ asmlinkage long sys_setfsgid(gid_t gid)
 	return old_fsgid;
 }
 
+#ifdef CONFIG_VE
+unsigned long long ve_relative_clock(struct timespec * ts)
+{
+	unsigned long long offset = 0;
+
+	if (ts->tv_sec > get_exec_env()->start_timespec.tv_sec ||
+	    (ts->tv_sec == get_exec_env()->start_timespec.tv_sec &&
+	     ts->tv_nsec >= get_exec_env()->start_timespec.tv_nsec))
+		offset = (unsigned long long)(ts->tv_sec -
+			get_exec_env()->start_timespec.tv_sec) * NSEC_PER_SEC
+			+ ts->tv_nsec -	get_exec_env()->start_timespec.tv_nsec;
+	return nsec_to_clock_t(offset);
+}
+#endif
+
 asmlinkage long sys_times(struct tms __user * tbuf)
 {
+#ifdef CONFIG_VE
+	struct timespec now;
+#endif
+
 	/*
 	 *	In the SMP world we might just be unlucky and have one of
 	 *	the times increment as we use it. Since the value is an
@@ -1231,7 +1373,13 @@ asmlinkage long sys_times(struct tms __user * tbuf)
 		if (copy_to_user(tbuf, &tmp, sizeof(struct tms)))
 			return -EFAULT;
 	}
+#ifndef CONFIG_VE
 	return (long) jiffies_64_to_clock_t(get_jiffies_64());
+#else
+	/* Compare to calculation in fs/proc/array.c */
+	do_posix_clock_monotonic_gettime(&now);
+	return ve_relative_clock(&now);
+#endif
 }
 
 /*
@@ -1252,13 +1400,16 @@ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
 	struct task_struct *p;
 	struct task_struct *group_leader = current->group_leader;
 	int err = -EINVAL;
+	int _pgid;
 
 	if (!pid)
-		pid = group_leader->pid;
+		pid = virt_pid(group_leader);
 	if (!pgid)
 		pgid = pid;
 	if (pgid < 0)
 		return -EINVAL;
+
+	_pgid = vpid_to_pid(pgid);
 
 	/* From this point forward we keep holding onto the tasklist lock
 	 * so that our parent does not change from under us. -DaveM
@@ -1266,7 +1417,7 @@ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
 	write_lock_irq(&tasklist_lock);
 
 	err = -ESRCH;
-	p = find_task_by_pid(pid);
+	p = find_task_by_pid_ve(pid);
 	if (!p)
 		goto out;
 
@@ -1291,25 +1442,29 @@ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
 	if (p->signal->leader)
 		goto out;
 
-	if (pgid != pid) {
+	pgid = virt_pid(p);
+	if (_pgid != p->pid) {
 		struct task_struct *p;
 
-		do_each_task_pid(pgid, PIDTYPE_PGID, p) {
-			if (p->signal->session == group_leader->signal->session)
+		do_each_task_pid_ve(_pgid, PIDTYPE_PGID, p) {
+			if (p->signal->session == group_leader->signal->session) {
+				pgid = virt_pgid(p);
 				goto ok_pgid;
-		} while_each_task_pid(pgid, PIDTYPE_PGID, p);
+			}
+		} while_each_task_pid_ve(_pgid, PIDTYPE_PGID, p);
 		goto out;
 	}
 
 ok_pgid:
-	err = security_task_setpgid(p, pgid);
+	err = security_task_setpgid(p, _pgid);
 	if (err)
 		goto out;
 
-	if (process_group(p) != pgid) {
+	if (process_group(p) != _pgid) {
 		detach_pid(p, PIDTYPE_PGID);
-		p->signal->pgrp = pgid;
-		attach_pid(p, PIDTYPE_PGID, pgid);
+		p->signal->pgrp = _pgid;
+		attach_pid(p, PIDTYPE_PGID, _pgid);
+		set_virt_pgid(p, pgid);
 	}
 
 	err = 0;
@@ -1322,19 +1477,19 @@ out:
 asmlinkage long sys_getpgid(pid_t pid)
 {
 	if (!pid) {
-		return process_group(current);
+		return virt_pgid(current);
 	} else {
 		int retval;
 		struct task_struct *p;
 
 		read_lock(&tasklist_lock);
-		p = find_task_by_pid(pid);
+		p = find_task_by_pid_ve(pid);
 
 		retval = -ESRCH;
 		if (p) {
 			retval = security_task_getpgid(p);
 			if (!retval)
-				retval = process_group(p);
+				retval = get_task_pgid(p);
 		}
 		read_unlock(&tasklist_lock);
 		return retval;
@@ -1346,7 +1501,7 @@ asmlinkage long sys_getpgid(pid_t pid)
 asmlinkage long sys_getpgrp(void)
 {
 	/* SMP - assuming writes are word atomic this is fine */
-	return process_group(current);
+	return virt_pgid(current);
 }
 
 #endif
@@ -1354,19 +1509,19 @@ asmlinkage long sys_getpgrp(void)
 asmlinkage long sys_getsid(pid_t pid)
 {
 	if (!pid) {
-		return current->signal->session;
+		return virt_sid(current);
 	} else {
 		int retval;
 		struct task_struct *p;
 
 		read_lock(&tasklist_lock);
-		p = find_task_by_pid(pid);
+		p = find_task_by_pid_ve(pid);
 
 		retval = -ESRCH;
 		if(p) {
 			retval = security_task_getsid(p);
 			if (!retval)
-				retval = p->signal->session;
+				retval = get_task_sid(p);
 		}
 		read_unlock(&tasklist_lock);
 		return retval;
@@ -1394,14 +1549,17 @@ asmlinkage long sys_setsid(void)
 	 * session id and so the check will always fail and make it so
 	 * init cannot successfully call setsid.
 	 */
-	if (session > 1 && find_task_by_pid_type(PIDTYPE_PGID, session))
+	if (session > 1 && find_task_by_pid_type_ve(PIDTYPE_PGID, session))
 		goto out;
 
 	group_leader->signal->leader = 1;
 	__set_special_pids(session, session);
+	set_virt_pgid(group_leader, virt_pid(group_leader));
+	set_virt_sid(group_leader, virt_pid(group_leader));
 	group_leader->signal->tty = NULL;
 	group_leader->signal->tty_old_pgrp = 0;
-	err = process_group(group_leader);
+
+	err = virt_pgid(group_leader);
 out:
 	write_unlock_irq(&tasklist_lock);
 	mutex_unlock(&tty_mutex);
@@ -1675,7 +1833,7 @@ asmlinkage long sys_newuname(struct new_utsname __user * name)
 	int errno = 0;
 
 	down_read(&uts_sem);
-	if (copy_to_user(name,&system_utsname,sizeof *name))
+	if (copy_to_user(name, utsname(), sizeof *name))
 		errno = -EFAULT;
 	up_read(&uts_sem);
 	return errno;
@@ -1686,15 +1844,15 @@ asmlinkage long sys_sethostname(char __user *name, int len)
 	int errno;
 	char tmp[__NEW_UTS_LEN];
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (!capable(CAP_VE_SYS_ADMIN))
 		return -EPERM;
 	if (len < 0 || len > __NEW_UTS_LEN)
 		return -EINVAL;
 	down_write(&uts_sem);
 	errno = -EFAULT;
 	if (!copy_from_user(tmp, name, len)) {
-		memcpy(system_utsname.nodename, tmp, len);
-		system_utsname.nodename[len] = 0;
+		memcpy(utsname()->nodename, tmp, len);
+		utsname()->nodename[len] = 0;
 		errno = 0;
 	}
 	up_write(&uts_sem);
@@ -1710,11 +1868,11 @@ asmlinkage long sys_gethostname(char __user *name, int len)
 	if (len < 0)
 		return -EINVAL;
 	down_read(&uts_sem);
-	i = 1 + strlen(system_utsname.nodename);
+	i = 1 + strlen(utsname()->nodename);
 	if (i > len)
 		i = len;
 	errno = 0;
-	if (copy_to_user(name, system_utsname.nodename, i))
+	if (copy_to_user(name, utsname()->nodename, i))
 		errno = -EFAULT;
 	up_read(&uts_sem);
 	return errno;
@@ -1731,7 +1889,7 @@ asmlinkage long sys_setdomainname(char __user *name, int len)
 	int errno;
 	char tmp[__NEW_UTS_LEN];
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (!capable(CAP_VE_SYS_ADMIN))
 		return -EPERM;
 	if (len < 0 || len > __NEW_UTS_LEN)
 		return -EINVAL;
@@ -1739,8 +1897,8 @@ asmlinkage long sys_setdomainname(char __user *name, int len)
 	down_write(&uts_sem);
 	errno = -EFAULT;
 	if (!copy_from_user(tmp, name, len)) {
-		memcpy(system_utsname.domainname, tmp, len);
-		system_utsname.domainname[len] = 0;
+		memcpy(utsname()->domainname, tmp, len);
+		utsname()->domainname[len] = 0;
 		errno = 0;
 	}
 	up_write(&uts_sem);

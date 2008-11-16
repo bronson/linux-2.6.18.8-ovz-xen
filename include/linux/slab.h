@@ -47,6 +47,26 @@ typedef struct kmem_cache kmem_cache_t;
 #define SLAB_DESTROY_BY_RCU	0x00080000UL	/* defer freeing pages to RCU */
 #define SLAB_MEM_SPREAD		0x00100000UL	/* Spread some memory over cpuset */
 
+/*
+ * allocation rules:                            __GFP_UBC       0
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *  cache (SLAB_UBC)				charge		charge
+ *				      (usual caches: mm, vma, task_struct, ...)
+ *
+ *  cache (SLAB_UBC | SLAB_NO_CHARGE)		charge		---
+ *					     (ub_kmalloc)    (kmalloc)
+ *
+ *  cache (no UB flags)				BUG()		---
+ *							(nonub caches, mempools)
+ *
+ *  pages					charge		---
+ *					   (ub_vmalloc,	      (vmalloc,
+ *				        poll, fdsets, ...)  non-ub allocs)
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ */
+#define SLAB_UBC		0x20000000UL	/* alloc space for ubs ... */
+#define SLAB_NO_CHARGE		0x40000000UL	/* ... but don't charge */
+
 /* flags passed to a constructor func */
 #define	SLAB_CTOR_CONSTRUCTOR	0x001UL		/* if not set, then deconstructor */
 #define SLAB_CTOR_ATOMIC	0x002UL		/* tell constructor it can't sleep */
@@ -68,6 +88,7 @@ extern void kmem_cache_free(kmem_cache_t *, void *);
 extern unsigned int kmem_cache_size(kmem_cache_t *);
 extern const char *kmem_cache_name(kmem_cache_t *);
 extern kmem_cache_t *kmem_find_general_cachep(size_t size, gfp_t gfpflags);
+extern void show_slab_info(void);
 
 /* Size description struct for general caches. */
 struct cache_sizes {
@@ -76,6 +97,7 @@ struct cache_sizes {
 	kmem_cache_t	*cs_dmacachep;
 };
 extern struct cache_sizes malloc_sizes[];
+extern int malloc_cache_num;
 
 extern void *__kmalloc(size_t, gfp_t);
 #ifndef CONFIG_DEBUG_SLAB
@@ -133,7 +155,7 @@ extern void *__kmalloc_track_caller(size_t, gfp_t, void*);
  */
 static inline void *kmalloc(size_t size, gfp_t flags)
 {
-	if (__builtin_constant_p(size)) {
+	if (__builtin_constant_p(size) && __builtin_constant_p(flags)) {
 		int i = 0;
 #define CACHE(x) \
 		if (size <= x) \
@@ -147,6 +169,8 @@ static inline void *kmalloc(size_t size, gfp_t flags)
 			__you_cannot_kmalloc_that_much();
 		}
 found:
+		if (flags & __GFP_UBC)
+			i += malloc_cache_num;
 		return kmem_cache_alloc((flags & GFP_DMA) ?
 			malloc_sizes[i].cs_dmacachep :
 			malloc_sizes[i].cs_cachep, flags);
@@ -154,6 +178,7 @@ found:
 	return __kmalloc(size, flags);
 }
 
+#define ub_kmalloc(size, flags) kmalloc(size, ((flags) | __GFP_UBC))
 extern void *__kzalloc(size_t, gfp_t);
 
 /**
@@ -177,12 +202,15 @@ static inline void *kzalloc(size_t size, gfp_t flags)
 			__you_cannot_kzalloc_that_much();
 		}
 found:
+		if (flags & __GFP_UBC)
+			i += malloc_cache_num;
 		return kmem_cache_zalloc((flags & GFP_DMA) ?
 			malloc_sizes[i].cs_dmacachep :
 			malloc_sizes[i].cs_cachep, flags);
 	}
 	return __kzalloc(size, flags);
 }
+#define ub_kzalloc(size, flags) kzalloc(size, (flags) | __GFP_UBC)
 
 /**
  * kcalloc - allocate memory for an array. The memory is set to zero.

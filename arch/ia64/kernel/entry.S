@@ -504,6 +504,74 @@ GLOBAL_ENTRY(clone)
 	br.ret.sptk.many rp
 END(clone)
 
+GLOBAL_ENTRY(ia64_ret_from_resume)
+	PT_REGS_UNWIND_INFO(0)
+{	/*
+	 * Some versions of gas generate bad unwind info if the first instruction of a
+	 * procedure doesn't go into the first slot of a bundle.  This is a workaround.
+	 */
+	nop.m 0
+	nop.i 0
+	/*
+	 * We need to call schedule_tail() to complete the scheduling process.
+	 * Called by ia64_switch_to() after do_fork()->copy_thread().  r8 contains the
+	 * address of the previously executing task.
+	 */
+	br.call.sptk.many rp=ia64_invoke_schedule_tail
+}
+	br.call.sptk.many rp=ia64_invoke_resume
+	;;
+	adds sp=256,sp
+	;;
+	/* Return from interrupt, we are all right. */
+(pNonSys) br ia64_leave_kernel
+	;;
+	/* Tricky part follows. We must restore correct syscall
+	 * register frame before doing normal syscall exit job.
+	 * It would the most natural to keep sw->ar_pfs correct,
+	 * then we would be here with correct register frame.
+	 * Unfortunately, IA64 has a feature. Registers were in backstore
+	 * after context switch, and the first br.ret does _NOT_ fetch
+	 * output registers.
+	 * It is quite natural:	look, if caller has output regs in his
+	 * frame, they should be consumed. If callee does not have (enough of)
+	 * input/local registers (1 in this case), the situation is unusual.
+	 * Practical evidence: they are filled with something random crap.
+	 * The only case, when this is essential in mainstream kernel
+	 * is sys_clone(). The result is that new process gets some kernel
+	 * information in its register frame. Which is a security problem, btw.
+	 *
+	 * So, we set sw->ar_pfs to pretend the whole frame is of local
+	 * regs. And we have to repartition the frame it manually, using
+	 * information from pt->cr_ifs (the register is invalid in this
+	 * case, but it holds correct pfm).
+	 */
+	adds r3=PT(CR_IFS)+16,sp
+	;;
+	ld8  r2=[r3],-(PT(CR_IFS)-PT(R8))
+	;;
+	extr.u  r2=r2,0,37
+	mov	r8=ar.ec
+	;;
+	extr.u  r8=r8,0,5
+	;;
+	shl	r8=r8,52
+	;;
+	or	r2=r2,r8
+	;;
+	mov  ar.pfs=r2
+	;;
+	movl r2=ia64_leave_syscall
+	;;
+	mov  rp=r2
+	/* Plus, we should fetch r8 and r10 from pt_regs. Something else? */
+	ld8  r8=[r3],PT(R10)-PT(R8)
+	;;
+	ld8  r10=[r3]
+	;;
+	br.ret.sptk.many rp
+END(ia64_ret_from_resume)
+
 	/*
 	 * Invoke a system call, but do some tracing before and after the call.
 	 * We MUST preserve the current register frame throughout this routine
@@ -1176,6 +1244,34 @@ GLOBAL_ENTRY(ia64_invoke_schedule_tail)
 	br.ret.sptk.many rp
 END(ia64_invoke_schedule_tail)
 
+GLOBAL_ENTRY(ia64_invoke_resume)
+	alloc loc1=ar.pfs,0,3,1,0
+	mov loc0=rp
+	adds out0=16,sp
+	;;
+	ld8  r8=[out0]
+	;;
+	cmp.eq p6,p0=r8,r0
+	;;
+(p6)	br.cond.sptk 1f
+	;;
+	mov  loc2=gp
+	;;
+	ld8  r10=[r8],8
+	;;
+	ld8  gp=[r8]
+	;;
+	mov  b7=r10
+	;;
+	br.call.sptk.many rp=b7
+	;;
+	mov  gp=loc2
+1:	
+	mov ar.pfs=loc1
+	mov rp=loc0
+	br.ret.sptk.many rp
+END(ia64_invoke_resume)
+
 	/*
 	 * Setup stack and call do_notify_resume_user().  Note that pSys and pNonSys need to
 	 * be set up by the caller.  We declare 8 input registers so the system call
@@ -1207,32 +1303,6 @@ GLOBAL_ENTRY(notify_resume_user)
 	mov ar.pfs=loc1
 	br.ret.sptk.many rp
 END(notify_resume_user)
-
-GLOBAL_ENTRY(sys_rt_sigsuspend)
-	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8)
-	alloc loc1=ar.pfs,8,2,3,0 // preserve all eight input regs in case of syscall restart!
-	mov r9=ar.unat
-	mov loc0=rp				// save return address
-	mov out0=in0				// mask
-	mov out1=in1				// sigsetsize
-	adds out2=8,sp				// out2=&sigscratch->ar_pfs
-	;;
-	.fframe 16
-	.spillsp ar.unat, 16
-	st8 [sp]=r9,-16				// allocate space for ar.unat and save it
-	st8 [out2]=loc1,-8			// save ar.pfs, out2=&sigscratch
-	.body
-	br.call.sptk.many rp=ia64_rt_sigsuspend
-.ret17:	.restore sp
-	adds sp=16,sp				// pop scratch stack space
-	;;
-	ld8 r9=[sp]				// load new unat from sw->caller_unat
-	mov rp=loc0
-	;;
-	mov ar.unat=r9
-	mov ar.pfs=loc1
-	br.ret.sptk.many rp
-END(sys_rt_sigsuspend)
 
 ENTRY(sys_rt_sigreturn)
 	PT_REGS_UNWIND_INFO(0)
@@ -1607,8 +1677,8 @@ sys_call_table:
 	data8 sys_readlinkat
 	data8 sys_fchmodat
 	data8 sys_faccessat
-	data8 sys_ni_syscall			// reserved for pselect
-	data8 sys_ni_syscall			// 1295 reserved for ppoll
+	data8 sys_pselect6
+	data8 sys_ppoll
 	data8 sys_unshare
 	data8 sys_splice
 	data8 sys_ni_syscall			// reserved for set_robust_list
@@ -1616,5 +1686,24 @@ sys_call_table:
 	data8 sys_sync_file_range		// 1300
 	data8 sys_tee
 	data8 sys_vmsplice
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall			// 1305
+	data8 sys_utimensat
+.rept 1499-1307
+	data8 sys_ni_syscall
+.endr
+	data8 sys_fairsched_vcpus
+	data8 sys_fairsched_mknod		// 1500
+	data8 sys_fairsched_rmnod
+	data8 sys_fairsched_chwt
+	data8 sys_fairsched_mvpr
+	data8 sys_fairsched_rate
+	data8 sys_getluid			// 1505
+	data8 sys_setluid
+	data8 sys_setublimit
+	data8 sys_ubstat
+	data8 sys_lchmod
+	data8 sys_lutime			// 1510
 
 	.org sys_call_table + 8*NR_syscalls	// guard against failures to increase NR_syscalls

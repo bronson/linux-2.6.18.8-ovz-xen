@@ -108,6 +108,7 @@ masquerade_target(struct sk_buff **pskb,
 	return ip_nat_setup_info(ct, &newrange, hooknum);
 }
 
+#if 0
 static inline int
 device_cmp(struct ip_conntrack *i, void *ifindex)
 {
@@ -163,6 +164,7 @@ static struct notifier_block masq_dev_notifier = {
 static struct notifier_block masq_inet_notifier = {
 	.notifier_call	= masq_inet_event,
 };
+#endif
 
 static struct ipt_target masquerade = {
 	.name		= "MASQUERADE",
@@ -180,12 +182,16 @@ static int __init ipt_masquerade_init(void)
 
 	ret = ipt_register_target(&masquerade);
 
+#if 0
+/*	These notifiers are unnecessary and may
+	lead to oops in virtual environments */
 	if (ret == 0) {
 		/* Register for device down reports */
 		register_netdevice_notifier(&masq_dev_notifier);
 		/* Register IP address change reports */
 		register_inetaddr_notifier(&masq_inet_notifier);
 	}
+#endif
 
 	return ret;
 }
@@ -193,8 +199,8 @@ static int __init ipt_masquerade_init(void)
 static void __exit ipt_masquerade_fini(void)
 {
 	ipt_unregister_target(&masquerade);
-	unregister_netdevice_notifier(&masq_dev_notifier);
-	unregister_inetaddr_notifier(&masq_inet_notifier);	
+/*	unregister_netdevice_notifier(&masq_dev_notifier);
+	unregister_inetaddr_notifier(&masq_inet_notifier);	*/
 }
 
 module_init(ipt_masquerade_init);

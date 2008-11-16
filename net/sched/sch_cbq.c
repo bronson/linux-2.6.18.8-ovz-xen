@@ -931,8 +931,8 @@ cbq_dequeue_prio(struct Qdisc *sch, int prio)
 
 			if (cl->deficit <= 0) {
 				q->active[prio] = cl;
-				cl = cl->next_alive;
 				cl->deficit += cl->quantum;
+				cl = cl->next_alive;
 			}
 			return skb;
 
@@ -1108,17 +1108,19 @@ static void cbq_normalize_quanta(struct cbq_sched_data *q, int prio)
 
 	for (h=0; h<16; h++) {
 		for (cl = q->classes[h]; cl; cl = cl->next) {
+			long mtu;
 			/* BUGGGG... Beware! This expression suffer of
 			   arithmetic overflows!
 			 */
 			if (cl->priority == prio) {
-				cl->quantum = (cl->weight*cl->allot*q->nclasses[prio])/
-					q->quanta[prio];
+				cl->quantum = (cl->weight * cl->allot) /
+					(q->quanta[prio] / q->nclasses[prio]);
 			}
-			if (cl->quantum <= 0 || cl->quantum>32*cl->qdisc->dev->mtu) {
-				printk(KERN_WARNING "CBQ: class %08x has bad quantum==%ld, repaired.\n", cl->classid, cl->quantum);
-				cl->quantum = cl->qdisc->dev->mtu/2 + 1;
-			}
+			mtu = cl->qdisc->dev->mtu;
+			if (cl->quantum <= mtu/2)
+				cl->quantum = mtu/2 + 1;
+			else if (cl->quantum > 32*mtu) 
+				cl->quantum = 32*mtu;
 		}
 	}
 }

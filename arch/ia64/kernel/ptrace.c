@@ -7,6 +7,7 @@
  * Derived from the x86 and Alpha versions.
  */
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
@@ -100,6 +101,8 @@ ia64_get_scratch_nat_bits (struct pt_regs *pt, unsigned long scratch_unat)
 
 #	undef GET_BITS
 }
+EXPORT_SYMBOL(ia64_get_scratch_nat_bits);
+EXPORT_SYMBOL(__ia64_save_fpu);
 
 /*
  * Set the NaT bits for the scratch registers according to NAT and
@@ -456,6 +459,7 @@ ia64_peek (struct task_struct *child, struct switch_stack *child_stack,
 	*val = ret;
 	return 0;
 }
+EXPORT_SYMBOL(ia64_peek);
 
 long
 ia64_poke (struct task_struct *child, struct switch_stack *child_stack,
@@ -520,6 +524,7 @@ ia64_get_user_rbs_end (struct task_struct *child, struct pt_regs *pt,
 		*cfmp = cfm;
 	return (unsigned long) ia64_rse_skip_regs(bspstore, ndirty);
 }
+EXPORT_SYMBOL(ia64_get_user_rbs_end);
 
 /*
  * Synchronize (i.e, write) the RSE backing store living in kernel
@@ -757,20 +762,20 @@ access_nat_bits (struct task_struct *child, struct pt_regs *pt,
 	if (write_access) {
 		nat_bits = *data;
 		scratch_unat = ia64_put_scratch_nat_bits(pt, nat_bits);
-		if (unw_set_ar(info, UNW_AR_UNAT, scratch_unat) < 0) {
-			dprintk("ptrace: failed to set ar.unat\n");
-			return -1;
-		}
+		if (info->pri_unat_loc)
+			*info->pri_unat_loc = scratch_unat;
+		else
+			info->sw->caller_unat = scratch_unat;
 		for (regnum = 4; regnum <= 7; ++regnum) {
 			unw_get_gr(info, regnum, &dummy, &nat);
 			unw_set_gr(info, regnum, dummy,
 				   (nat_bits >> regnum) & 1);
 		}
 	} else {
-		if (unw_get_ar(info, UNW_AR_UNAT, &scratch_unat) < 0) {
-			dprintk("ptrace: failed to read ar.unat\n");
-			return -1;
-		}
+		if (info->pri_unat_loc)
+			scratch_unat = *info->pri_unat_loc;
+		else
+			scratch_unat = info->sw->caller_unat;
 		nat_bits = ia64_get_scratch_nat_bits(pt, scratch_unat);
 		for (regnum = 4; regnum <= 7; ++regnum) {
 			unw_get_gr(info, regnum, &dummy, &nat);
@@ -1432,7 +1437,7 @@ sys_ptrace (long request, pid_t pid, unsigned long addr, unsigned long data)
 	ret = -ESRCH;
 	read_lock(&tasklist_lock);
 	{
-		child = find_task_by_pid(pid);
+		child = find_task_by_pid_ve(pid);
 		if (child) {
 			if (peek_or_poke)
 				child = find_thread_for_addr(child, addr);
@@ -1627,9 +1632,11 @@ syscall_trace_enter (long arg0, long arg1, long arg2, long arg3,
 		     long arg4, long arg5, long arg6, long arg7,
 		     struct pt_regs regs)
 {
+	set_pn_state(current, PN_STOP_ENTRY);
 	if (test_thread_flag(TIF_SYSCALL_TRACE) 
 	    && (current->ptrace & PT_PTRACED))
 		syscall_trace();
+	clear_pn_state(current);
 
 	if (unlikely(current->audit_context)) {
 		long syscall;
@@ -1664,7 +1671,9 @@ syscall_trace_leave (long arg0, long arg1, long arg2, long arg3,
 		audit_syscall_exit(success, result);
 	}
 
+	set_pn_state(current, PN_STOP_LEAVE);
 	if (test_thread_flag(TIF_SYSCALL_TRACE)
 	    && (current->ptrace & PT_PTRACED))
 		syscall_trace();
+	clear_pn_state(current);
 }

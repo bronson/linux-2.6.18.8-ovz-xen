@@ -275,6 +275,12 @@ struct page {
 	void *virtual;			/* Kernel virtual address (NULL if
 					   not kmapped, ie. highmem) */
 #endif /* WANT_PAGE_VIRTUAL */
+#ifdef CONFIG_USER_RESOURCE
+	union {
+		struct user_beancounter *page_ub;
+		struct page_beancounter *page_pb;
+	} bc;
+#endif
 };
 
 #define page_private(page)		((page)->private)
@@ -658,15 +664,8 @@ struct page *shmem_nopage(struct vm_area_struct *vma,
 int shmem_set_policy(struct vm_area_struct *vma, struct mempolicy *new);
 struct mempolicy *shmem_get_policy(struct vm_area_struct *vma,
 					unsigned long addr);
-int shmem_lock(struct file *file, int lock, struct user_struct *user);
 #else
 #define shmem_nopage filemap_nopage
-
-static inline int shmem_lock(struct file *file, int lock,
-			     struct user_struct *user)
-{
-	return 0;
-}
 
 static inline int shmem_set_policy(struct vm_area_struct *vma,
 				   struct mempolicy *new)
@@ -728,7 +727,9 @@ void free_pgd_range(struct mmu_gather **tlb, unsigned long addr,
 void free_pgtables(struct mmu_gather **tlb, struct vm_area_struct *start_vma,
 		unsigned long floor, unsigned long ceiling);
 int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
-			struct vm_area_struct *vma);
+		struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma);
+int __copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *vma,
+		      unsigned long addr, size_t size);
 int zeromap_page_range(struct vm_area_struct *vma, unsigned long from,
 			unsigned long size, pgprot_t prot);
 void unmap_mapping_range(struct address_space *mapping,

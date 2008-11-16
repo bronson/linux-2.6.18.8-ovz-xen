@@ -3076,7 +3076,7 @@ iput_tmp_ino_err_out_now:
 	 * method again... FIXME: Do we need to do this twice now because of
 	 * attribute inodes? I think not, so leave as is for now... (AIA)
 	 */
-	if (invalidate_inodes(sb)) {
+	if (invalidate_inodes(sb, 0)) {
 		ntfs_error(sb, "Busy inodes left. This is most likely a NTFS "
 				"driver bug.");
 		/* Copied from fs/super.c. I just love this message. (-; */

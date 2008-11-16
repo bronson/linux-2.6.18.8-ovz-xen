@@ -52,14 +52,46 @@
 
 #define RT_TABLE_MIN RT_TABLE_MAIN
 
+#undef ip_fib_local_table
+#undef ip_fib_main_table
 struct fib_table *ip_fib_local_table;
 struct fib_table *ip_fib_main_table;
+void prepare_fib_tables(void)
+{
+#ifdef CONFIG_VE
+	get_ve0()->_local_table = ip_fib_local_table;
+	ip_fib_local_table = (struct fib_table *)0x12345678;
+	get_ve0()->_main_table = ip_fib_main_table;
+	ip_fib_main_table = (struct fib_table *)0x12345678;
+#endif
+}
+#ifdef CONFIG_VE
+#define ip_fib_local_table 	get_exec_env()->_local_table
+#define ip_fib_main_table 	get_exec_env()->_main_table
+#endif
 
 #else
 
 #define RT_TABLE_MIN 1
 
+#undef fib_tables
 struct fib_table *fib_tables[RT_TABLE_MAX+1];
+void prepare_fib_tables(void)
+{
+#ifdef CONFIG_VE
+	int i;
+
+	BUG_ON(sizeof(fib_tables) !=
+		sizeof(((struct ve_struct *)0)->_fib_tables));
+	memcpy(get_ve0()->_fib_tables, fib_tables, sizeof(fib_tables));
+	for (i = 0; i <= RT_TABLE_MAX; i++)
+		fib_tables[i] = (void *)0x12366678;
+#endif
+}
+
+#ifdef CONFIG_VE
+#define fib_tables get_exec_env()->_fib_tables
+#endif
 
 struct fib_table *__fib_new_table(int id)
 {
@@ -186,7 +218,8 @@ int fib_validate_source(u32 src, u32 dst, u8 tos, int oif,
 
 	if (fib_lookup(&fl, &res))
 		goto last_resort;
-	if (res.type != RTN_UNICAST)
+	if (res.type != RTN_UNICAST &&
+		(!(dev->features & NETIF_F_VENET) || res.type != RTN_LOCAL))
 		goto e_inval_res;
 	*spec_dst = FIB_RES_PREFSRC(res);
 	fib_combine_itag(itag, &res);
@@ -249,7 +282,7 @@ int ip_rt_ioctl(unsigned int cmd, void __user *arg)
 	switch (cmd) {
 	case SIOCADDRT:		/* Add a route */
 	case SIOCDELRT:		/* Delete a route */
-		if (!capable(CAP_NET_ADMIN))
+		if (!capable(CAP_VE_NET_ADMIN))
 			return -EPERM;
 		if (copy_from_user(&r, arg, sizeof(struct rtentry)))
 			return -EFAULT;
@@ -524,6 +557,12 @@ static void nl_fib_lookup(struct fib_result_nl *frn, struct fib_table *tb )
 							    .fwmark = frn->fl_fwmark,
 							    .tos = frn->fl_tos,
 							    .scope = frn->fl_scope } } };
+
+#ifdef CONFIG_IP_MULTIPLE_TABLES
+	res.r = NULL;
+#endif
+
+	frn->err = -ENOENT;
 	if (tb) {
 		local_bh_disable();
 
@@ -535,6 +574,7 @@ static void nl_fib_lookup(struct fib_result_nl *frn, struct fib_table *tb )
 			frn->nh_sel = res.nh_sel;
 			frn->type = res.type;
 			frn->scope = res.scope;
+			fib_res_put(&res);
 		}
 		local_bh_enable();
 	}
@@ -547,21 +587,24 @@ static void nl_fib_input(struct sock *sk, int len)
 	struct fib_result_nl *frn;
 	u32 pid;     
 	struct fib_table *tb;
-	
+
 	skb = skb_dequeue(&sk->sk_receive_queue);
+	if (skb == NULL)
+		return;
+
 	nlh = (struct nlmsghdr *)skb->data;
 	if (skb->len < NLMSG_SPACE(0) || skb->len < nlh->nlmsg_len ||
 	    nlh->nlmsg_len < NLMSG_LENGTH(sizeof(*frn))) {
 		kfree_skb(skb);
 		return;
 	}
-	
+
 	frn = (struct fib_result_nl *) NLMSG_DATA(nlh);
 	tb = fib_get_table(frn->tb_id_in);
 
 	nl_fib_lookup(frn, tb);
-	
-	pid = nlh->nlmsg_pid;           /*pid of sending process */
+
+	pid = NETLINK_CB(skb).pid;       /* pid of sending process */
 	NETLINK_CB(skb).pid = 0;         /* from kernel */
 	NETLINK_CB(skb).dst_pid = pid;
 	NETLINK_CB(skb).dst_group = 0;  /* unicast */
@@ -652,6 +695,7 @@ static struct notifier_block fib_netdev_notifier = {
 
 void __init ip_fib_init(void)
 {
+	prepare_fib_tables();
 #ifndef CONFIG_IP_MULTIPLE_TABLES
 	ip_fib_local_table = fib_hash_init(RT_TABLE_LOCAL);
 	ip_fib_main_table  = fib_hash_init(RT_TABLE_MAIN);

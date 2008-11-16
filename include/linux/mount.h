@@ -54,6 +54,7 @@ struct vfsmount {
 	struct vfsmount *mnt_master;	/* slave is on master->mnt_slave_list */
 	struct namespace *mnt_namespace; /* containing namespace */
 	int mnt_pinned;
+	unsigned owner;
 };
 
 static inline struct vfsmount *mntget(struct vfsmount *mnt)

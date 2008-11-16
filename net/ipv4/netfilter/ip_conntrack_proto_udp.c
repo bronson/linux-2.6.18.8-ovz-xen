@@ -71,12 +71,12 @@ static int udp_packet(struct ip_conntrack *conntrack,
 	   stream.  Extend timeout. */
 	if (test_bit(IPS_SEEN_REPLY_BIT, &conntrack->status)) {
 		ip_ct_refresh_acct(conntrack, ctinfo, skb, 
-				   ip_ct_udp_timeout_stream);
+				   ve_ip_ct_udp_timeout_stream);
 		/* Also, more likely to be important, and not a probe */
 		if (!test_and_set_bit(IPS_ASSURED_BIT, &conntrack->status))
 			ip_conntrack_event_cache(IPCT_STATUS, skb);
 	} else
-		ip_ct_refresh_acct(conntrack, ctinfo, skb, ip_ct_udp_timeout);
+		ip_ct_refresh_acct(conntrack, ctinfo, skb, ve_ip_ct_udp_timeout);
 
 	return NF_ACCEPT;
 }

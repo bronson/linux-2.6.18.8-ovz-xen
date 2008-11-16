@@ -64,6 +64,35 @@ static u32 *	call_header(struct rpc_task *task);
 static u32 *	call_verify(struct rpc_task *task);
 
 
+/*
+ * Grand abort timeout (stop the client if occures)
+ */
+int xprt_abort_timeout = RPC_MAX_ABORT_TIMEOUT;
+
+static int rpc_abort_hard(struct rpc_task *task)
+{
+	struct rpc_clnt *clnt;
+	clnt = task->tk_client;
+
+	if (clnt->cl_pr_time == 0) {
+		clnt->cl_pr_time = jiffies;
+		return 0;
+	}
+	if (xprt_abort_timeout == RPC_MAX_ABORT_TIMEOUT)
+		return 0;
+	if (time_before(jiffies, clnt->cl_pr_time + xprt_abort_timeout * HZ))
+		return 0;
+
+	clnt->cl_broken = 1;
+	rpc_killall_tasks(clnt);
+	return -ETIMEDOUT;
+}
+
+static void rpc_abort_clear(struct rpc_task *task)
+{
+	task->tk_client->cl_pr_time = 0;
+}
+
 static int
 rpc_setup_pipedir(struct rpc_clnt *clnt, char *dir_name)
 {
@@ -175,10 +204,10 @@ rpc_new_client(struct rpc_xprt *xprt, char *servname,
 	}
 
 	/* save the nodename */
-	clnt->cl_nodelen = strlen(system_utsname.nodename);
+	clnt->cl_nodelen = strlen(utsname()->nodename);
 	if (clnt->cl_nodelen > UNX_MAXNODENAME)
 		clnt->cl_nodelen = UNX_MAXNODENAME;
-	memcpy(clnt->cl_nodename, system_utsname.nodename, clnt->cl_nodelen);
+	memcpy(clnt->cl_nodename, utsname()->nodename, clnt->cl_nodelen);
 	return clnt;
 
 out_no_auth:
@@ -250,6 +279,7 @@ rpc_clone_client(struct rpc_clnt *clnt)
 	new->cl_autobind = 0;
 	new->cl_oneshot = 0;
 	new->cl_dead = 0;
+	new->cl_broken = 0;
 	if (!IS_ERR(new->cl_dentry))
 		dget(new->cl_dentry);
 	rpc_init_rtt(&new->cl_rtt_default, clnt->cl_xprt->timeout.to_initval);
@@ -450,7 +480,7 @@ int rpc_call_sync(struct rpc_clnt *clnt, struct rpc_message *msg, int flags)
 	int		status;
 
 	/* If this client is slain all further I/O fails */
-	if (clnt->cl_dead) 
+	if (clnt->cl_dead || clnt->cl_broken) 
 		return -EIO;
 
 	BUG_ON(flags & RPC_TASK_ASYNC);
@@ -492,7 +522,7 @@ rpc_call_async(struct rpc_clnt *clnt, struct rpc_message *msg, int flags,
 
 	/* If this client is slain all further I/O fails */
 	status = -EIO;
-	if (clnt->cl_dead) 
+	if (clnt->cl_dead || clnt->cl_broken) 
 		goto out_release;
 
 	flags |= RPC_TASK_ASYNC;
@@ -805,6 +835,7 @@ call_bind_status(struct rpc_task *task)
 	if (task->tk_status >= 0) {
 		dprintk("RPC: %4d call_bind_status (status %d)\n",
 					task->tk_pid, task->tk_status);
+		rpc_abort_clear(task);
 		task->tk_status = 0;
 		task->tk_action = call_connect;
 		return;
@@ -819,7 +850,7 @@ call_bind_status(struct rpc_task *task)
 	case -ETIMEDOUT:
 		dprintk("RPC: %4d rpcbind request timed out\n",
 				task->tk_pid);
-		if (RPC_IS_SOFT(task)) {
+		if (RPC_IS_SOFT(task) || rpc_abort_hard(task)) {
 			status = -EIO;
 			break;
 		}
@@ -895,8 +926,10 @@ call_connect_status(struct rpc_task *task)
 	case -ENOTCONN:
 	case -ETIMEDOUT:
 	case -EAGAIN:
-		task->tk_action = call_bind;
-		break;
+		if (!rpc_abort_hard(task)) {
+			task->tk_action = call_bind;
+			break;
+		}
 	default:
 		rpc_exit(task, -EIO);
 		break;
@@ -1023,7 +1056,7 @@ call_timeout(struct rpc_task *task)
 	dprintk("RPC: %4d call_timeout (major)\n", task->tk_pid);
 	task->tk_timeouts++;
 
-	if (RPC_IS_SOFT(task)) {
+	if (RPC_IS_SOFT(task) || rpc_abort_hard(task)) {
 		printk(KERN_NOTICE "%s: server %s not responding, timed out\n",
 				clnt->cl_protname, clnt->cl_server);
 		rpc_exit(task, -EIO);
@@ -1064,7 +1097,7 @@ call_decode(struct rpc_task *task)
 	}
 
 	if (task->tk_status < 12) {
-		if (!RPC_IS_SOFT(task)) {
+		if (!RPC_IS_SOFT(task) && !rpc_abort_hard(task)) {
 			task->tk_action = call_bind;
 			clnt->cl_stats->rpcretrans++;
 			goto out_retry;
@@ -1075,6 +1108,7 @@ call_decode(struct rpc_task *task)
 		return;
 	}
 
+	rpc_abort_clear(task);
 	/*
 	 * Ensure that we see all writes made by xprt_complete_rqst()
 	 * before it changed req->rq_received.

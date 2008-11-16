@@ -196,7 +196,7 @@ int __cpuexit __cpu_disable(void)
 	local_flush_tlb_all();
 
 	read_lock(&tasklist_lock);
-	for_each_process(p) {
+	for_each_process_all(p) {
 		if (p->mm)
 			cpu_clear(cpu, p->mm->cpu_vm_mask);
 	}

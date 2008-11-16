@@ -151,6 +151,7 @@ asmlinkage long sys_mincore(unsigned long start, size_t len,
 			retval = -EFAULT;
 			break;
 		}
+
 		pages -= retval;
 		vec += retval;
 		start += retval << PAGE_SHIFT;

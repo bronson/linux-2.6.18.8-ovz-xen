@@ -1139,7 +1139,7 @@ static void *ipath_register_ib_device(int unit, struct ipath_devdata *dd)
 	dev->process_mad = ipath_process_mad;
 
 	snprintf(dev->node_desc, sizeof(dev->node_desc),
-		 IPATH_IDSTR " %s kernel_SMA", system_utsname.nodename);
+		 IPATH_IDSTR " %s kernel_SMA", init_utsname()->nodename);
 
 	ret = ib_register_device(dev);
 	if (ret)

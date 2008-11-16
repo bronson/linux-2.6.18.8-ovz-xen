@@ -27,6 +27,7 @@
 #include <net/checksum.h>
 #include <net/ip.h>
 #include <net/route.h>
+#include <linux/nfcalls.h>
 
 #define ASSERT_READ_LOCK(x)
 #define ASSERT_WRITE_LOCK(x)
@@ -45,8 +46,30 @@
 
 MODULE_LICENSE("GPL");
 
+int ip_conntrack_disable_ve0 = 0;
+module_param(ip_conntrack_disable_ve0, int, 0440);
+
 extern atomic_t ip_conntrack_count;
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/sched.h>
+#define ve_ip_conntrack_count \
+	(get_exec_env()->_ip_conntrack->_ip_conntrack_count)
+#else
+#define ve_ip_conntrack_count	ip_conntrack_count
+#endif
 DECLARE_PER_CPU(struct ip_conntrack_stat, ip_conntrack_stat);
+
+/* Prior to 2.6.15, we had a ip_conntrack_enable_ve0 param. */
+static int warn_set(const char *val, struct kernel_param *kp)
+{
+	printk(KERN_INFO KBUILD_MODNAME
+	       ": parameter ip_conntrack_enable_ve0 is obsoleted. In ovzkernel"
+	       " >= 2.6.15 connection tracking on hardware node is enabled by "
+	       "default, use ip_conntrack_disable_ve0=1 parameter to "
+	       "disable.\n");
+	return 0;
+}
+module_param_call(ip_conntrack_enable_ve0, warn_set, NULL, NULL, 0);
 
 static int kill_proto(struct ip_conntrack *i, void *data)
 {
@@ -88,8 +111,8 @@ static struct list_head *ct_get_first(struct seq_file *seq)
 	for (st->bucket = 0;
 	     st->bucket < ip_conntrack_htable_size;
 	     st->bucket++) {
-		if (!list_empty(&ip_conntrack_hash[st->bucket]))
-			return ip_conntrack_hash[st->bucket].next;
+		if (!list_empty(&ve_ip_conntrack_hash[st->bucket]))
+			return ve_ip_conntrack_hash[st->bucket].next;
 	}
 	return NULL;
 }
@@ -99,10 +122,10 @@ static struct list_head *ct_get_next(struct seq_file *seq, struct list_head *hea
 	struct ct_iter_state *st = seq->private;
 
 	head = head->next;
-	while (head == &ip_conntrack_hash[st->bucket]) {
+	while (head == &ve_ip_conntrack_hash[st->bucket]) {
 		if (++st->bucket >= ip_conntrack_htable_size)
 			return NULL;
-		head = ip_conntrack_hash[st->bucket].next;
+		head = ve_ip_conntrack_hash[st->bucket].next;
 	}
 	return head;
 }
@@ -238,7 +261,7 @@ static struct file_operations ct_file_ops = {
 /* expects */
 static void *exp_seq_start(struct seq_file *s, loff_t *pos)
 {
-	struct list_head *e = &ip_conntrack_expect_list;
+	struct list_head *e = &ve_ip_conntrack_expect_list;
 	loff_t i;
 
 	/* strange seq_file api calls stop even if we fail,
@@ -250,7 +273,7 @@ static void *exp_seq_start(struct seq_file *s, loff_t *pos)
 
 	for (i = 0; i <= *pos; i++) {
 		e = e->next;
-		if (e == &ip_conntrack_expect_list)
+		if (e == &ve_ip_conntrack_expect_list)
 			return NULL;
 	}
 	return e;
@@ -263,7 +286,7 @@ static void *exp_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	++*pos;
 	e = e->next;
 
-	if (e == &ip_conntrack_expect_list)
+	if (e == &ve_ip_conntrack_expect_list)
 		return NULL;
 
 	return e;
@@ -348,7 +371,7 @@ static void ct_cpu_seq_stop(struct seq_file *seq, void *v)
 
 static int ct_cpu_seq_show(struct seq_file *seq, void *v)
 {
-	unsigned int nr_conntracks = atomic_read(&ip_conntrack_count);
+	unsigned int nr_conntracks = atomic_read(&ve_ip_conntrack_count);
 	struct ip_conntrack_stat *st = v;
 
 	if (v == SEQ_START_TOKEN) {
@@ -540,6 +563,28 @@ int ip_conntrack_checksum = 1;
 
 /* From ip_conntrack_core.c */
 extern int ip_conntrack_max;
+#ifdef CONFIG_VE_IPTABLES
+#define ve_ip_conntrack_max \
+	(get_exec_env()->_ip_conntrack->_ip_conntrack_max)
+#define ve_ip_ct_sysctl_header \
+	(get_exec_env()->_ip_conntrack->_ip_ct_sysctl_header)
+#define ve_ip_ct_net_table \
+	(get_exec_env()->_ip_conntrack->_ip_ct_net_table)
+#define ve_ip_ct_ipv4_table \
+	(get_exec_env()->_ip_conntrack->_ip_ct_ipv4_table)
+#define ve_ip_ct_netfilter_table \
+	(get_exec_env()->_ip_conntrack->_ip_ct_netfilter_table)
+#define ve_ip_ct_sysctl_table \
+	(get_exec_env()->_ip_conntrack->_ip_ct_sysctl_table)
+#else
+#define ve_ip_conntrack_max		ip_conntrack_max
+static struct ctl_table_header *ip_ct_sysctl_header;
+#define ve_ip_ct_sysctl_header		ip_ct_sysctl_header
+#define ve_ip_ct_net_table		ip_ct_net_table
+#define ve_ip_ct_ipv4_table		ip_ct_ipv4_table
+#define ve_ip_ct_netfilter_table	ip_ct_netfilter_table
+#define ve_ip_ct_sysctl_table		ip_ct_sysctl_table
+#endif
 extern unsigned int ip_conntrack_htable_size;
 
 /* From ip_conntrack_proto_tcp.c */
@@ -569,8 +614,6 @@ extern unsigned int ip_ct_generic_timeout;
 /* Log invalid packets of a given protocol */
 static int log_invalid_proto_min = 0;
 static int log_invalid_proto_max = 255;
-
-static struct ctl_table_header *ip_ct_sysctl_header;
 
 static ctl_table ip_ct_sysctl_table[] = {
 	{
@@ -788,6 +831,82 @@ static ctl_table ip_ct_net_table[] = {
 };
 
 EXPORT_SYMBOL(ip_ct_log_invalid);
+
+#ifdef CONFIG_VE_IPTABLES
+static void ip_conntrack_sysctl_cleanup(void)
+{
+	if (!ve_is_super(get_exec_env()))
+		free_sysctl_clone(ve_ip_ct_net_table);
+
+	ve_ip_ct_net_table = NULL;
+	ve_ip_ct_ipv4_table = NULL;
+	ve_ip_ct_netfilter_table = NULL;
+	ve_ip_ct_sysctl_table = NULL;
+}
+
+static int ip_conntrack_sysctl_init(void)
+{
+	if (ve_is_super(get_exec_env())) {
+		ve_ip_ct_net_table = ip_ct_net_table;
+		ve_ip_ct_ipv4_table = ip_ct_ipv4_table;
+		ve_ip_ct_netfilter_table = ip_ct_netfilter_table;
+		ve_ip_ct_sysctl_table = ip_ct_sysctl_table;
+	} else {
+		ve_ip_ct_net_table = clone_sysctl_template(ip_ct_net_table);
+		if (ve_ip_ct_net_table == NULL)
+			return -ENOMEM;
+
+		ve_ip_ct_ipv4_table = ve_ip_ct_net_table[0].child;
+		ve_ip_ct_netfilter_table = ve_ip_ct_ipv4_table[0].child;
+		ve_ip_ct_sysctl_table = ve_ip_ct_netfilter_table[0].child;
+	}
+
+	ve_ip_ct_sysctl_table[0].data = &ve_ip_conntrack_max;
+	ve_ip_ct_netfilter_table[1].data = &ve_ip_conntrack_max;
+	ve_ip_ct_sysctl_table[1].data = &ve_ip_conntrack_count;
+	/* skip ve_ip_ct_sysctl_table[2].data as it is read-only and common
+	 * for all environments */
+	ve_ip_ct_tcp_timeouts[1] = ip_ct_tcp_timeout_syn_sent;
+	BUG_ON(ve_ip_ct_sysctl_table[4].ctl_name
+			!= NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_SYN_SENT);
+	ve_ip_ct_sysctl_table[4].data = &ve_ip_ct_tcp_timeouts[1];
+	ve_ip_ct_tcp_timeouts[2] = ip_ct_tcp_timeout_syn_recv;
+	ve_ip_ct_sysctl_table[5].data = &ve_ip_ct_tcp_timeouts[2];
+	ve_ip_ct_tcp_timeouts[3] = ip_ct_tcp_timeout_established;
+	ve_ip_ct_sysctl_table[6].data = &ve_ip_ct_tcp_timeouts[3];
+	ve_ip_ct_tcp_timeouts[4] = ip_ct_tcp_timeout_fin_wait;
+	ve_ip_ct_sysctl_table[7].data = &ve_ip_ct_tcp_timeouts[4];
+	ve_ip_ct_tcp_timeouts[5] = ip_ct_tcp_timeout_close_wait;
+	ve_ip_ct_sysctl_table[8].data = &ve_ip_ct_tcp_timeouts[5];
+	ve_ip_ct_tcp_timeouts[6] = ip_ct_tcp_timeout_last_ack;
+	ve_ip_ct_sysctl_table[9].data = &ve_ip_ct_tcp_timeouts[6];
+	ve_ip_ct_tcp_timeouts[7] = ip_ct_tcp_timeout_time_wait;
+	ve_ip_ct_sysctl_table[10].data = &ve_ip_ct_tcp_timeouts[7];
+	ve_ip_ct_tcp_timeouts[8] = ip_ct_tcp_timeout_close;
+	ve_ip_ct_sysctl_table[11].data = &ve_ip_ct_tcp_timeouts[8];
+	ve_ip_ct_udp_timeout = ip_ct_udp_timeout;
+	ve_ip_ct_sysctl_table[12].data = &ve_ip_ct_udp_timeout;
+	ve_ip_ct_udp_timeout_stream = ip_ct_udp_timeout_stream;
+	ve_ip_ct_sysctl_table[13].data = &ve_ip_ct_udp_timeout_stream;
+	ve_ip_ct_icmp_timeout = ip_ct_icmp_timeout;
+	ve_ip_ct_sysctl_table[14].data = &ve_ip_ct_icmp_timeout;
+	ve_ip_ct_generic_timeout = ip_ct_generic_timeout;
+	ve_ip_ct_sysctl_table[15].data = &ve_ip_ct_generic_timeout;
+	ve_ip_ct_log_invalid = ip_ct_log_invalid;
+	ve_ip_ct_sysctl_table[16].data = &ve_ip_ct_log_invalid;
+	ve_ip_ct_tcp_timeout_max_retrans = ip_ct_tcp_timeout_max_retrans;
+	ve_ip_ct_sysctl_table[17].data = &ve_ip_ct_tcp_timeout_max_retrans;
+	ve_ip_ct_tcp_loose = ip_ct_tcp_loose;
+	ve_ip_ct_sysctl_table[18].data = &ve_ip_ct_tcp_loose;
+	ve_ip_ct_tcp_be_liberal = ip_ct_tcp_be_liberal;
+	ve_ip_ct_sysctl_table[19].data = &ve_ip_ct_tcp_be_liberal;
+	ve_ip_ct_tcp_max_retrans = ip_ct_tcp_max_retrans;
+	BUG_ON(ve_ip_ct_sysctl_table[20].ctl_name
+			!= NET_IPV4_NF_CONNTRACK_TCP_MAX_RETRANS);
+	ve_ip_ct_sysctl_table[20].data = &ve_ip_ct_tcp_max_retrans;
+	return 0;
+}
+#endif /*CONFIG_VE*/
 #endif /* CONFIG_SYSCTL */
 
 /* FIXME: Allow NULL functions and sub in pointers to generic for
@@ -797,11 +916,11 @@ int ip_conntrack_protocol_register(struct ip_conntrack_protocol *proto)
 	int ret = 0;
 
 	write_lock_bh(&ip_conntrack_lock);
-	if (ip_ct_protos[proto->proto] != &ip_conntrack_generic_protocol) {
+	if (ve_ip_ct_protos[proto->proto] != &ip_conntrack_generic_protocol) {
 		ret = -EBUSY;
 		goto out;
 	}
-	ip_ct_protos[proto->proto] = proto;
+	ve_ip_ct_protos[proto->proto] = proto;
  out:
 	write_unlock_bh(&ip_conntrack_lock);
 	return ret;
@@ -810,7 +929,7 @@ int ip_conntrack_protocol_register(struct ip_conntrack_protocol *proto)
 void ip_conntrack_protocol_unregister(struct ip_conntrack_protocol *proto)
 {
 	write_lock_bh(&ip_conntrack_lock);
-	ip_ct_protos[proto->proto] = &ip_conntrack_generic_protocol;
+	ve_ip_ct_protos[proto->proto] = &ip_conntrack_generic_protocol;
 	write_unlock_bh(&ip_conntrack_lock);
 
 	/* Somebody could be still looking at the proto in bh. */
@@ -820,16 +939,22 @@ void ip_conntrack_protocol_unregister(struct ip_conntrack_protocol *proto)
 	ip_ct_iterate_cleanup(kill_proto, &proto->proto);
 }
 
-static int __init ip_conntrack_standalone_init(void)
+int init_iptable_conntrack(void)
 {
 #ifdef CONFIG_PROC_FS
 	struct proc_dir_entry *proc, *proc_exp, *proc_stat;
 #endif
 	int ret = 0;
 
+	if (!ve_is_super(get_exec_env()))
+		__module_get(THIS_MODULE);
+
 	ret = ip_conntrack_init();
 	if (ret < 0)
-		return ret;
+		goto cleanup_unget;
+
+	if (ve_is_super(get_exec_env()) && ip_conntrack_disable_ve0)
+		return 0;
 
 #ifdef CONFIG_PROC_FS
 	ret = -ENOMEM;
@@ -840,12 +965,14 @@ static int __init ip_conntrack_standalone_init(void)
 					&exp_file_ops);
 	if (!proc_exp) goto cleanup_proc;
 
-	proc_stat = create_proc_entry("ip_conntrack", S_IRUGO, proc_net_stat);
-	if (!proc_stat)
-		goto cleanup_proc_exp;
+	if (ve_is_super(get_exec_env())) {
+		proc_stat = create_proc_entry("ip_conntrack", S_IRUGO, proc_net_stat);
+		if (!proc_stat)
+			goto cleanup_proc_exp;
 
-	proc_stat->proc_fops = &ct_cpu_seq_fops;
-	proc_stat->owner = THIS_MODULE;
+		proc_stat->proc_fops = &ct_cpu_seq_fops;
+		proc_stat->owner = THIS_MODULE;
+	}
 #endif
 
 	ret = nf_register_hooks(ip_conntrack_ops, ARRAY_SIZE(ip_conntrack_ops));
@@ -854,22 +981,32 @@ static int __init ip_conntrack_standalone_init(void)
 		goto cleanup_proc_stat;
 	}
 #ifdef CONFIG_SYSCTL
-	ip_ct_sysctl_header = register_sysctl_table(ip_ct_net_table, 0);
-	if (ip_ct_sysctl_header == NULL) {
+#ifdef CONFIG_VE_IPTABLES
+	ret = ip_conntrack_sysctl_init();
+	if (ret < 0)
+		goto cleanup_sysctl;
+#endif
+	ret = -ENOMEM;
+	ve_ip_ct_sysctl_header = register_sysctl_table(ve_ip_ct_net_table, 0);
+	if (ve_ip_ct_sysctl_header == NULL) {
 		printk("ip_conntrack: can't register to sysctl.\n");
-		ret = -ENOMEM;
-		goto cleanup_hooks;
+		goto cleanup_sysctl2;
 	}
 #endif
-	return ret;
+	return 0;
 
 #ifdef CONFIG_SYSCTL
- cleanup_hooks:
+ cleanup_sysctl2:
+#ifdef CONFIG_VE_IPTABLES
+	ip_conntrack_sysctl_cleanup();
+ cleanup_sysctl:
+#endif
 	nf_unregister_hooks(ip_conntrack_ops, ARRAY_SIZE(ip_conntrack_ops));
 #endif
  cleanup_proc_stat:
 #ifdef CONFIG_PROC_FS
-	remove_proc_entry("ip_conntrack", proc_net_stat);
+	if (ve_is_super(get_exec_env()))
+		remove_proc_entry("ip_conntrack", proc_net_stat);
  cleanup_proc_exp:
 	proc_net_remove("ip_conntrack_expect");
  cleanup_proc:
@@ -877,25 +1014,59 @@ static int __init ip_conntrack_standalone_init(void)
  cleanup_init:
 #endif /* CONFIG_PROC_FS */
 	ip_conntrack_cleanup();
+ cleanup_unget:
+	if (!ve_is_super(get_exec_env()))
+		module_put(THIS_MODULE);
 	return ret;
+}
+
+void fini_iptable_conntrack(void)
+{
+	synchronize_net();
+	if (ve_is_super(get_exec_env()) && ip_conntrack_disable_ve0)
+		goto cleanup;
+#ifdef CONFIG_SYSCTL
+ 	unregister_sysctl_table(ve_ip_ct_sysctl_header);
+#ifdef CONFIG_VE_IPTABLES
+	ip_conntrack_sysctl_cleanup();
+#endif
+#endif
+	nf_unregister_hooks(ip_conntrack_ops, ARRAY_SIZE(ip_conntrack_ops));
+#ifdef CONFIG_PROC_FS
+	if (ve_is_super(get_exec_env()))
+		remove_proc_entry("ip_conntrack", proc_net_stat);
+	proc_net_remove("ip_conntrack_expect");
+	proc_net_remove("ip_conntrack");
+#endif /* CONFIG_PROC_FS */
+cleanup:
+	ip_conntrack_cleanup();
+	if (!ve_is_super(get_exec_env()))
+		module_put(THIS_MODULE);
+}
+
+static int __init ip_conntrack_standalone_init(void)
+{
+	int err;
+
+	err = init_iptable_conntrack();
+	if (err < 0)
+		return err;
+
+	KSYMRESOLVE(init_iptable_conntrack);
+	KSYMRESOLVE(fini_iptable_conntrack);
+	KSYMMODRESOLVE(ip_conntrack);
+	return 0;
 }
 
 static void __exit ip_conntrack_standalone_fini(void)
 {
-	synchronize_net();
-#ifdef CONFIG_SYSCTL
-	unregister_sysctl_table(ip_ct_sysctl_header);
-#endif
-	nf_unregister_hooks(ip_conntrack_ops, ARRAY_SIZE(ip_conntrack_ops));
-#ifdef CONFIG_PROC_FS
-	remove_proc_entry("ip_conntrack", proc_net_stat);
-	proc_net_remove("ip_conntrack_expect");
-	proc_net_remove("ip_conntrack");
-#endif /* CONFIG_PROC_FS */
-	ip_conntrack_cleanup();
+	KSYMMODUNRESOLVE(ip_conntrack);
+	KSYMUNRESOLVE(init_iptable_conntrack);
+	KSYMUNRESOLVE(fini_iptable_conntrack);
+	fini_iptable_conntrack();
 }
 
-module_init(ip_conntrack_standalone_init);
+subsys_initcall(ip_conntrack_standalone_init);
 module_exit(ip_conntrack_standalone_fini);
 
 /* Some modules need us, but don't depend directly on any symbol.
@@ -912,15 +1083,20 @@ EXPORT_SYMBOL_GPL(ip_conntrack_unregister_notifier);
 EXPORT_SYMBOL_GPL(__ip_ct_event_cache_init);
 EXPORT_PER_CPU_SYMBOL_GPL(ip_conntrack_ecache);
 #endif
+EXPORT_SYMBOL(ip_conntrack_disable_ve0);
 EXPORT_SYMBOL(ip_conntrack_protocol_register);
 EXPORT_SYMBOL(ip_conntrack_protocol_unregister);
 EXPORT_SYMBOL(ip_ct_get_tuple);
 EXPORT_SYMBOL(invert_tuplepr);
 EXPORT_SYMBOL(ip_conntrack_alter_reply);
+#ifndef CONFIG_VE_IPTABLES
 EXPORT_SYMBOL(ip_conntrack_destroyed);
+#endif
 EXPORT_SYMBOL(need_conntrack);
 EXPORT_SYMBOL(ip_conntrack_helper_register);
 EXPORT_SYMBOL(ip_conntrack_helper_unregister);
+EXPORT_SYMBOL(virt_ip_conntrack_helper_register);
+EXPORT_SYMBOL(virt_ip_conntrack_helper_unregister);
 EXPORT_SYMBOL(ip_ct_iterate_cleanup);
 EXPORT_SYMBOL(__ip_ct_refresh_acct);
 
@@ -930,14 +1106,18 @@ EXPORT_SYMBOL_GPL(__ip_conntrack_expect_find);
 EXPORT_SYMBOL_GPL(ip_conntrack_expect_find);
 EXPORT_SYMBOL(ip_conntrack_expect_related);
 EXPORT_SYMBOL(ip_conntrack_unexpect_related);
+#ifndef CONFIG_VE_IPTABLES
 EXPORT_SYMBOL_GPL(ip_conntrack_expect_list);
+#endif
 EXPORT_SYMBOL_GPL(ip_ct_unlink_expect);
 
 EXPORT_SYMBOL(ip_conntrack_tuple_taken);
 EXPORT_SYMBOL(ip_ct_gather_frags);
 EXPORT_SYMBOL(ip_conntrack_htable_size);
 EXPORT_SYMBOL(ip_conntrack_lock);
+#ifndef CONFIG_VE_IPTABLES
 EXPORT_SYMBOL(ip_conntrack_hash);
+#endif
 EXPORT_SYMBOL(ip_conntrack_untracked);
 EXPORT_SYMBOL_GPL(ip_conntrack_find_get);
 #ifdef CONFIG_IP_NF_NAT_NEEDED

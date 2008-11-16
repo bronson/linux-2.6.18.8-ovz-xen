@@ -10,6 +10,7 @@
 
 #include <linux/errno.h>
 #include <linux/time.h>
+#include <linux/fs.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/module.h>
@@ -238,6 +239,10 @@ static int proc_notify_change(struct dentry *dentry, struct iattr *iattr)
 	struct proc_dir_entry *de = PDE(inode);
 	int error;
 
+	if ((iattr->ia_valid & (ATTR_MODE|ATTR_UID|ATTR_GID)) &&
+	    LPDE(inode) == GPDE(inode))
+		return -EPERM;
+
 	error = inode_change_ok(inode, iattr);
 	if (error)
 		goto out;
@@ -246,9 +251,12 @@ static int proc_notify_change(struct dentry *dentry, struct iattr *iattr)
 	if (error)
 		goto out;
 	
-	de->uid = inode->i_uid;
-	de->gid = inode->i_gid;
-	de->mode = inode->i_mode;
+	if (iattr->ia_valid & ATTR_UID)
+		de->uid = inode->i_uid;
+	if (iattr->ia_valid & ATTR_GID)
+		de->gid = inode->i_gid;
+	if (iattr->ia_valid & ATTR_MODE)
+		de->mode = inode->i_mode;
 out:
 	return error;
 }
@@ -258,10 +266,21 @@ static int proc_getattr(struct vfsmount *mnt, struct dentry *dentry,
 {
 	struct inode *inode = dentry->d_inode;
 	struct proc_dir_entry *de = PROC_I(inode)->pde;
-	if (de && de->nlink)
-		inode->i_nlink = de->nlink;
+	struct proc_dir_entry *gde = GPDE(inode);
 
 	generic_fillattr(inode, stat);
+
+	if (de && de->nlink)
+		stat->nlink = de->nlink;
+	/* if dentry is found in both trees and it is a directory
+	 * then inode's nlink count must be altered, because local
+	 * and global subtrees may differ.
+	 * on the other hand, they may intersect, so actual nlink
+	 * value is difficult to calculate - upper estimate is used
+	 * instead of it.
+	 */
+	if (de && gde && de != gde && gde->nlink > 1)
+		stat->nlink += gde->nlink - 2;
 	return 0;
 }
 
@@ -274,7 +293,7 @@ static struct inode_operations proc_file_inode_operations = {
  * returns the struct proc_dir_entry for "/proc/tty/driver", and
  * returns "serial" in residual.
  */
-static int xlate_proc_name(const char *name,
+static int __xlate_proc_name(struct proc_dir_entry *root, const char *name,
 			   struct proc_dir_entry **ret, const char **residual)
 {
 	const char     		*cp = name, *next;
@@ -282,8 +301,13 @@ static int xlate_proc_name(const char *name,
 	int			len;
 	int 			rtn = 0;
 
+	if (*ret) {
+		de_get(*ret);
+		return 0;
+	}
+
 	spin_lock(&proc_subdir_lock);
-	de = &proc_root;
+	de = root;
 	while (1) {
 		next = strchr(cp, '/');
 		if (!next)
@@ -301,10 +325,27 @@ static int xlate_proc_name(const char *name,
 		cp += len + 1;
 	}
 	*residual = cp;
-	*ret = de;
+	*ret = de_get(de);
 out:
 	spin_unlock(&proc_subdir_lock);
 	return rtn;
+}
+
+#ifndef CONFIG_VE
+#define xlate_proc_loc_name xlate_proc_name
+#else
+static int xlate_proc_loc_name(const char *name,
+			   struct proc_dir_entry **ret, const char **residual)
+{
+	return __xlate_proc_name(get_exec_env()->proc_root,
+			name, ret, residual);
+}
+#endif
+
+static int xlate_proc_name(const char *name,
+		struct proc_dir_entry **ret, const char **residual)
+{
+	return __xlate_proc_name(&proc_root, name, ret, residual);
 }
 
 static DEFINE_IDR(proc_inum_idr);
@@ -378,6 +419,20 @@ static struct dentry_operations proc_dentry_operations =
 	.d_delete	= proc_delete_dentry,
 };
 
+static struct proc_dir_entry *__proc_lookup(struct proc_dir_entry *dir,
+		struct dentry *d)
+{
+	struct proc_dir_entry *de;
+
+	for (de = dir->subdir; de; de = de->next) {
+		if (de->namelen != d->d_name.len)
+			continue;
+		if (!memcmp(d->d_name.name, de->name, de->namelen))
+			break;
+	}
+	return de_get(de);
+}
+
 /*
  * Don't create negative dentries here, return -ENOENT by hand
  * instead.
@@ -385,36 +440,110 @@ static struct dentry_operations proc_dentry_operations =
 struct dentry *proc_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode *inode = NULL;
-	struct proc_dir_entry * de;
+	struct proc_dir_entry *lde, *gde;
 	int error = -ENOENT;
 
 	lock_kernel();
 	spin_lock(&proc_subdir_lock);
-	de = PDE(dir);
-	if (de) {
-		for (de = de->subdir; de ; de = de->next) {
-			if (de->namelen != dentry->d_name.len)
-				continue;
-			if (!memcmp(dentry->d_name.name, de->name, de->namelen)) {
-				unsigned int ino = de->low_ino;
-
-				spin_unlock(&proc_subdir_lock);
-				error = -EINVAL;
-				inode = proc_get_inode(dir->i_sb, ino, de);
-				spin_lock(&proc_subdir_lock);
-				break;
-			}
-		}
+	lde = LPDE(dir);
+	if (lde)
+		lde = __proc_lookup(lde, dentry);
+	if (lde && !try_module_get(lde->owner)) {
+		de_put(lde);
+		lde = NULL;
 	}
+#ifdef CONFIG_VE
+	gde = GPDE(dir);
+	if (gde)
+		gde = __proc_lookup(gde, dentry);
+	if (!lde && gde && !try_module_get(gde->owner)) {
+		de_put(gde);
+		gde = NULL;
+	}
+#else
+	gde = NULL;
+#endif
 	spin_unlock(&proc_subdir_lock);
-	unlock_kernel();
 
-	if (inode) {
-		dentry->d_op = &proc_dentry_operations;
-		d_add(dentry, inode);
-		return NULL;
+	/*
+	 * There are following possible cases after lookup:
+	 *
+	 * lde		gde
+	 * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	 * NULL		NULL		ENOENT
+	 * loc		NULL		found in local tree
+	 * loc		glob		found in both trees
+	 * NULL		glob		found in global tree
+	 * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	 *
+	 * We initialized inode as follows after lookup:
+	 *
+	 * inode->lde	inode->gde
+	 * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	 * loc		NULL		in local tree
+	 * loc		glob		both trees
+	 * glob		glob		global tree
+	 * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	 * i.e. inode->lde is always initialized
+	 */
+
+	if (lde == NULL && gde == NULL)
+		goto out;
+
+	if (lde != NULL)
+		inode = proc_get_inode(dir->i_sb, lde->low_ino, lde);
+	else
+		inode = proc_get_inode(dir->i_sb, gde->low_ino, gde);
+
+	/*
+	 * We can sleep in proc_get_inode(), but since we have i_sem
+	 * being taken, no one can setup GPDE/LPDE on this inode.
+	 */
+	if (!inode)
+		goto out_put;
+
+#ifdef CONFIG_VE
+	GPDE(inode) = de_get(gde);
+	if (gde)
+		__module_get(gde->owner);
+
+	/* dentry found in global tree only must not be writable
+	 * in non-super ve.
+	 */
+	if (lde == NULL && !ve_is_super(dir->i_sb->s_type->owner_env))
+		inode->i_mode &= ~S_IWUGO;
+#endif
+  	unlock_kernel();
+	dentry->d_op = &proc_dentry_operations;
+	d_add(dentry, inode);
+	de_put(lde);
+	de_put(gde);
+	return NULL;
+  
+out_put:
+	if (lde)
+		module_put(lde->owner);
+	else
+		module_put(gde->owner);
+	de_put(lde);
+	de_put(gde);
+out:
+	unlock_kernel();
+ 	return ERR_PTR(error);
+}
+
+static inline int in_tree(struct proc_dir_entry *de, struct proc_dir_entry *dir)
+{
+	struct proc_dir_entry *gde;
+
+	for (gde = dir->subdir; gde; gde = gde->next) {
+		if (de->namelen != gde->namelen)
+			continue;
+		if (memcmp(de->name, gde->name, gde->namelen))
+			continue;
+		return 1;
 	}
-	return ERR_PTR(error);
+	return 0;
 }
 
 /*
@@ -429,7 +558,7 @@ struct dentry *proc_lookup(struct inode * dir, struct dentry *dentry, struct nam
 int proc_readdir(struct file * filp,
 	void * dirent, filldir_t filldir)
 {
-	struct proc_dir_entry * de;
+	struct proc_dir_entry *de, *tmp;
 	unsigned int ino;
 	int i;
 	struct inode *inode = filp->f_dentry->d_inode;
@@ -464,11 +593,8 @@ int proc_readdir(struct file * filp,
 			de = de->subdir;
 			i -= 2;
 			for (;;) {
-				if (!de) {
-					ret = 1;
-					spin_unlock(&proc_subdir_lock);
-					goto out;
-				}
+				if (!de)
+					goto chk_global;
 				if (!i)
 					break;
 				de = de->next;
@@ -477,14 +603,56 @@ int proc_readdir(struct file * filp,
 
 			do {
 				/* filldir passes info to user space */
+				de_get(de);
 				spin_unlock(&proc_subdir_lock);
-				if (filldir(dirent, de->name, de->namelen, filp->f_pos,
-					    de->low_ino, de->mode >> 12) < 0)
+				if (filldir(dirent, de->name, de->namelen,
+						filp->f_pos, de->low_ino,
+						de->mode >> 12) < 0) {
+					de_put(de);
 					goto out;
+				}
 				spin_lock(&proc_subdir_lock);
+				tmp = de->next;
+				de_put(de);
 				filp->f_pos++;
-				de = de->next;
+				de = tmp;
 			} while (de);
+chk_global:
+#ifdef CONFIG_VE
+			de = GPDE(inode);
+			if (de == NULL)
+				goto done;
+
+			de = de->subdir;
+			while (de) {
+				/* skip local names */
+				if (in_tree(de, LPDE(inode))) {
+					de = de->next;
+					continue;
+				}
+
+				if (i > 0) {
+					i--;
+					de = de->next;
+					continue;
+				}
+
+				de_get(de);
+				spin_unlock(&proc_subdir_lock);
+				if (filldir(dirent, de->name, de->namelen,
+						filp->f_pos, de->low_ino,
+						de->mode >> 12) < 0) {
+					de_put(de);
+					goto out;
+				}
+				spin_lock(&proc_subdir_lock);
+				tmp = de->next;
+				de_put(de);
+				filp->f_pos++;
+				de = tmp;
+			}
+done:
+#endif
 			spin_unlock(&proc_subdir_lock);
 	}
 	ret = 1;
@@ -521,8 +689,13 @@ static int proc_register(struct proc_dir_entry * dir, struct proc_dir_entry * dp
 	dp->low_ino = i;
 
 	spin_lock(&proc_subdir_lock);
+	if (dir->deleted) {
+		spin_unlock(&proc_subdir_lock);
+		return -ENOENT;
+	}
+
 	dp->next = dir->subdir;
-	dp->parent = dir;
+	dp->parent = de_get(dir);
 	dir->subdir = dp;
 	spin_unlock(&proc_subdir_lock);
 
@@ -586,17 +759,18 @@ static struct proc_dir_entry *proc_create(struct proc_dir_entry **parent,
 	/* make sure name is valid */
 	if (!name || !strlen(name)) goto out;
 
-	if (!(*parent) && xlate_proc_name(name, parent, &fn) != 0)
+	if (xlate_proc_loc_name(name, parent, &fn) != 0)
 		goto out;
 
 	/* At this point there must not be any '/' characters beyond *fn */
 	if (strchr(fn, '/'))
-		goto out;
+		goto out_put;
 
 	len = strlen(fn);
 
 	ent = kmalloc(sizeof(struct proc_dir_entry) + len + 1, GFP_KERNEL);
-	if (!ent) goto out;
+	if (!ent)
+		goto out_put;
 
 	memset(ent, 0, sizeof(struct proc_dir_entry));
 	memcpy(((char *) ent) + sizeof(struct proc_dir_entry), fn, len + 1);
@@ -604,8 +778,13 @@ static struct proc_dir_entry *proc_create(struct proc_dir_entry **parent,
 	ent->namelen = len;
 	ent->mode = mode;
 	ent->nlink = nlink;
- out:
+	atomic_set(&ent->count, 1);
 	return ent;
+
+out_put:
+	de_put(*parent);
+out:
+	return NULL;
 }
 
 struct proc_dir_entry *proc_symlink(const char *name,
@@ -629,6 +808,7 @@ struct proc_dir_entry *proc_symlink(const char *name,
 			kfree(ent);
 			ent = NULL;
 		}
+		de_put(parent);
 	}
 	return ent;
 }
@@ -647,6 +827,7 @@ struct proc_dir_entry *proc_mkdir_mode(const char *name, mode_t mode,
 			kfree(ent);
 			ent = NULL;
 		}
+		de_put(parent);
 	}
 	return ent;
 }
@@ -685,9 +866,28 @@ struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 			kfree(ent);
 			ent = NULL;
 		}
+		de_put(parent);
 	}
 	return ent;
 }
+EXPORT_SYMBOL(remove_proc_glob_entry);
+
+struct proc_dir_entry *create_proc_glob_entry(const char *name, mode_t mode,
+		struct proc_dir_entry *parent)
+{
+	const char *path;
+	struct proc_dir_entry *ent;
+
+	path = name;
+	if (xlate_proc_name(path, &parent, &name) != 0)
+		return NULL;
+
+	ent = create_proc_entry(name, mode, parent);
+	de_put(parent);
+	return ent;
+}
+
+EXPORT_SYMBOL(create_proc_glob_entry);
 
 void free_proc_entry(struct proc_dir_entry *de)
 {
@@ -707,15 +907,13 @@ void free_proc_entry(struct proc_dir_entry *de)
  * Remove a /proc entry and free it if it's not currently in use.
  * If it is in use, we set the 'deleted' flag.
  */
-void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
+static void __remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 {
 	struct proc_dir_entry **p;
 	struct proc_dir_entry *de;
 	const char *fn = name;
 	int len;
 
-	if (!parent && xlate_proc_name(name, &parent, &fn) != 0)
-		goto out;
 	len = strlen(fn);
 
 	spin_lock(&proc_subdir_lock);
@@ -730,16 +928,43 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 		proc_kill_inodes(de);
 		de->nlink = 0;
 		WARN_ON(de->subdir);
-		if (!atomic_read(&de->count))
-			free_proc_entry(de);
-		else {
-			de->deleted = 1;
-			printk("remove_proc_entry: %s/%s busy, count=%d\n",
-				parent->name, de->name, atomic_read(&de->count));
-		}
+		de->deleted = 1;
+		de_put(parent);
+		de_put(de);
 		break;
 	}
 	spin_unlock(&proc_subdir_lock);
-out:
-	return;
+}
+
+void remove_proc_loc_entry(const char *name, struct proc_dir_entry *parent)
+{
+	const char *path;
+
+	path = name;
+	if (xlate_proc_loc_name(path, &parent, &name) != 0)
+		return;
+
+	__remove_proc_entry(name, parent);
+	de_put(parent);
+}
+
+void remove_proc_glob_entry(const char *name, struct proc_dir_entry *parent)
+{
+	const char *path;
+
+	path = name;
+	if (xlate_proc_name(path, &parent, &name) != 0)
+		return;
+
+	__remove_proc_entry(name, parent);
+	de_put(parent);
+}
+
+void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
+{
+	remove_proc_loc_entry(name, parent);
+#ifdef CONFIG_VE
+	if (ve_is_super(get_exec_env()))
+		remove_proc_glob_entry(name, parent);
+#endif
 }

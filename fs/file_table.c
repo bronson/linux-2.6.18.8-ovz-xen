@@ -24,6 +24,10 @@
 
 #include <asm/atomic.h>
 
+#include <ub/beancounter.h>
+#include <ub/ub_mem.h>
+#include <ub/ub_misc.h>
+
 /* sysctl tunables... */
 struct files_stat_struct files_stat = {
 	.max_files = NR_FILE
@@ -37,12 +41,15 @@ static struct percpu_counter nr_files __cacheline_aligned_in_smp;
 static inline void file_free_rcu(struct rcu_head *head)
 {
 	struct file *f =  container_of(head, struct file, f_u.fu_rcuhead);
+	put_ve(f->owner_env);
 	kmem_cache_free(filp_cachep, f);
 }
 
 static inline void file_free(struct file *f)
 {
-	percpu_counter_dec(&nr_files);
+	if (f->f_ub == get_ub0())
+		percpu_counter_dec(&nr_files);
+	ub_file_uncharge(f);
 	call_rcu(&f->f_u.fu_rcuhead, file_free_rcu);
 }
 
@@ -90,11 +97,14 @@ struct file *get_empty_filp(void)
 	struct task_struct *tsk;
 	static int old_max;
 	struct file * f;
+	int acct;
 
+	acct = (get_exec_ub() == get_ub0());
 	/*
 	 * Privileged users can go above max_files
 	 */
-	if (get_nr_files() >= files_stat.max_files && !capable(CAP_SYS_ADMIN)) {
+	if (acct && get_nr_files() >= files_stat.max_files &&
+			!capable(CAP_SYS_ADMIN)) {
 		/*
 		 * percpu_counters are inaccurate.  Do an expensive check before
 		 * we go and fail.
@@ -106,9 +116,16 @@ struct file *get_empty_filp(void)
 	f = kmem_cache_alloc(filp_cachep, GFP_KERNEL);
 	if (f == NULL)
 		goto fail;
-
-	percpu_counter_inc(&nr_files);
 	memset(f, 0, sizeof(*f));
+
+	if (ub_file_charge(f))
+		goto fail_ch;
+
+	if (acct)
+		percpu_counter_inc(&nr_files);
+
+	f->owner_env = get_ve(get_exec_env());
+
 	if (security_file_alloc(f))
 		goto fail_sec;
 
@@ -134,6 +151,10 @@ over:
 fail_sec:
 	file_free(f);
 fail:
+	return NULL;
+
+fail_ch:
+	kmem_cache_free(filp_cachep, f);
 	return NULL;
 }
 

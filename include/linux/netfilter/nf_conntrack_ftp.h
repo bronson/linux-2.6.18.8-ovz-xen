@@ -32,13 +32,22 @@ struct ip_conntrack_expect;
 
 /* For NAT to hook in when we find a packet which describes what other
  * connection we should expect. */
-extern unsigned int (*ip_nat_ftp_hook)(struct sk_buff **pskb,
+typedef unsigned int (*ip_nat_helper_ftp_hook)(struct sk_buff **pskb,
 				       enum ip_conntrack_info ctinfo,
 				       enum ip_ct_ftp_type type,
 				       unsigned int matchoff,
 				       unsigned int matchlen,
 				       struct ip_conntrack_expect *exp,
 				       u32 *seq);
+extern ip_nat_helper_ftp_hook ip_nat_ftp_hook;
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/sched.h>
+#define ve_ip_nat_ftp_hook \
+	((ip_nat_helper_ftp_hook) \
+		(get_exec_env()->_ip_conntrack->_ip_nat_ftp_hook))
+#else
+#define ve_ip_nat_ftp_hook	ip_nat_ftp_hook
+#endif
 #endif /* __KERNEL__ */
 
 #endif /* _NF_CONNTRACK_FTP_H */

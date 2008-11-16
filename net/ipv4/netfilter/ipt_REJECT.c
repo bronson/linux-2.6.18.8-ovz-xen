@@ -282,7 +282,7 @@ static int check(const char *tablename,
 	const struct ipt_entry *e = e_void;
 
 	if (rejinfo->with == IPT_ICMP_ECHOREPLY) {
-		printk("REJECT: ECHOREPLY no longer supported.\n");
+		ve_printk(VE_LOG, "REJECT: ECHOREPLY no longer supported.\n");
 		return 0;
 	} else if (rejinfo->with == IPT_TCP_RESET) {
 		/* Must specify that it's a TCP packet */

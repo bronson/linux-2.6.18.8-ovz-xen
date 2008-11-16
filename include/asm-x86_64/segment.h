@@ -3,29 +3,28 @@
 
 #include <asm/cache.h>
 
-#define __KERNEL_CS	0x10
-#define __KERNEL_DS	0x18
-
-#define __KERNEL32_CS   0x38
-
+#define GDT_ENTRY_BOOT_CS		2
+#define __BOOT_CS	(GDT_ENTRY_BOOT_CS * 8)
+#define GDT_ENTRY_BOOT_DS		3
+#define __BOOT_DS	(GDT_ENTRY_BOOT_DS * 8)
+#define GDT_ENTRY_TSS 4	/* needs two entries */
 /* 
  * we cannot use the same code segment descriptor for user and kernel
  * -- not even in the long flat mode, because of different DPL /kkeil 
  * The segment offset needs to contain a RPL. Grr. -AK
  * GDT layout to get 64bit syscall right (sysret hardcodes gdt offsets) 
  */
+#define GDT_ENTRY_TLS_MIN 6
+#define GDT_ENTRY_TLS_MAX 8
 
-#define __USER32_CS   0x23   /* 4*8+3 */ 
-#define __USER_DS     0x2b   /* 5*8+3 */ 
-#define __USER_CS     0x33   /* 6*8+3 */ 
+#define GDT_ENTRY_LDT 9 /* needs two entries */
+#define __KERNEL32_CS   0x58	/* 11*8 */
+#define __KERNEL_CS	0x60	/* 12*8 */
+#define __KERNEL_DS	0x68	/* 13*8 */
+#define __USER32_CS   0x73   /* 14*8+3 */ 
+#define __USER_DS     0x7b   /* 15*8+3 */ 
 #define __USER32_DS	__USER_DS 
-
-#define GDT_ENTRY_TLS 1
-#define GDT_ENTRY_TSS 8	/* needs two entries */
-#define GDT_ENTRY_LDT 10 /* needs two entries */
-#define GDT_ENTRY_TLS_MIN 12
-#define GDT_ENTRY_TLS_MAX 14
-/* 15 free */
+#define __USER_CS     0x83   /* 16*8+3 */ 
 
 #define GDT_ENTRY_TLS_ENTRIES 3
 
@@ -37,7 +36,7 @@
 #define FS_TLS_SEL ((GDT_ENTRY_TLS_MIN+FS_TLS)*8 + 3)
 
 #define IDT_ENTRIES 256
-#define GDT_ENTRIES 16
+#define GDT_ENTRIES 32
 #define GDT_SIZE (GDT_ENTRIES * 8)
 #define TLS_SIZE (GDT_ENTRY_TLS_ENTRIES * 8) 
 

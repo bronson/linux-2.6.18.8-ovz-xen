@@ -243,5 +243,19 @@ extern int if6_proc_init(void);
 extern void if6_proc_exit(void);
 #endif
 
+int addrconf_ifdown(struct net_device *dev, int how);
+int inet6_addr_add(int ifindex, struct in6_addr *pfx, int plen,
+			  __u32 prefered_lft, __u32 valid_lft);
+
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+int addrconf_sysctl_init(struct ve_struct *ve);
+void addrconf_sysctl_fini(struct ve_struct *ve);
+void addrconf_sysctl_free(struct ve_struct *ve);
+#else
+#define addrconf_sysctl_init(ve)	(0)
+#define addrconf_sysctl_fini(ve)	do { } while (0)
+#define addrconf_sysctl_free(ve)	do { } while (0)
+#endif
+
 #endif
 #endif

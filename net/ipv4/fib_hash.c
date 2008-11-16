@@ -35,6 +35,7 @@
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/init.h>
+#include <linux/ve.h>
 
 #include <net/ip.h>
 #include <net/protocol.h>
@@ -71,11 +72,6 @@ struct fn_zone {
 /* NOTE. On fast computers evaluation of fz_hashmask and fz_mask
  * can be cheaper than memory lookup, so that FZ_* macros are used.
  */
-
-struct fn_hash {
-	struct fn_zone	*fn_zones[33];
-	struct fn_zone	*fn_zone_list;
-};
 
 static inline u32 fn_hash(u32 key, struct fn_zone *fz)
 {
@@ -621,7 +617,7 @@ fn_hash_delete(struct fib_table *tb, struct rtmsg *r, struct kern_rta *rta,
 	return -ESRCH;
 }
 
-static int fn_flush_list(struct fn_zone *fz, int idx)
+static int fn_flush_list(struct fn_zone *fz, int idx, int destroy)
 {
 	struct hlist_head *head = &fz->fz_hash[idx];
 	struct hlist_node *node, *n;
@@ -636,7 +632,9 @@ static int fn_flush_list(struct fn_zone *fz, int idx)
 		list_for_each_entry_safe(fa, fa_node, &f->fn_alias, fa_list) {
 			struct fib_info *fi = fa->fa_info;
 
-			if (fi && (fi->fib_flags&RTNH_F_DEAD)) {
+			if (fi == NULL)
+				continue;
+			if (destroy || (fi->fib_flags&RTNH_F_DEAD)) {
 				write_lock_bh(&fib_hash_lock);
 				list_del(&fa->fa_list);
 				if (list_empty(&f->fn_alias)) {
@@ -658,7 +656,7 @@ static int fn_flush_list(struct fn_zone *fz, int idx)
 	return found;
 }
 
-static int fn_hash_flush(struct fib_table *tb)
+static int __fn_hash_flush(struct fib_table *tb, int destroy)
 {
 	struct fn_hash *table = (struct fn_hash *) tb->tb_data;
 	struct fn_zone *fz;
@@ -668,10 +666,98 @@ static int fn_hash_flush(struct fib_table *tb)
 		int i;
 
 		for (i = fz->fz_divisor - 1; i >= 0; i--)
-			found += fn_flush_list(fz, i);
+			found += fn_flush_list(fz, i, destroy);
 	}
 	return found;
 }
+
+static int fn_hash_flush(struct fib_table *tb)
+{
+	return __fn_hash_flush(tb, 0);
+}
+
+#ifdef CONFIG_VE
+static void fn_free_zones(struct fib_table *tb)
+{
+	struct fn_hash *table = (struct fn_hash *) tb->tb_data;
+	struct fn_zone *fz;
+
+	while ((fz = table->fn_zone_list) != NULL) {
+		table->fn_zone_list = fz->fz_next;
+		fz_hash_free(fz->fz_hash, fz->fz_divisor);
+		kfree(fz);
+	}
+}
+
+void fib_hash_destroy(struct fib_table *tb)
+{
+	__fn_hash_flush(tb, 1);
+	fn_free_zones(tb);
+	kfree(tb);
+}
+
+/*
+ * Initialization of virtualized networking subsystem.
+ */
+int init_ve_route(struct ve_struct *ve)
+{
+#ifdef CONFIG_IP_MULTIPLE_TABLES
+	if (fib_rules_create())
+		return -ENOMEM;
+	ve->_fib_tables[RT_TABLE_LOCAL] = fib_hash_init(RT_TABLE_LOCAL);
+	if (!ve->_fib_tables[RT_TABLE_LOCAL])
+		goto out_destroy;
+	ve->_fib_tables[RT_TABLE_MAIN] = fib_hash_init(RT_TABLE_MAIN);
+	if (!ve->_fib_tables[RT_TABLE_MAIN])
+		goto out_destroy_local;
+
+	return 0;
+
+out_destroy_local:
+	fib_hash_destroy(ve->_fib_tables[RT_TABLE_LOCAL]);
+out_destroy:
+	fib_rules_destroy();
+	ve->_local_rule = NULL;
+	return -ENOMEM;
+#else
+	ve->_local_table = fib_hash_init(RT_TABLE_LOCAL);
+	if (!ve->_local_table)
+		return -ENOMEM;
+	ve->_main_table = fib_hash_init(RT_TABLE_MAIN);
+	if (!ve->_main_table) {
+		fib_hash_destroy(ve->_local_table);
+		return -ENOMEM;
+	}
+	return 0;
+#endif
+}
+
+void fini_ve_route(struct ve_struct *ve)
+{
+	unsigned int bytes;
+#ifdef CONFIG_IP_MULTIPLE_TABLES
+	int i;
+	for (i=0; i<RT_TABLE_MAX+1; i++)
+	{
+		if (!ve->_fib_tables[i])
+			continue;
+		fib_hash_destroy(ve->_fib_tables[i]);
+	}
+	fib_rules_destroy();
+	ve->_local_rule = NULL;
+#else
+	fib_hash_destroy(ve->_local_table);
+	fib_hash_destroy(ve->_main_table);
+#endif
+	bytes = ve->_fib_hash_size * sizeof(struct hlist_head *);
+	fib_hash_free(ve->_fib_info_hash, bytes);
+	fib_hash_free(ve->_fib_info_laddrhash, bytes);
+	ve->_fib_info_hash = ve->_fib_info_laddrhash = NULL;
+}
+
+EXPORT_SYMBOL(init_ve_route);
+EXPORT_SYMBOL(fini_ve_route);
+#endif
 
 
 static inline int
@@ -764,7 +850,7 @@ static int fn_hash_dump(struct fib_table *tb, struct sk_buff *skb, struct netlin
 	return skb->len;
 }
 
-#ifdef CONFIG_IP_MULTIPLE_TABLES
+#if defined(CONFIG_IP_MULTIPLE_TABLES) || defined(CONFIG_VE)
 struct fib_table * fib_hash_init(int id)
 #else
 struct fib_table * __init fib_hash_init(int id)
@@ -774,14 +860,14 @@ struct fib_table * __init fib_hash_init(int id)
 
 	if (fn_hash_kmem == NULL)
 		fn_hash_kmem = kmem_cache_create("ip_fib_hash",
-						 sizeof(struct fib_node),
-						 0, SLAB_HWCACHE_ALIGN,
+						 sizeof(struct fib_node), 0,
+						 SLAB_HWCACHE_ALIGN | SLAB_UBC,
 						 NULL, NULL);
 
 	if (fn_alias_kmem == NULL)
 		fn_alias_kmem = kmem_cache_create("ip_fib_alias",
-						  sizeof(struct fib_alias),
-						  0, SLAB_HWCACHE_ALIGN,
+						  sizeof(struct fib_alias), 0,
+						  SLAB_HWCACHE_ALIGN | SLAB_UBC,
 						  NULL, NULL);
 
 	tb = kmalloc(sizeof(struct fib_table) + sizeof(struct fn_hash),
@@ -1073,13 +1159,13 @@ static struct file_operations fib_seq_fops = {
 
 int __init fib_proc_init(void)
 {
-	if (!proc_net_fops_create("route", S_IRUGO, &fib_seq_fops))
+	if (!proc_glob_fops_create("net/route", S_IRUGO, &fib_seq_fops))
 		return -ENOMEM;
 	return 0;
 }
 
 void __init fib_proc_exit(void)
 {
-	proc_net_remove("route");
+	remove_proc_glob_entry("net/route", NULL);
 }
 #endif /* CONFIG_PROC_FS */

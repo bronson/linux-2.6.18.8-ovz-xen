@@ -810,7 +810,7 @@ int dev_ethtool(struct ifreq *ifr)
 	 * XXX: This can be pushed down into the ethtool_* handlers that
 	 * need it.  Keep existing behaviour for the moment.
 	 */
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	if (!dev || !netif_device_present(dev))

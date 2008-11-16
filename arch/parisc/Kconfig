@@ -194,6 +194,7 @@ config SMP
 
 config HOTPLUG_CPU
 	bool
+	depends on !SCHED_VCPU
 	default y if SMP
 	select HOTPLUG
 

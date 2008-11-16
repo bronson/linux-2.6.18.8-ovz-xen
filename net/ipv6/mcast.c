@@ -155,7 +155,7 @@ static int ip6_mc_leave_src(struct sock *sk, struct ipv6_mc_socklist *iml,
 #define IGMP6_UNSOLICITED_IVAL	(10*HZ)
 #define MLD_QRV_DEFAULT		2
 
-#define MLD_V1_SEEN(idev) (ipv6_devconf.force_mld_version == 1 || \
+#define MLD_V1_SEEN(idev) (ve_ipv6_devconf.force_mld_version == 1 || \
 		(idev)->cnf.force_mld_version == 1 || \
 		((idev)->mc_v1_seen && \
 		time_before(jiffies, (idev)->mc_v1_seen)))
@@ -247,6 +247,7 @@ int ipv6_sock_mc_join(struct sock *sk, int ifindex, struct in6_addr *addr)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(ipv6_sock_mc_join);
 
 /*
  *	socket leave on multicast group
@@ -1582,6 +1583,8 @@ static struct sk_buff *add_grec(struct sk_buff *skb, struct ifmcaddr6 *pmc,
 			skb = add_grhead(skb, pmc, type, &pgr);
 			first = 0;
 		}
+		if (!skb)
+			return NULL;
 		psrc = (struct in6_addr *)skb_put(skb, sizeof(*psrc));
 		*psrc = psf->sf_addr;
 		scount++; stotal++;
@@ -2166,15 +2169,18 @@ static void igmp6_leave_group(struct ifmcaddr6 *ma)
 static void mld_gq_timer_expire(unsigned long data)
 {
 	struct inet6_dev *idev = (struct inet6_dev *)data;
+	struct ve_struct *old_env = set_exec_env(idev->dev->owner_env);
 
 	idev->mc_gq_running = 0;
 	mld_send_report(idev, NULL);
 	__in6_dev_put(idev);
+	set_exec_env(old_env);
 }
 
 static void mld_ifc_timer_expire(unsigned long data)
 {
 	struct inet6_dev *idev = (struct inet6_dev *)data;
+	struct ve_struct *old_env = set_exec_env(idev->dev->owner_env);
 
 	mld_send_cr(idev);
 	if (idev->mc_ifc_count) {
@@ -2183,6 +2189,7 @@ static void mld_ifc_timer_expire(unsigned long data)
 			mld_ifc_start_timer(idev, idev->mc_maxdelay);
 	}
 	__in6_dev_put(idev);
+	set_exec_env(old_env);
 }
 
 static void mld_ifc_event(struct inet6_dev *idev)
@@ -2197,6 +2204,7 @@ static void mld_ifc_event(struct inet6_dev *idev)
 static void igmp6_timer_handler(unsigned long data)
 {
 	struct ifmcaddr6 *ma = (struct ifmcaddr6 *) data;
+	struct ve_struct *old_env = set_exec_env(ma->idev->dev->owner_env);
 
 	if (MLD_V1_SEEN(ma->idev))
 		igmp6_send(&ma->mca_addr, ma->idev->dev, ICMPV6_MGM_REPORT);
@@ -2208,6 +2216,7 @@ static void igmp6_timer_handler(unsigned long data)
 	ma->mca_flags &= ~MAF_TIMER_RUNNING;
 	spin_unlock(&ma->mca_lock);
 	ma_put(ma);
+	set_exec_env(old_env);
 }
 
 /* Device going down */
@@ -2252,8 +2261,6 @@ void ipv6_mc_up(struct inet6_dev *idev)
 
 void ipv6_mc_init_dev(struct inet6_dev *idev)
 {
-	struct in6_addr maddr;
-
 	write_lock_bh(&idev->lock);
 	rwlock_init(&idev->mc_lock);
 	idev->mc_gq_running = 0;
@@ -2269,10 +2276,6 @@ void ipv6_mc_init_dev(struct inet6_dev *idev)
 	idev->mc_maxdelay = IGMP6_UNSOLICITED_IVAL;
 	idev->mc_v1_seen = 0;
 	write_unlock_bh(&idev->lock);
-
-	/* Add all-nodes address. */
-	ipv6_addr_all_nodes(&maddr);
-	ipv6_dev_mc_inc(idev->dev, &maddr);
 }
 
 /*
@@ -2331,6 +2334,8 @@ static inline struct ifmcaddr6 *igmp6_mc_get_first(struct seq_file *seq)
 	     state->dev; 
 	     state->dev = state->dev->next) {
 		struct inet6_dev *idev;
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		idev = in6_dev_get(state->dev);
 		if (!idev)
 			continue;
@@ -2361,6 +2366,8 @@ static struct ifmcaddr6 *igmp6_mc_get_next(struct seq_file *seq, struct ifmcaddr
 			state->idev = NULL;
 			break;
 		}
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		state->idev = in6_dev_get(state->dev);
 		if (!state->idev)
 			continue;
@@ -2475,6 +2482,8 @@ static inline struct ip6_sf_list *igmp6_mcf_get_first(struct seq_file *seq)
 	     state->dev; 
 	     state->dev = state->dev->next) {
 		struct inet6_dev *idev;
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		idev = in6_dev_get(state->dev);
 		if (unlikely(idev == NULL))
 			continue;
@@ -2514,6 +2523,8 @@ static struct ip6_sf_list *igmp6_mcf_get_next(struct seq_file *seq, struct ip6_s
 				state->idev = NULL;
 				goto out;
 			}
+			if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+				continue;
 			state->idev = in6_dev_get(state->dev);
 			if (!state->idev)
 				continue;
@@ -2655,8 +2666,8 @@ int __init igmp6_init(struct net_proto_family *ops)
 	np->hop_limit = 1;
 
 #ifdef CONFIG_PROC_FS
-	proc_net_fops_create("igmp6", S_IRUGO, &igmp6_mc_seq_fops);
-	proc_net_fops_create("mcfilter6", S_IRUGO, &igmp6_mcf_seq_fops);
+	proc_glob_fops_create("net/igmp6", S_IRUGO, &igmp6_mc_seq_fops);
+	proc_glob_fops_create("net/mcfilter6", S_IRUGO, &igmp6_mcf_seq_fops);
 #endif
 
 	return 0;
@@ -2668,7 +2679,7 @@ void igmp6_cleanup(void)
 	igmp6_socket = NULL; /* for safety */
 
 #ifdef CONFIG_PROC_FS
-	proc_net_remove("mcfilter6");
-	proc_net_remove("igmp6");
+	remove_proc_glob_entry("net/mcfilter6", NULL);
+	remove_proc_glob_entry("net/igmp6", NULL);
 #endif
 }

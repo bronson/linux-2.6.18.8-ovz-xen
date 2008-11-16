@@ -347,14 +347,14 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		if ((ex.a_text & 0xfff || ex.a_data & 0xfff) &&
 		    (N_MAGIC(ex) != NMAGIC) && (jiffies-error_time2) > 5*HZ)
 		{
-			printk(KERN_NOTICE "executable not page aligned\n");
+			ve_printk(VE_LOG, KERN_NOTICE "executable not page aligned\n");
 			error_time2 = jiffies;
 		}
 
 		if ((fd_offset & ~PAGE_MASK) != 0 &&
 		    (jiffies-error_time) > 5*HZ)
 		{
-			printk(KERN_WARNING 
+			ve_printk(VE_LOG, KERN_WARNING 
 			       "fd_offset is not page aligned. Please convert program: %s\n",
 			       bprm->file->f_dentry->d_name.name);
 			error_time = jiffies;
@@ -467,7 +467,7 @@ static int load_aout_library(struct file *file)
 		static unsigned long error_time;
 		if ((jiffies-error_time) > 5*HZ)
 		{
-			printk(KERN_WARNING 
+			ve_printk(VE_LOG, KERN_WARNING 
 			       "N_TXTOFF is not page aligned. Please convert library: %s\n",
 			       file->f_dentry->d_name.name);
 			error_time = jiffies;

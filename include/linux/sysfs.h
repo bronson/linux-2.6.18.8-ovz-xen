@@ -72,6 +72,7 @@ struct sysfs_dirent {
 	void 			* s_element;
 	int			s_type;
 	umode_t			s_mode;
+	ino_t			s_ino;
 	struct dentry		* s_dentry;
 	struct iattr		* s_iattr;
 	atomic_t		s_event;
@@ -119,6 +120,8 @@ int sysfs_remove_bin_file(struct kobject * kobj, struct bin_attribute * attr);
 int sysfs_create_group(struct kobject *, const struct attribute_group *);
 void sysfs_remove_group(struct kobject *, const struct attribute_group *);
 void sysfs_notify(struct kobject * k, char *dir, char *attr);
+
+extern struct file_system_type sysfs_fs_type;
 
 #else /* CONFIG_SYSFS */
 

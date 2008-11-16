@@ -2658,7 +2658,7 @@ pfm_get_task(pfm_context_t *ctx, pid_t pid, struct task_struct **task)
 
 		read_lock(&tasklist_lock);
 
-		p = find_task_by_pid(pid);
+		p = find_task_by_pid_ve(pid);
 
 		/* make sure task cannot go away while we operate on it */
 		if (p) get_task_struct(p);
@@ -4268,12 +4268,12 @@ pfm_check_task_exist(pfm_context_t *ctx)
 
 	read_lock(&tasklist_lock);
 
-	do_each_thread (g, t) {
+	do_each_thread_ve (g, t) {
 		if (t->thread.pfm_context == ctx) {
 			ret = 0;
 			break;
 		}
-	} while_each_thread (g, t);
+	} while_each_thread_ve (g, t);
 
 	read_unlock(&tasklist_lock);
 

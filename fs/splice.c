@@ -1125,6 +1125,10 @@ static int get_iovec_page_array(const struct iovec __user *iov,
 		/*
 		 * Get user address base and length for this iovec.
 		 */
+		error = -EFAULT;
+        	if (!access_ok(VERIFY_READ, iov, sizeof(*iov)))
+			break;
+
 		error = get_user(base, &iov->iov_base);
 		if (unlikely(error))
 			break;
@@ -1138,7 +1142,7 @@ static int get_iovec_page_array(const struct iovec __user *iov,
 		if (unlikely(!len))
 			break;
 		error = -EFAULT;
-		if (unlikely(!base))
+		if (!access_ok(VERIFY_READ, base, len))
 			break;
 
 		if (unlikely(!access_ok(VERIFY_READ, base, len)))

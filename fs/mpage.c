@@ -26,6 +26,7 @@
 #include <linux/writeback.h>
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
+#include <ub/io_prio.h>
 
 /*
  * I/O completion handler for multipage BIOs.
@@ -699,6 +700,7 @@ mpage_writepages(struct address_space *mapping,
 		struct writeback_control *wbc, get_block_t get_block)
 {
 	struct backing_dev_info *bdi = mapping->backing_dev_info;
+	struct user_beancounter *old_ub;
 	struct bio *bio = NULL;
 	sector_t last_block_in_bio = 0;
 	int ret = 0;
@@ -772,6 +774,8 @@ retry:
 				continue;
 			}
 
+			old_ub = bc_io_switch_context(page);
+
 			if (writepage) {
 				ret = (*writepage)(page, wbc);
 				if (ret) {
@@ -787,6 +791,9 @@ retry:
 						&last_block_in_bio, &ret, wbc,
 						page->mapping->a_ops->writepage);
 			}
+
+			bc_io_restore_context(old_ub);
+
 			if (unlikely(ret == AOP_WRITEPAGE_ACTIVATE))
 				unlock_page(page);
 			if (ret || (--(wbc->nr_to_write) <= 0))

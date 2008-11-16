@@ -74,6 +74,7 @@ struct inet_ehash_bucket {
  * ports are created in O(1) time?  I thought so. ;-)	-DaveM
  */
 struct inet_bind_bucket {
+	struct ve_struct	*owner_env;
 	unsigned short		port;
 	signed short		fastreuse;
 	struct hlist_node	node;
@@ -138,36 +139,42 @@ static inline struct inet_ehash_bucket *inet_ehash_bucket(
 extern struct inet_bind_bucket *
 		    inet_bind_bucket_create(kmem_cache_t *cachep,
 					    struct inet_bind_hashbucket *head,
-					    const unsigned short snum);
+					    const unsigned short snum,
+					    struct ve_struct *env);
 extern void inet_bind_bucket_destroy(kmem_cache_t *cachep,
 				     struct inet_bind_bucket *tb);
 
-static inline int inet_bhashfn(const __u16 lport, const int bhash_size)
+static inline int inet_bhashfn(const __u16 lport, const int bhash_size,
+		unsigned veid)
 {
-	return lport & (bhash_size - 1);
+	return ((lport + (veid ^ (veid >> 16))) & (bhash_size - 1));
 }
 
 extern void inet_bind_hash(struct sock *sk, struct inet_bind_bucket *tb,
 			   const unsigned short snum);
 
 /* These can have wildcards, don't try too hard. */
-static inline int inet_lhashfn(const unsigned short num)
+static inline int inet_lhashfn(const unsigned short num, unsigned veid)
 {
-	return num & (INET_LHTABLE_SIZE - 1);
+	return ((num + (veid ^ (veid >> 16))) & (INET_LHTABLE_SIZE - 1));
 }
 
 static inline int inet_sk_listen_hashfn(const struct sock *sk)
 {
-	return inet_lhashfn(inet_sk(sk)->num);
+	return inet_lhashfn(inet_sk(sk)->num, VEID(sk->owner_env));
 }
 
 /* Caller must disable local BH processing. */
 static inline void __inet_inherit_port(struct inet_hashinfo *table,
 				       struct sock *sk, struct sock *child)
 {
-	const int bhash = inet_bhashfn(inet_sk(child)->num, table->bhash_size);
-	struct inet_bind_hashbucket *head = &table->bhash[bhash];
+	int bhash;
+	struct inet_bind_hashbucket *head;
 	struct inet_bind_bucket *tb;
+
+	bhash = inet_bhashfn(inet_sk(child)->num, table->bhash_size,
+			VEID(child->owner_env));
+	head = &table->bhash[bhash];
 
 	spin_lock(&head->lock);
 	tb = inet_csk(sk)->icsk_bind_hash;
@@ -274,7 +281,8 @@ static inline int inet_iif(const struct sk_buff *skb)
 extern struct sock *__inet_lookup_listener(const struct hlist_head *head,
 					   const u32 daddr,
 					   const unsigned short hnum,
-					   const int dif);
+					   const int dif,
+					   struct ve_struct *env);
 
 /* Optimize the common listener case. */
 static inline struct sock *
@@ -284,18 +292,21 @@ static inline struct sock *
 {
 	struct sock *sk = NULL;
 	const struct hlist_head *head;
+	struct ve_struct *env;
 
+	env = get_exec_env();
 	read_lock(&hashinfo->lhash_lock);
-	head = &hashinfo->listening_hash[inet_lhashfn(hnum)];
+	head = &hashinfo->listening_hash[inet_lhashfn(hnum, VEID(env))];
 	if (!hlist_empty(head)) {
 		const struct inet_sock *inet = inet_sk((sk = __sk_head(head)));
 
 		if (inet->num == hnum && !sk->sk_node.next &&
+		    ve_accessible_strict(sk->owner_env, env) &&
 		    (!inet->rcv_saddr || inet->rcv_saddr == daddr) &&
 		    (sk->sk_family == PF_INET || !ipv6_only_sock(sk)) &&
 		    !sk->sk_bound_dev_if)
 			goto sherry_cache;
-		sk = __inet_lookup_listener(head, daddr, hnum, dif);
+		sk = __inet_lookup_listener(head, daddr, hnum, dif, env);
 	}
 	if (sk) {
 sherry_cache:
@@ -322,31 +333,43 @@ sherry_cache:
 #define INET_ADDR_COOKIE(__name, __saddr, __daddr) \
 	const __u64 __name = (((__u64)(__daddr)) << 32) | ((__u64)(__saddr));
 #endif /* __BIG_ENDIAN */
-#define INET_MATCH(__sk, __hash, __cookie, __saddr, __daddr, __ports, __dif)\
+#define INET_MATCH_ALLVE(__sk, __hash, __cookie, __saddr, __daddr, __ports, __dif)\
 	(((__sk)->sk_hash == (__hash))				&&	\
 	 ((*((__u64 *)&(inet_sk(__sk)->daddr))) == (__cookie))	&&	\
 	 ((*((__u32 *)&(inet_sk(__sk)->dport))) == (__ports))	&&	\
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
-#define INET_TW_MATCH(__sk, __hash, __cookie, __saddr, __daddr, __ports, __dif)\
+#define INET_TW_MATCH_ALLVE(__sk, __hash, __cookie, __saddr, __daddr, __ports, __dif)\
 	(((__sk)->sk_hash == (__hash))				&&	\
 	 ((*((__u64 *)&(inet_twsk(__sk)->tw_daddr))) == (__cookie)) &&	\
 	 ((*((__u32 *)&(inet_twsk(__sk)->tw_dport))) == (__ports)) &&	\
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
 #else /* 32-bit arch */
 #define INET_ADDR_COOKIE(__name, __saddr, __daddr)
-#define INET_MATCH(__sk, __hash, __cookie, __saddr, __daddr, __ports, __dif)	\
+#define INET_MATCH_ALLVE(__sk, __hash, __cookie, __saddr, __daddr, __ports, __dif)	\
 	(((__sk)->sk_hash == (__hash))				&&	\
 	 (inet_sk(__sk)->daddr		== (__saddr))		&&	\
 	 (inet_sk(__sk)->rcv_saddr	== (__daddr))		&&	\
 	 ((*((__u32 *)&(inet_sk(__sk)->dport))) == (__ports))	&&	\
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
-#define INET_TW_MATCH(__sk, __hash,__cookie, __saddr, __daddr, __ports, __dif)	\
+#define INET_TW_MATCH_ALLVE(__sk, __hash,__cookie, __saddr, __daddr, __ports, __dif)	\
 	(((__sk)->sk_hash == (__hash))				&&	\
 	 (inet_twsk(__sk)->tw_daddr	== (__saddr))		&&	\
 	 (inet_twsk(__sk)->tw_rcv_saddr	== (__daddr))		&&	\
 	 ((*((__u32 *)&(inet_twsk(__sk)->tw_dport))) == (__ports)) &&	\
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
 #endif /* 64-bit arch */
+
+#define INET_MATCH(__sk, __hash, __cookie, __saddr,			\
+					__daddr, __ports, __dif, __ve)  \
+        (INET_MATCH_ALLVE((__sk), (__hash), (__cookie), (__saddr),	\
+			  		(__daddr), (__ports), (__dif))	\
+	 && ve_accessible_strict((__sk)->owner_env, (__ve)))
+
+#define INET_TW_MATCH(__sk, __hash, __cookie, __saddr,			\
+					__daddr, __ports, __dif, __ve)	\
+        (INET_TW_MATCH_ALLVE((__sk), (__hash), (__cookie), (__saddr),	\
+					(__daddr), (__ports), (__dif))	\
+	 && ve_accessible_strict(inet_twsk(__sk)->tw_owner_env, VEID(__ve)))
 
 /*
  * Sockets in TCP_CLOSE state are _always_ taken out of the hash, so we need
@@ -367,19 +390,25 @@ static inline struct sock *
 	/* Optimize here for direct hit, only listening connections can
 	 * have wildcards anyways.
 	 */
-	unsigned int hash = inet_ehashfn(daddr, hnum, saddr, sport);
-	struct inet_ehash_bucket *head = inet_ehash_bucket(hashinfo, hash);
+	unsigned int hash;
+	struct inet_ehash_bucket *head;
+	struct ve_struct *env;
 
+	env = get_exec_env();
+	hash = inet_ehashfn(daddr, hnum, saddr, sport, VEID(env));
+	head = inet_ehash_bucket(hashinfo, hash);
 	prefetch(head->chain.first);
 	read_lock(&head->lock);
 	sk_for_each(sk, node, &head->chain) {
-		if (INET_MATCH(sk, hash, acookie, saddr, daddr, ports, dif))
+		if (INET_MATCH(sk, hash, acookie, saddr, daddr,
+					ports, dif, env))
 			goto hit; /* You sunk my battleship! */
 	}
 
 	/* Must check for a TIME_WAIT'er before going to listener hash. */
 	sk_for_each(sk, node, &(head + hashinfo->ehash_size)->chain) {
-		if (INET_TW_MATCH(sk, hash, acookie, saddr, daddr, ports, dif))
+		if (INET_TW_MATCH(sk, hash, acookie, saddr, daddr,
+					ports, dif, env))
 			goto hit;
 	}
 	sk = NULL;

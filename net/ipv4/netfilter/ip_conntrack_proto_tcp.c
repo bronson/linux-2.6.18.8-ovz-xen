@@ -97,7 +97,7 @@ unsigned int ip_ct_tcp_timeout_close =        10 SECS;
    to ~13-30min depending on RTO. */
 unsigned int ip_ct_tcp_timeout_max_retrans =     5 MINS;
  
-static const unsigned int * tcp_timeouts[]
+const unsigned int * tcp_timeouts[]
 = { NULL,                              /*      TCP_CONNTRACK_NONE */
     &ip_ct_tcp_timeout_syn_sent,       /*      TCP_CONNTRACK_SYN_SENT, */
     &ip_ct_tcp_timeout_syn_recv,       /*      TCP_CONNTRACK_SYN_RECV, */
@@ -761,7 +761,7 @@ static int tcp_in_window(struct ip_ct_tcp *state,
 			: "SEQ is under the lower bound (already ACKed data retransmitted)"
 			: "SEQ is over the upper bound (over the window of the receiver)");
 
-		res = ip_ct_tcp_be_liberal;
+		res = ve_ip_ct_tcp_be_liberal;
   	}
   
 	DEBUGP("tcp_in_window: res=%i sender end=%u maxend=%u maxwin=%u "
@@ -1029,9 +1029,11 @@ static int tcp_packet(struct ip_conntrack *conntrack,
 	    && (new_state == TCP_CONNTRACK_FIN_WAIT
 	    	|| new_state == TCP_CONNTRACK_CLOSE))
 		conntrack->proto.tcp.seen[dir].flags |= IP_CT_TCP_FLAG_CLOSE_INIT;
-	timeout = conntrack->proto.tcp.retrans >= ip_ct_tcp_max_retrans
-		  && *tcp_timeouts[new_state] > ip_ct_tcp_timeout_max_retrans
-		  ? ip_ct_tcp_timeout_max_retrans : *tcp_timeouts[new_state];
+	timeout = conntrack->proto.tcp.retrans >= ve_ip_ct_tcp_max_retrans &&
+		ve_ip_ct_tcp_timeouts[new_state] >
+					ve_ip_ct_tcp_timeout_max_retrans
+		? ve_ip_ct_tcp_timeout_max_retrans :
+					ve_ip_ct_tcp_timeouts[new_state];
 	write_unlock_bh(&tcp_lock);
 
 	ip_conntrack_event_cache(IPCT_PROTOINFO_VOLATILE, skb);
@@ -1106,7 +1108,7 @@ static int tcp_new(struct ip_conntrack *conntrack,
 		conntrack->proto.tcp.seen[1].flags = 0;
 		conntrack->proto.tcp.seen[0].loose = 
 		conntrack->proto.tcp.seen[1].loose = 0;
-	} else if (ip_ct_tcp_loose == 0) {
+	} else if (ve_ip_ct_tcp_loose == 0) {
 		/* Don't try to pick up connections. */
 		return 0;
 	} else {
@@ -1130,7 +1132,7 @@ static int tcp_new(struct ip_conntrack *conntrack,
 		conntrack->proto.tcp.seen[0].flags =
 		conntrack->proto.tcp.seen[1].flags = IP_CT_TCP_FLAG_SACK_PERM;
 		conntrack->proto.tcp.seen[0].loose = 
-		conntrack->proto.tcp.seen[1].loose = ip_ct_tcp_loose;
+		conntrack->proto.tcp.seen[1].loose = ve_ip_ct_tcp_loose;
 	}
     
 	conntrack->proto.tcp.seen[1].td_end = 0;

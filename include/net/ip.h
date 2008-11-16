@@ -151,15 +151,25 @@ struct ipv4_config
 
 extern struct ipv4_config ipv4_config;
 DECLARE_SNMP_STAT(struct ipstats_mib, ip_statistics);
-#define IP_INC_STATS(field)		SNMP_INC_STATS(ip_statistics, field)
-#define IP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ip_statistics, field)
-#define IP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ip_statistics, field)
+#ifdef CONFIG_VE
+#define ve_ip_statistics (get_exec_env()->_ip_statistics)
+#else
+#define ve_ip_statistics ip_statistics
+#endif
+#define IP_INC_STATS(field)		SNMP_INC_STATS(ve_ip_statistics, field)
+#define IP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ve_ip_statistics, field)
+#define IP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ve_ip_statistics, field)
 DECLARE_SNMP_STAT(struct linux_mib, net_statistics);
-#define NET_INC_STATS(field)		SNMP_INC_STATS(net_statistics, field)
-#define NET_INC_STATS_BH(field)		SNMP_INC_STATS_BH(net_statistics, field)
-#define NET_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(net_statistics, field)
-#define NET_ADD_STATS_BH(field, adnd)	SNMP_ADD_STATS_BH(net_statistics, field, adnd)
-#define NET_ADD_STATS_USER(field, adnd)	SNMP_ADD_STATS_USER(net_statistics, field, adnd)
+#if defined(CONFIG_VE) && defined(CONFIG_INET)
+#define ve_net_statistics (get_exec_env()->_net_statistics)
+#else
+#define ve_net_statistics net_statistics
+#endif
+#define NET_INC_STATS(field)		SNMP_INC_STATS(ve_net_statistics, field)
+#define NET_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ve_net_statistics, field)
+#define NET_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ve_net_statistics, field)
+#define NET_ADD_STATS_BH(field, adnd)	SNMP_ADD_STATS_BH(ve_net_statistics, field, adnd)
+#define NET_ADD_STATS_USER(field, adnd)	SNMP_ADD_STATS_USER(ve_net_statistics, field, adnd)
 
 extern int sysctl_local_port_range[2];
 extern int sysctl_ip_default_ttl;
@@ -383,4 +393,11 @@ extern int ip_misc_proc_init(void);
 
 extern struct ctl_table ipv4_table[];
 
+#ifdef CONFIG_SYSCTL
+extern int ipv4_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
+			void __user *buffer, size_t *lenp, loff_t *ppos);
+extern int ipv4_sysctl_forward_strategy(ctl_table *table, int __user *name,
+			int nlen, void __user *oldval, size_t __user *oldlenp,
+			 void __user *newval, size_t newlen, void **context);
+#endif
 #endif	/* _IP_H */

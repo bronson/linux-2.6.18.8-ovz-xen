@@ -605,6 +605,7 @@ config HIGHMEM
 	bool "High memory support"
 	depends on PPC32
 
+source "kernel/Kconfig.fairsched"
 source kernel/Kconfig.hz
 source kernel/Kconfig.preempt
 source "fs/Kconfig.binfmt"
@@ -643,7 +644,7 @@ config IOMMU_VMERGE
 
 config HOTPLUG_CPU
 	bool "Support for enabling/disabling CPUs"
-	depends on SMP && HOTPLUG && EXPERIMENTAL && (PPC_PSERIES || PPC_PMAC)
+	depends on SMP && HOTPLUG && EXPERIMENTAL && (PPC_PSERIES || PPC_PMAC) && !SCHED_VCPU
 	---help---
 	  Say Y here to be able to disable and re-enable individual
 	  CPUs at runtime on SMP machines.
@@ -1071,6 +1072,8 @@ source "arch/powerpc/platforms/iseries/Kconfig"
 
 source "lib/Kconfig"
 
+source "kernel/ub/Kconfig"
+
 menu "Instrumentation Support"
         depends on EXPERIMENTAL
 
@@ -1088,6 +1091,8 @@ config KPROBES
 endmenu
 
 source "arch/powerpc/Kconfig.debug"
+
+source "kernel/Kconfig.openvz"
 
 source "security/Kconfig"
 

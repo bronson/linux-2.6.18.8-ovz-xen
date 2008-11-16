@@ -815,6 +815,7 @@ static struct file_system_type rpc_pipe_fs_type = {
 	.name		= "rpc_pipefs",
 	.get_sb		= rpc_get_sb,
 	.kill_sb	= kill_litter_super,
+	.fs_flags	= FS_VIRTUALIZED,	
 };
 
 static void

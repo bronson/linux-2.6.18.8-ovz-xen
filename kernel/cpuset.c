@@ -965,7 +965,7 @@ static int update_nodemask(struct cpuset *cs, char *buf)
 	n = 0;
 
 	/* Load up mmarray[] with mm reference for each task in cpuset. */
-	do_each_thread(g, p) {
+	do_each_thread_all(g, p) {
 		struct mm_struct *mm;
 
 		if (n >= ntasks) {
@@ -979,7 +979,7 @@ static int update_nodemask(struct cpuset *cs, char *buf)
 		if (!mm)
 			continue;
 		mmarray[n++] = mm;
-	} while_each_thread(g, p);
+	} while_each_thread_all(g, p);
 	write_unlock_irq(&tasklist_lock);
 
 	/*
@@ -1193,7 +1193,7 @@ static int attach_task(struct cpuset *cs, char *pidbuf, char **ppathbuf)
 	if (pid) {
 		read_lock(&tasklist_lock);
 
-		tsk = find_task_by_pid(pid);
+		tsk = find_task_by_pid_all(pid);
 		if (!tsk || tsk->flags & PF_EXITING) {
 			read_unlock(&tasklist_lock);
 			return -ESRCH;
@@ -1651,13 +1651,13 @@ static int pid_array_load(pid_t *pidarray, int npids, struct cpuset *cs)
 
 	read_lock(&tasklist_lock);
 
-	do_each_thread(g, p) {
+	do_each_thread_all(g, p) {
 		if (p->cpuset == cs) {
 			pidarray[n++] = p->pid;
 			if (unlikely(n == npids))
 				goto array_full;
 		}
-	} while_each_thread(g, p);
+	} while_each_thread_all(g, p);
 
 array_full:
 	read_unlock(&tasklist_lock);
@@ -1743,12 +1743,7 @@ static ssize_t cpuset_tasks_read(struct file *file, char __user *buf,
 {
 	struct ctr_struct *ctr = file->private_data;
 
-	if (*ppos + nbytes > ctr->bufsz)
-		nbytes = ctr->bufsz - *ppos;
-	if (copy_to_user(buf, ctr->buf + *ppos, nbytes))
-		return -EFAULT;
-	*ppos += nbytes;
-	return nbytes;
+	return simple_read_from_buffer(buf, nbytes, ppos, ctr->buf, ctr->bufsz);
 }
 
 static int cpuset_tasks_release(struct inode *unused_inode, struct file *file)

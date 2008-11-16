@@ -81,6 +81,7 @@ struct inet_timewait_death_row {
 	struct inet_hashinfo 	*hashinfo;
 	int			sysctl_tw_recycle;
 	int			sysctl_max_tw_buckets;
+	int			ub_managed;
 };
 
 extern void inet_twdr_hangman(unsigned long data);
@@ -133,6 +134,7 @@ struct inet_timewait_sock {
 	unsigned long		tw_ttd;
 	struct inet_bind_bucket	*tw_tb;
 	struct hlist_node	tw_death_node;
+	envid_t			tw_owner_env;
 };
 
 static inline void inet_twsk_add_node(struct inet_timewait_sock *tw,

@@ -26,11 +26,13 @@ struct inet_hashinfo;
 
 /* I have no idea if this is a good hash for v6 or not. -DaveM */
 static inline unsigned int inet6_ehashfn(const struct in6_addr *laddr, const u16 lport,
-				const struct in6_addr *faddr, const u16 fport)
+				const struct in6_addr *faddr, const u16 fport,
+				const envid_t veid)
 {
 	unsigned int hashent = (lport ^ fport);
 
 	hashent ^= (laddr->s6_addr32[3] ^ faddr->s6_addr32[3]);
+	hashent ^= (veid ^ (veid >> 16));
 	hashent ^= hashent >> 16;
 	hashent ^= hashent >> 8;
 	return hashent;
@@ -44,7 +46,7 @@ static inline int inet6_sk_ehashfn(const struct sock *sk)
 	const struct in6_addr *faddr = &np->daddr;
 	const __u16 lport = inet->num;
 	const __u16 fport = inet->dport;
-	return inet6_ehashfn(laddr, lport, faddr, fport);
+	return inet6_ehashfn(laddr, lport, faddr, fport, VEID(sk->owner_env));
 }
 
 extern void __inet6_hash(struct inet_hashinfo *hashinfo, struct sock *sk);

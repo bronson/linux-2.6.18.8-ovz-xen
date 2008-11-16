@@ -34,6 +34,8 @@
 #include <linux/cpu.h>
 #include <linux/syscalls.h>
 #include <linux/delay.h>
+#include <linux/virtinfo.h>
+#include <linux/ve_proto.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -443,7 +445,11 @@ static inline void __run_timers(tvec_base_t *base)
 			spin_unlock_irq(&base->lock);
 			{
 				int preempt_count = preempt_count();
+				struct ve_struct *ve;
+
+				ve = set_exec_env(get_ve0());
 				fn(data);
+				(void)set_exec_env(ve);
 				if (preempt_count != preempt_count()) {
 					printk(KERN_WARNING "huh, entered %p "
 					       "with preempt_count %08x, exited"
@@ -460,7 +466,7 @@ static inline void __run_timers(tvec_base_t *base)
 	spin_unlock_irq(&base->lock);
 }
 
-#ifdef CONFIG_NO_IDLE_HZ
+#if defined(CONFIG_NO_IDLE_HZ) && !defined(CONFIG_SCHED_VCPU)
 /*
  * Find out when the next timer event is due to happen. This
  * is used on S/390 to stop all activity when a cpus is idle.
@@ -560,6 +566,11 @@ found:
 		return hr_expires;
 
 	return expires;
+}
+#else
+unsigned long next_timer_interrupt(void)
+{
+	return jiffies;
 }
 #endif
 
@@ -1214,6 +1225,37 @@ EXPORT_SYMBOL(avenrun);
  * calc_load - given tick count, update the avenrun load estimates.
  * This is called while holding a write_lock on xtime_lock.
  */
+
+
+#ifdef CONFIG_VE
+static void calc_load_ve(void)
+{
+	unsigned long flags, nr_unint, nr_active;
+	struct ve_struct *ve;
+
+	read_lock(&ve_list_lock);
+	for_each_ve(ve) {
+		nr_active = nr_running_ve(ve) + nr_uninterruptible_ve(ve);
+		nr_active *= FIXED_1;
+
+		CALC_LOAD(ve->avenrun[0], EXP_1, nr_active);
+		CALC_LOAD(ve->avenrun[1], EXP_5, nr_active);
+		CALC_LOAD(ve->avenrun[2], EXP_15, nr_active);
+	}
+	read_unlock(&ve_list_lock);
+
+	nr_unint = nr_uninterruptible() * FIXED_1;
+	spin_lock_irqsave(&kstat_glb_lock, flags);
+	CALC_LOAD(kstat_glob.nr_unint_avg[0], EXP_1, nr_unint);
+	CALC_LOAD(kstat_glob.nr_unint_avg[1], EXP_5, nr_unint);
+	CALC_LOAD(kstat_glob.nr_unint_avg[2], EXP_15, nr_unint);
+	spin_unlock_irqrestore(&kstat_glb_lock, flags);
+
+}
+#else
+#define calc_load_ve()	do { } while (0)
+#endif
+
 static inline void calc_load(unsigned long ticks)
 {
 	unsigned long active_tasks; /* fixed-point */
@@ -1226,6 +1268,7 @@ static inline void calc_load(unsigned long ticks)
 		CALC_LOAD(avenrun[0], EXP_1, active_tasks);
 		CALC_LOAD(avenrun[1], EXP_5, active_tasks);
 		CALC_LOAD(avenrun[2], EXP_15, active_tasks);
+		calc_load_ve();
 	}
 }
 
@@ -1322,7 +1365,7 @@ asmlinkage unsigned long sys_alarm(unsigned int seconds)
  */
 asmlinkage long sys_getpid(void)
 {
-	return current->tgid;
+	return virt_tgid(current);
 }
 
 /*
@@ -1336,7 +1379,7 @@ asmlinkage long sys_getppid(void)
 	int pid;
 
 	rcu_read_lock();
-	pid = rcu_dereference(current->real_parent)->tgid;
+	pid = virt_tgid(rcu_dereference(current->real_parent));
 	rcu_read_unlock();
 
 	return pid;
@@ -1469,7 +1512,7 @@ EXPORT_SYMBOL(schedule_timeout_uninterruptible);
 /* Thread ID - the internal kernel "pid" */
 asmlinkage long sys_gettid(void)
 {
-	return current->pid;
+	return virt_pid(current);
 }
 
 /*
@@ -1481,11 +1524,12 @@ asmlinkage long sys_sysinfo(struct sysinfo __user *info)
 	unsigned long mem_total, sav_total;
 	unsigned int mem_unit, bitcount;
 	unsigned long seq;
+	unsigned long *__avenrun;
+	struct timespec tp;
 
 	memset((char *)&val, 0, sizeof(struct sysinfo));
 
 	do {
-		struct timespec tp;
 		seq = read_seqbegin(&xtime_lock);
 
 		/*
@@ -1502,18 +1546,34 @@ asmlinkage long sys_sysinfo(struct sysinfo __user *info)
 			tp.tv_nsec = tp.tv_nsec - NSEC_PER_SEC;
 			tp.tv_sec++;
 		}
-		val.uptime = tp.tv_sec + (tp.tv_nsec ? 1 : 0);
-
-		val.loads[0] = avenrun[0] << (SI_LOAD_SHIFT - FSHIFT);
-		val.loads[1] = avenrun[1] << (SI_LOAD_SHIFT - FSHIFT);
-		val.loads[2] = avenrun[2] << (SI_LOAD_SHIFT - FSHIFT);
-
-		val.procs = nr_threads;
 	} while (read_seqretry(&xtime_lock, seq));
+
+	if (ve_is_super(get_exec_env())) {
+		val.uptime = tp.tv_sec + (tp.tv_nsec ? 1 : 0);
+		__avenrun = &avenrun[0];
+		val.procs = nr_threads;
+	}
+#ifdef CONFIG_VE
+	else {
+		struct ve_struct *ve;
+		ve = get_exec_env();
+		__avenrun = &ve->avenrun[0];
+		val.procs = atomic_read(&ve->pcounter);
+		val.uptime = tp.tv_sec - ve->start_timespec.tv_sec;
+	}
+#endif
+	val.loads[0] = __avenrun[0] << (SI_LOAD_SHIFT - FSHIFT);
+	val.loads[1] = __avenrun[1] << (SI_LOAD_SHIFT - FSHIFT);
+	val.loads[2] = __avenrun[2] << (SI_LOAD_SHIFT - FSHIFT);
 
 	si_meminfo(&val);
 	si_swapinfo(&val);
 
+#ifdef CONFIG_USER_RESOURCE
+	if (virtinfo_notifier_call(VITYPE_GENERAL, VIRTINFO_SYSINFO, &val)
+			& NOTIFY_FAIL)
+		return -ENOMSG;
+#endif
 	/*
 	 * If the sum of all the available memory (i.e. ram + swap)
 	 * is less than can be stored in a 32 bit unsigned long then

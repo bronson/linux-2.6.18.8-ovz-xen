@@ -482,10 +482,13 @@ int xprt_adjust_timeout(struct rpc_rqst *req)
 static void xprt_autoclose(void *args)
 {
 	struct rpc_xprt *xprt = (struct rpc_xprt *)args;
+	struct ve_struct *ve;
 
+	ve = set_exec_env(xprt->owner_env);
 	xprt_disconnect(xprt);
 	xprt->ops->close(xprt);
 	xprt_release_write(xprt, NULL);
+	(void)set_exec_env(ve);
 }
 
 /**
@@ -897,6 +900,7 @@ static struct rpc_xprt *xprt_setup(int proto, struct sockaddr_in *ap, struct rpc
 		return ERR_PTR(-ENOMEM);
 
 	xprt->addr = *ap;
+	xprt->owner_env = get_ve(get_exec_env());
 
 	switch (proto) {
 	case IPPROTO_UDP:
@@ -912,6 +916,7 @@ static struct rpc_xprt *xprt_setup(int proto, struct sockaddr_in *ap, struct rpc
 		break;
 	}
 	if (result) {
+		put_ve(xprt->owner_env);
 		kfree(xprt);
 		return ERR_PTR(result);
 	}
@@ -975,7 +980,10 @@ int xprt_destroy(struct rpc_xprt *xprt)
 	xprt->shutdown = 1;
 	del_timer_sync(&xprt->timer);
 	xprt->ops->destroy(xprt);
+	put_ve(xprt->owner_env);
 	kfree(xprt);
 
 	return 0;
 }
+
+EXPORT_SYMBOL(xprt_disconnect);

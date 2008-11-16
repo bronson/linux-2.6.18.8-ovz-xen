@@ -289,7 +289,7 @@ int arch_setup_additional_pages(struct linux_binprm *bprm,
 	 * what PC values meant.
 	 */
 	vma->vm_flags |= VM_ALWAYSDUMP;
-	vma->vm_flags |= mm->def_flags;
+	vma->vm_flags |= mm->def_flags | VM_DONTEXPAND;
 	vma->vm_page_prot = protection_map[vma->vm_flags & 0x7];
 	vma->vm_ops = &vdso_vmops;
 

@@ -129,11 +129,11 @@ static void nlmclnt_setlockargs(struct nlm_rqst *req, struct file_lock *fl)
 	nlmclnt_next_cookie(&argp->cookie);
 	argp->state   = nsm_local_state;
 	memcpy(&lock->fh, NFS_FH(fl->fl_file->f_dentry->d_inode), sizeof(struct nfs_fh));
-	lock->caller  = system_utsname.nodename;
+	lock->caller  = utsname()->nodename;
 	lock->oh.data = req->a_owner;
 	lock->oh.len  = snprintf(req->a_owner, sizeof(req->a_owner), "%u@%s",
 				(unsigned int)fl->fl_u.nfs_fl.owner->pid,
-				system_utsname.nodename);
+				utsname()->nodename);
 	lock->svid = fl->fl_u.nfs_fl.owner->pid;
 	lock->fl.fl_start = fl->fl_start;
 	lock->fl.fl_end = fl->fl_end;
@@ -156,6 +156,7 @@ nlmclnt_proc(struct inode *inode, int cmd, struct file_lock *fl)
 	sigset_t		oldset;
 	unsigned long		flags;
 	int			status, proto, vers;
+	struct ve_struct	*ve;
 
 	vers = (NFS_PROTO(inode)->version == 3) ? 4 : 1;
 	if (NFS_PROTO(inode)->version > 3) {
@@ -165,14 +166,17 @@ nlmclnt_proc(struct inode *inode, int cmd, struct file_lock *fl)
 
 	/* Retrieve transport protocol from NFS client */
 	proto = NFS_CLIENT(inode)->cl_xprt->prot;
+	ve = set_exec_env(NFS_CLIENT(inode)->cl_xprt->owner_env);
 
 	host = nlmclnt_lookup_host(NFS_ADDR(inode), proto, vers);
+	status = -ENOLCK;
 	if (host == NULL)
-		return -ENOLCK;
+		goto fail;
 
 	call = nlm_alloc_call(host);
+	status = -ENOMEM;
 	if (call == NULL)
-		return -ENOMEM;
+		goto fail;
 
 	nlmclnt_locks_init_private(fl, host);
 	/* Set up the argument struct */
@@ -214,6 +218,8 @@ nlmclnt_proc(struct inode *inode, int cmd, struct file_lock *fl)
 	spin_unlock_irqrestore(&current->sighand->siglock, flags);
 
 	dprintk("lockd: clnt proc returns %d\n", status);
+fail:
+	(void)set_exec_env(ve);
 	return status;
 }
 EXPORT_SYMBOL(nlmclnt_proc);

@@ -516,6 +516,8 @@ void subsystem_init(struct subsystem * s)
 	kset_init(&s->kset);
 }
 
+EXPORT_SYMBOL(subsystem_init);
+
 /**
  *	subsystem_register - register a subsystem.
  *	@s:	the subsystem we're registering.

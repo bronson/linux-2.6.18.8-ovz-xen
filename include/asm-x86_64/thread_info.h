@@ -78,14 +78,15 @@ static inline struct thread_info *stack_thread_info(void)
     ({								\
 	struct thread_info *ret;				\
 								\
-	ret = ((struct thread_info *) __get_free_pages(GFP_KERNEL,THREAD_ORDER)); \
+	ret = ((struct thread_info *) __get_free_pages(GFP_KERNEL_UBC,\
+						THREAD_ORDER)); \
 	if (ret)						\
 		memset(ret, 0, THREAD_SIZE);			\
 	ret;							\
     })
 #else
 #define alloc_thread_info(tsk) \
-	((struct thread_info *) __get_free_pages(GFP_KERNEL,THREAD_ORDER))
+	((struct thread_info *) __get_free_pages(GFP_KERNEL_UBC,THREAD_ORDER))
 #endif
 
 #define free_thread_info(ti) free_pages((unsigned long) (ti), THREAD_ORDER)
@@ -114,12 +115,14 @@ static inline struct thread_info *stack_thread_info(void)
 #define TIF_IRET		5	/* force IRET */
 #define TIF_SYSCALL_AUDIT	7	/* syscall auditing active */
 #define TIF_SECCOMP		8	/* secure computing */
-#define TIF_RESTORE_SIGMASK	9	/* restore signal mask in do_signal */
+#define TIF_RESTORE_SIGMASK	9	/* restore signal mask in do_signal() */
 /* 16 free */
 #define TIF_IA32		17	/* 32bit process */ 
 #define TIF_FORK		18	/* ret_from_fork */
 #define TIF_ABI_PENDING		19
-#define TIF_MEMDIE		20
+#define TIF_FREEZE		20
+#define TIF_MEMDIE		21
+#define TIF_RESUME		22
 
 #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
 #define _TIF_NOTIFY_RESUME	(1<<TIF_NOTIFY_RESUME)
@@ -133,6 +136,7 @@ static inline struct thread_info *stack_thread_info(void)
 #define _TIF_IA32		(1<<TIF_IA32)
 #define _TIF_FORK		(1<<TIF_FORK)
 #define _TIF_ABI_PENDING	(1<<TIF_ABI_PENDING)
+#define _TIF_RESUME		(1<<TIF_RESUME)
 
 /* work to do on interrupt/exception return */
 #define _TIF_WORK_MASK \

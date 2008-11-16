@@ -189,6 +189,9 @@ static int teql_qdisc_init(struct Qdisc *sch, struct rtattr *opt)
 	struct teql_master *m = (struct teql_master*)sch->ops;
 	struct teql_sched_data *q = qdisc_priv(sch);
 
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
 	if (dev->hard_header_len > m->dev->hard_header_len)
 		return -EINVAL;
 

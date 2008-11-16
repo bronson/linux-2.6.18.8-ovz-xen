@@ -61,6 +61,7 @@
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
+#include <ub/beancounter.h>
 
 #ifdef TUN_DEBUG
 static int debug;
@@ -68,15 +69,18 @@ static int debug;
 
 /* Network device part of the driver */
 
-static LIST_HEAD(tun_dev_list);
+LIST_HEAD(tun_dev_list);
+EXPORT_SYMBOL(tun_dev_list);
+
 static struct ethtool_ops tun_ethtool_ops;
 
 /* Net device open. */
-static int tun_net_open(struct net_device *dev)
+int tun_net_open(struct net_device *dev)
 {
 	netif_start_queue(dev);
 	return 0;
 }
+EXPORT_SYMBOL(tun_net_open);
 
 /* Net device close. */
 static int tun_net_close(struct net_device *dev)
@@ -89,6 +93,9 @@ static int tun_net_close(struct net_device *dev)
 static int tun_net_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct tun_struct *tun = netdev_priv(dev);
+#if 0
+	struct user_beancounter *ub;
+#endif
 
 	DBG(KERN_INFO "%s: tun_net_xmit %d\n", tun->dev->name, skb->len);
 
@@ -112,6 +119,24 @@ static int tun_net_xmit(struct sk_buff *skb, struct net_device *dev)
 			goto drop;
 		}
 	}
+
+	/*
+	 * XXX this code is broken:
+	 * See comment in dev_queue_xmit
+	 */
+#if 0
+	ub = netdev_bc(dev)->exec_ub;
+	if (ub && (skb_bc(skb)->charged == 0)) {
+		unsigned long charge;
+		charge = skb_charge_fullsize(skb);
+		if (charge_beancounter(ub, UB_OTHERSOCKBUF, charge, 1))
+			goto drop;
+		get_beancounter(ub);
+		skb_bc(skb)->ub = ub;
+		skb_bc(skb)->charged = charge;
+		skb_bc(skb)->resource = UB_OTHERSOCKBUF;
+	}
+#endif
 
 	/* Queue packet */
 	skb_queue_tail(&tun->readq, skb);
@@ -174,7 +199,7 @@ static struct net_device_stats *tun_net_stats(struct net_device *dev)
 }
 
 /* Initialize net device. */
-static void tun_net_init(struct net_device *dev)
+void tun_net_init(struct net_device *dev)
 {
 	struct tun_struct *tun = netdev_priv(dev);
    
@@ -201,6 +226,7 @@ static void tun_net_init(struct net_device *dev)
 		break;
 	}
 }
+EXPORT_SYMBOL(tun_net_init);
 
 /* Character device part */
 
@@ -409,12 +435,14 @@ static ssize_t tun_chr_readv(struct file *file, const struct iovec *iv,
 					tun->dev->name, addr[0], addr[1], addr[2],
 					addr[3], addr[4], addr[5]);
 			ret = tun_put_user(tun, skb, (struct iovec *) iv, len);
+			/* skb will be uncharged in kfree_skb() */
 			kfree_skb(skb);
 			break;
 		} else {
 			DBG(KERN_DEBUG "%s: tun_chr_readv: rejected: %x:%x:%x:%x:%x:%x\n",
 					tun->dev->name, addr[0], addr[1], addr[2],
 					addr[3], addr[4], addr[5]);
+			/* skb will be uncharged in kfree_skb() */
 			kfree_skb(skb);
 			continue;
 		}
@@ -434,7 +462,7 @@ static ssize_t tun_chr_read(struct file * file, char __user * buf,
 	return tun_chr_readv(file, &iv, 1, pos);
 }
 
-static void tun_setup(struct net_device *dev)
+void tun_setup(struct net_device *dev)
 {
 	struct tun_struct *tun = netdev_priv(dev);
 
@@ -450,7 +478,9 @@ static void tun_setup(struct net_device *dev)
 	dev->get_stats = tun_net_stats;
 	dev->ethtool_ops = &tun_ethtool_ops;
 	dev->destructor = free_netdev;
+	dev->features |= NETIF_F_VIRTUAL;
 }
+EXPORT_SYMBOL(tun_setup);
 
 static struct tun_struct *tun_get_by_name(const char *name)
 {
@@ -458,8 +488,9 @@ static struct tun_struct *tun_get_by_name(const char *name)
 
 	ASSERT_RTNL();
 	list_for_each_entry(tun, &tun_dev_list, list) {
-		if (!strncmp(tun->dev->name, name, IFNAMSIZ))
-		    return tun;
+		if (ve_accessible_strict(tun->dev->owner_env, get_exec_env()) &&
+		    !strncmp(tun->dev->name, name, IFNAMSIZ))
+			return tun;
 	}
 
 	return NULL;
@@ -478,7 +509,8 @@ static int tun_set_iff(struct file *file, struct ifreq *ifr)
 
 		/* Check permissions */
 		if (tun->owner != -1 &&
-		    current->euid != tun->owner && !capable(CAP_NET_ADMIN))
+		    current->euid != tun->owner && 
+		    !capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 			return -EPERM;
 	} 
 	else if (__dev_get_by_name(ifr->ifr_name)) 
@@ -489,7 +521,7 @@ static int tun_set_iff(struct file *file, struct ifreq *ifr)
 
 		err = -EINVAL;
 
-		if (!capable(CAP_NET_ADMIN))
+		if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 			return -EPERM;
 
 		/* Set dev type */
@@ -547,6 +579,7 @@ static int tun_set_iff(struct file *file, struct ifreq *ifr)
 
 	file->private_data = tun;
 	tun->attached = 1;
+	tun->bind_file = file;
 
 	strcpy(ifr->ifr_name, tun->dev->name);
 	return 0;
@@ -603,6 +636,9 @@ static int tun_chr_ioctl(struct inode *inode, struct file *file,
 		break;
 
 	case TUNSETPERSIST:
+		/* prohibit persist mode iniside VE */
+		if (!ve_is_super(get_exec_env()))
+			return -EPERM;
 		/* Disable/Enable persist mode */
 		if (arg)
 			tun->flags |= TUN_PERSIST;
@@ -724,12 +760,13 @@ static int tun_chr_fasync(int fd, struct file *file, int on)
 	return 0;
 }
 
-static int tun_chr_open(struct inode *inode, struct file * file)
+int tun_chr_open(struct inode *inode, struct file * file)
 {
 	DBG1(KERN_INFO "tunX: tun_chr_open\n");
 	file->private_data = NULL;
 	return 0;
 }
+EXPORT_SYMBOL(tun_chr_open);
 
 static int tun_chr_close(struct inode *inode, struct file *file)
 {

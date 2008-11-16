@@ -31,6 +31,9 @@ struct ip_conntrack_helper
 extern int ip_conntrack_helper_register(struct ip_conntrack_helper *);
 extern void ip_conntrack_helper_unregister(struct ip_conntrack_helper *);
 
+extern int virt_ip_conntrack_helper_register(struct ip_conntrack_helper *);
+extern void virt_ip_conntrack_helper_unregister(struct ip_conntrack_helper *);
+
 /* Allocate space for an expectation: this is mandatory before calling 
    ip_conntrack_expect_related.  You will have to call put afterwards. */
 extern struct ip_conntrack_expect *
@@ -41,4 +44,7 @@ extern void ip_conntrack_expect_put(struct ip_conntrack_expect *exp);
 extern int ip_conntrack_expect_related(struct ip_conntrack_expect *exp);
 extern void ip_conntrack_unexpect_related(struct ip_conntrack_expect *exp);
 
+#ifdef CONFIG_VE_IPTABLES
+extern struct list_head helpers;
+#endif
 #endif /*_IP_CONNTRACK_HELPER_H*/

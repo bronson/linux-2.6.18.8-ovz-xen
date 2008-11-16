@@ -21,35 +21,27 @@
 
 #include "internal.h"
 
-static inline struct proc_dir_entry * de_get(struct proc_dir_entry *de)
-{
-	if (de)
-		atomic_inc(&de->count);
-	return de;
-}
-
 /*
  * Decrements the use count and checks for deferred deletion.
  */
-static void de_put(struct proc_dir_entry *de)
+void de_put(struct proc_dir_entry *de)
 {
-	if (de) {	
-		lock_kernel();		
-		if (!atomic_read(&de->count)) {
-			printk("de_put: entry %s already free!\n", de->name);
-			unlock_kernel();
-			return;
-		}
+	if (de) {
+		if (unlikely(!atomic_read(&de->count)))
+			goto out_bad;
 
 		if (atomic_dec_and_test(&de->count)) {
-			if (de->deleted) {
-				printk("de_put: deferred delete of %s\n",
-					de->name);
-				free_proc_entry(de);
-			}
-		}		
-		unlock_kernel();
+			if (unlikely(!de->deleted))
+				goto out_bad;
+
+			free_proc_entry(de);
+		}
 	}
+	return;
+
+out_bad:
+	printk("de_put: bad dentry %s count:%d deleted:%d\n",
+			de->name, atomic_read(&de->count), de->deleted);
 }
 
 /*
@@ -65,12 +57,19 @@ static void proc_delete_inode(struct inode *inode)
 	put_pid(PROC_I(inode)->pid);
 
 	/* Let go of any associated proc directory entry */
-	de = PROC_I(inode)->pde;
+	de = LPDE(inode);
 	if (de) {
 		if (de->owner)
 			module_put(de->owner);
 		de_put(de);
 	}
+#ifdef CONFIG_VE
+	de = GPDE(inode);
+	if (de) {
+		module_put(de->owner);
+		de_put(de);
+	}
+#endif
 	clear_inode(inode);
 }
 
@@ -97,6 +96,9 @@ static struct inode *proc_alloc_inode(struct super_block *sb)
 	ei->pde = NULL;
 	inode = &ei->vfs_inode;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
+#ifdef CONFIG_VE
+	GPDE(inode) = NULL;
+#endif
 	return inode;
 }
 
@@ -152,14 +154,9 @@ struct inode *proc_get_inode(struct super_block *sb, unsigned int ino,
 	 */
 	de_get(de);
 
-	WARN_ON(de && de->deleted);
-
-	if (de != NULL && !try_module_get(de->owner))
-		goto out_mod;
-
 	inode = iget(sb, ino);
 	if (!inode)
-		goto out_ino;
+		goto out_mod;
 
 	PROC_I(inode)->pde = de;
 	if (de) {
@@ -180,9 +177,6 @@ struct inode *proc_get_inode(struct super_block *sb, unsigned int ino,
 
 	return inode;
 
-out_ino:
-	if (de != NULL)
-		module_put(de->owner);
 out_mod:
 	de_put(de);
 	return NULL;
@@ -198,7 +192,9 @@ int proc_fill_super(struct super_block *s, void *data, int silent)
 	s->s_magic = PROC_SUPER_MAGIC;
 	s->s_op = &proc_sops;
 	s->s_time_gran = 1;
-	
+
+	/* proc_root.owner == NULL, just a formal call */
+	__module_get(proc_root.owner);
 	root_inode = proc_get_inode(s, PROC_ROOT_INO, &proc_root);
 	if (!root_inode)
 		goto out_no_root;
@@ -207,6 +203,12 @@ int proc_fill_super(struct super_block *s, void *data, int silent)
 	s->s_root = d_alloc_root(root_inode);
 	if (!s->s_root)
 		goto out_no_root;
+#ifdef CONFIG_VE
+	LPDE(root_inode) = de_get(get_exec_env()->proc_root);
+	GPDE(root_inode) = &proc_root;
+#else
+	LPDE(root_inode) = &proc_root;
+#endif
 	return 0;
 
 out_no_root:

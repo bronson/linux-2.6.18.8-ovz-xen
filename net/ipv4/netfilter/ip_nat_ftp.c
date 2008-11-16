@@ -19,6 +19,7 @@
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_conntrack_ftp.h>
 #include <linux/netfilter_ipv4/ip_conntrack_helper.h>
+#include <linux/nfcalls.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Rusty Russell <rusty@rustcorp.com.au>");
@@ -154,18 +155,43 @@ static unsigned int ip_nat_ftp(struct sk_buff **pskb,
 	return NF_ACCEPT;
 }
 
-static void __exit ip_nat_ftp_fini(void)
+#ifdef CONFIG_VE_IPTABLES
+#undef ve_ip_nat_ftp_hook
+#define ve_ip_nat_ftp_hook \
+		(get_exec_env()->_ip_conntrack->_ip_nat_ftp_hook)
+#endif
+int init_iptable_nat_ftp(void)
 {
-	ip_nat_ftp_hook = NULL;
+	BUG_ON(ve_ip_nat_ftp_hook);
+#ifdef CONFIG_VE_IPTABLES
+	ve_ip_nat_ftp_hook = (ip_nat_helper_func)ip_nat_ftp;
+#else
+	ve_ip_nat_ftp_hook = ip_nat_ftp;
+#endif
+	return 0;
+}
+
+void fini_iptable_nat_ftp(void)
+{
+	ve_ip_nat_ftp_hook = NULL;
 	/* Make sure noone calls it, meanwhile. */
 	synchronize_net();
 }
 
+static void __exit ip_nat_ftp_fini(void)
+{
+	KSYMMODUNRESOLVE(ip_nat_ftp);
+	KSYMUNRESOLVE(init_iptable_nat_ftp);
+	KSYMUNRESOLVE(fini_iptable_nat_ftp);
+	fini_iptable_nat_ftp();
+}
+
 static int __init ip_nat_ftp_init(void)
 {
-	BUG_ON(ip_nat_ftp_hook);
-	ip_nat_ftp_hook = ip_nat_ftp;
-	return 0;
+	KSYMRESOLVE(init_iptable_nat_ftp);
+	KSYMRESOLVE(fini_iptable_nat_ftp);
+	KSYMMODRESOLVE(ip_nat_ftp);
+	return init_iptable_nat_ftp();
 }
 
 /* Prior to 2.6.11, we had a ports param.  No longer, but don't break users. */

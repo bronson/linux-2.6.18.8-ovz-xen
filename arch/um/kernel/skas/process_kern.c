@@ -208,7 +208,7 @@ void kill_off_processes_skas(void)
 		int pid, me;
 
 		me = os_getpid();
-		for_each_process(p){
+		for_each_process_all(p){
 			if(p->mm == NULL)
 				continue;
 

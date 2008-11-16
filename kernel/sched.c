@@ -52,6 +52,8 @@
 #include <linux/acct.h>
 #include <linux/kprobes.h>
 #include <linux/delayacct.h>
+#include <linux/vsched.h>
+#include <linux/fairsched.h>
 #include <asm/tlb.h>
 
 #include <asm/unistd.h>
@@ -137,7 +139,7 @@
 #ifdef CONFIG_SMP
 #define TIMESLICE_GRANULARITY(p)	(GRANULARITY * \
 		(1 << (((MAX_BONUS - CURRENT_BONUS(p)) ? : 1) - 1)) * \
-			num_online_cpus())
+			vsched_num_online_vcpus(task_vsched(p)))
 #else
 #define TIMESLICE_GRANULARITY(p)	(GRANULARITY * \
 		(1 << (((MAX_BONUS - CURRENT_BONUS(p)) ? : 1) - 1)))
@@ -202,6 +204,7 @@ struct prio_array {
  * (such as the load balancing or the thread migration code), lock
  * acquire operations must be ordered by ascending &runqueue.
  */
+typedef struct vcpu_struct *vcpu_t;
 struct rq {
 	spinlock_t lock;
 
@@ -224,9 +227,12 @@ struct rq {
 	 */
 	unsigned long nr_uninterruptible;
 
+	unsigned long nr_sleeping;
+	unsigned long nr_stopped;
+
 	unsigned long expired_timestamp;
 	unsigned long long timestamp_last_tick;
-	struct task_struct *curr, *idle;
+	struct task_struct *curr;
 	struct mm_struct *prev_mm;
 	struct prio_array *active, *expired, arrays[2];
 	int best_expired_prio;
@@ -237,12 +243,12 @@ struct rq {
 
 	/* For active balancing */
 	int active_balance;
-	int push_cpu;
-	int cpu;		/* cpu of this runqueue */
+#endif
+	vcpu_t push_cpu;
 
 	struct task_struct *migration_thread;
+	int migration_thread_init;
 	struct list_head migration_queue;
-#endif
 
 #ifdef CONFIG_SCHEDSTATS
 	/* latency stats */
@@ -263,19 +269,66 @@ struct rq {
 	unsigned long ttwu_cnt;
 	unsigned long ttwu_local;
 #endif
+#ifndef CONFIG_SCHED_VCPU
+	/*
+	 * with VCPU scheduler each rq is dynamic object
+	 * so assign a common static class to them and
+	 * use lock nesting rules in double_rq_lock etc
+	 */
 	struct lock_class_key rq_lock_key;
+#endif
 };
 
-static DEFINE_PER_CPU(struct rq, runqueues);
-
-static inline int cpu_of(struct rq *rq)
-{
-#ifdef CONFIG_SMP
-	return rq->cpu;
-#else
-	return 0;
+/* VCPU scheduler state description */
+struct vcpu_struct;
+struct vcpu_scheduler {
+	struct list_head idle_list;
+	struct list_head active_list;
+	struct list_head running_list;
+#ifdef CONFIG_FAIRSCHED
+	struct fairsched_node *node;
 #endif
-}
+	struct list_head list;
+	struct vcpu_struct *vcpu[NR_CPUS];
+	int id;
+	cpumask_t vcpu_online_map, vcpu_running_map;
+	cpumask_t pcpu_running_map;
+	int num_online_vcpus;
+} ____cacheline_internodealigned_in_smp;
+
+/* virtual CPU description */
+struct vcpu_struct {
+	struct rq rq;
+#ifdef CONFIG_SCHED_VCPU
+	unsigned active : 1,
+		 running : 1;
+	struct list_head list;
+	struct vcpu_scheduler *vsched;
+	int last_pcpu;
+	unsigned long start_time;
+	unsigned long stop_time;
+#endif
+	int id;
+} ____cacheline_internodealigned_in_smp;
+
+/* physical CPU description */
+struct pcpu_info {
+	struct vcpu_scheduler *vsched;
+	struct vcpu_struct *vcpu;
+	struct task_struct *idle;
+#ifdef CONFIG_SMP
+	struct sched_domain *sd;
+#endif
+	int id;
+} ____cacheline_internodealigned_in_smp;
+
+struct pcpu_info pcpu_info[NR_CPUS];
+
+static LIST_HEAD(vsched_list);
+static DEFINE_SPINLOCK(vsched_list_lock);
+
+#define pcpu(nr)		(&pcpu_info[nr])
+#define this_pcpu()		(pcpu(smp_processor_id()))
 
 /*
  * The domain tree (rq->sd) is protected by RCU's quiescent state transition.
@@ -284,13 +337,600 @@ static inline int cpu_of(struct rq *rq)
  * The domain tree of any CPU may only be accessed from within
  * preempt-disabled sections.
  */
-#define for_each_domain(cpu, __sd) \
-	for (__sd = rcu_dereference(cpu_rq(cpu)->sd); __sd; __sd = __sd->parent)
+#define for_each_pdomain(sd, domain) \
+for (domain = rcu_dereference(sd); domain; domain = domain->parent)
 
-#define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
-#define this_rq()		(&__get_cpu_var(runqueues))
-#define task_rq(p)		cpu_rq(task_cpu(p))
-#define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
+#define for_each_domain(cpu, __sd) \
+	for_each_pdomain(vcpu_rq(cpu)->sd, __sd)
+
+#ifdef CONFIG_SCHED_VCPU
+
+/* Used in find_idle_vsched() */
+static DEFINE_PER_CPU(int, find_busvs_last_pcpu);
+
+/*
+ * vcpu_timeslice - how many msec's runnable VCPU will stay on the same
+ * physical CPU. If vcpu_timeslice < 0, actual vcpu timeslice value will
+ * be calculated according to number of 'ready to run' vcpu's:
+ *
+ * vcpu_timeslice_actual = VCPU_TIMESLICE_MAX >>
+ *			((nr_runnable_vcpus - 1) / nr_pcpus)
+ */
+#define VCPU_TIMESLICE_MAX	FSCH_TIMESLICE
+int vcpu_timeslice_actual;
+unsigned int nr_online_pcpus = 1;	/* mustn't be 0, cause it's divisor */
+/*
+ * Set initial value to -1, to not subtract '-1' each time.
+ */
+unsigned int nr_runnable_vcpus = -1;
+
+u32 vcpu_sched_timeslice = 5;
+int vcpu_timeslice = -1;
+u32 vcpu_hot_timeslice = 4;	/* < 4 won't work for HZ=250 */
+EXPORT_SYMBOL(vcpu_sched_timeslice);
+EXPORT_SYMBOL(vcpu_timeslice);
+EXPORT_SYMBOL(vcpu_hot_timeslice);
+
+extern spinlock_t fairsched_lock;
+static struct vcpu_scheduler default_vsched, idle_vsched;
+static struct vcpu_struct boot_vcpu, boot_idle_vcpu;
+
+#define vsched_default_vsched()	(&default_vsched)
+#define vsched_default_vcpu(id)	(default_vsched.vcpu[id])
+
+/* 
+ * All macroses below could be used without locks, if there is no
+ * strict ordering requirements, because we assume, that:
+ *
+ * 1. VCPU could not disappear "on the fly" (FIXME)
+ *
+ * 2. p->vsched access is atomic.
+ */
+
+#define task_vsched(tsk)	((tsk)->vsched)
+#define this_vsched()		(task_vsched(current))
+
+#define vsched_vcpu(vsched, id)	((vsched)->vcpu[id])
+#define this_vcpu()		(task_vcpu(current))
+#define task_vcpu(p)		((p)->vcpu)
+
+#define vsched_id(vsched)	((vsched)->id)
+#define vsched_vcpu_online_map(vsched)	((vsched)->vcpu_online_map)
+#define vsched_num_online_vcpus(vsched)	((vsched)->num_online_vcpus)
+#define vsched_pcpu_running_map(vsched)	((vsched)->pcpu_running_map)
+
+#define vcpu_vsched(vcpu)	((vcpu)->vsched)
+#define vcpu_last_pcpu(vcpu)	((vcpu)->last_pcpu)
+#define vcpu_isset(vcpu, mask)	(cpu_isset((vcpu)->id, mask))
+#define vcpu_is_offline(vcpu)	(!vcpu_isset(vcpu, \
+					vcpu_vsched(vcpu)->vcpu_online_map))
+
+static int __add_vcpu(struct vcpu_scheduler *vsched, int id);
+
+#define vcpu_is_hot(vcpu)	(jiffies - (vcpu)->start_time \
+					< msecs_to_jiffies(vcpu_timeslice_actual))
+#else	/* CONFIG_SCHED_VCPU */
+
+static DEFINE_PER_CPU(struct vcpu_struct, vcpu_struct);
+
+#define task_vsched(p)		NULL
+#define this_vcpu()		(task_vcpu(current))
+#define task_vcpu(p)		(vcpu(task_cpu(p)))
+
+#define vsched_vcpu(sched, id)	(vcpu(id))
+#define vsched_id(vsched)	0
+#define vsched_default_vsched()	NULL
+#define vsched_default_vcpu(id)	(vcpu(id))
+
+#define vsched_vcpu_online_map(vsched)	(cpu_online_map)
+#define vsched_num_online_vcpus(vsched)	(num_online_cpus())
+#define vsched_pcpu_running_map(vsched)	(cpu_online_map)
+
+#define vcpu(id)		(&per_cpu(vcpu_struct, id))
+
+#define vcpu_vsched(vcpu)	NULL
+#define vcpu_last_pcpu(vcpu)	((vcpu)->id)
+#define vcpu_isset(vcpu, mask)	(cpu_isset((vcpu)->id, mask))
+#define vcpu_is_offline(vcpu)	(cpu_is_offline((vcpu)->id))
+
+#define vcpu_is_hot(vcpu)	(1)
+#endif	/* CONFIG_SCHED_VCPU */
+
+#define this_rq()		(vcpu_rq(this_vcpu()))
+#define task_rq(p)		(vcpu_rq(task_vcpu(p)))
+#define vcpu_rq(vcpu)		(&(vcpu)->rq)
+#define get_vcpu()		({ preempt_disable(); this_vcpu(); })
+#define put_vcpu()		({ put_cpu(); })
+#define rq_vcpu(__rq)		(container_of((__rq), struct vcpu_struct, rq))
+
+static inline int cpu_of(struct rq *rq)
+{
+#ifdef CONFIG_SMP
+	return vcpu_last_pcpu(rq_vcpu(rq));
+#else
+	return 0;
+#endif
+}
+
+/**
+ * idle_task - return the idle task for a given cpu.
+ * @cpu: the processor in question.
+ */
+struct task_struct *idle_task(int cpu) 
+{
+	return pcpu(cpu)->idle;
+}
+
+#ifdef CONFIG_SMP
+static inline void update_rq_cpu_load(struct rq *this_rq)
+{
+	unsigned long this_load;
+	int i, scale;
+
+	if (unlikely(this_rq->nr_running == 0)) {
+		for (i = 0; i < 3; i++)
+			this_rq->cpu_load[i] = 0;
+		return;
+	}
+
+	this_load = this_rq->nr_running * SCHED_LOAD_SCALE;
+	for (i = 0, scale = 1; i < 3; i++, scale <<= 1) {
+		unsigned long old_load, new_load;
+
+		old_load = this_rq->cpu_load[i];
+		new_load = this_load;
+		/*
+		 * Round up the averaging division if load is increasing. This
+		 * prevents us from getting stuck on 9 if the load is 10, for
+		 * example.
+		 */
+		if (new_load > old_load)
+			new_load += scale-1;
+		this_rq->cpu_load[i] = (old_load*(scale-1) + new_load) / scale;
+	}
+}
+#else	/* CONFIG_SMP */
+static inline void update_rq_cpu_load(struct rq *this_rq)
+{
+}
+#endif	/* CONFIG_SMP */
+
+#ifdef CONFIG_SCHED_VCPU
+static inline void recalc_vcpu_timeslice(void)
+{
+	int val;
+
+	if (vcpu_timeslice < 0) {
+		val = nr_runnable_vcpus / nr_online_pcpus;
+		val = val > 31 ? 31 : val;
+		val = VCPU_TIMESLICE_MAX >> val;
+	} else
+		val = vcpu_timeslice;
+
+	/*
+	 * Optimization (?) - don't invalidate other CPU's cacheline
+	 * if vcpu_timeslice_actual is not changed.
+	 */
+	if (vcpu_timeslice_actual != val)
+		vcpu_timeslice_actual = val;
+}
+
+void fastcall vsched_cpu_online_map(struct vcpu_scheduler *vsched,
+		cpumask_t *mask)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&fairsched_lock, flags);
+	*mask = vsched->vcpu_online_map;
+	spin_unlock_irqrestore(&fairsched_lock, flags);
+}
+
+static inline void set_task_vsched(struct task_struct *p,
+		struct vcpu_scheduler *vsched)
+{
+	/* NOTE: set_task_cpu() is required after every set_task_vsched()! */
+	p->vsched = vsched;
+	p->vsched_id = vsched_id(vsched);
+}
+
+inline void set_task_cpu(struct task_struct *p, unsigned int vcpu_id)
+{
+	p->vcpu = vsched_vcpu(task_vsched(p), vcpu_id);
+	p->vcpu_id = vcpu_id;
+}
+
+static inline void set_task_vcpu(struct task_struct *p, vcpu_t vcpu)
+{
+	p->vcpu = vcpu;
+	p->vcpu_id = vcpu->id;
+}
+
+/* this is called when rq->nr_running changes from 0 to 1 */
+static void vcpu_attach(struct rq *rq)
+{
+	struct vcpu_scheduler *vsched;
+	vcpu_t vcpu;
+
+	vcpu = rq_vcpu(rq);
+	vsched = vcpu_vsched(vcpu);
+
+	BUG_ON(vcpu->active);
+	spin_lock(&fairsched_lock);
+	vcpu->active = 1;
+	if (!vcpu->running)
+		list_move_tail(&vcpu->list, &vsched->active_list);
+
+	fairsched_incrun(vsched->node);
+	nr_runnable_vcpus++;
+	spin_unlock(&fairsched_lock);
+
+	recalc_vcpu_timeslice();
+}
+
+/* this is called when rq->nr_running changes from 1 to 0 */
+static void vcpu_detach(struct rq *rq)
+{
+	struct vcpu_scheduler *vsched;
+	vcpu_t vcpu;
+
+	vcpu = rq_vcpu(rq);
+	vsched = vcpu_vsched(vcpu);
+	BUG_ON(!vcpu->active);
+
+	spin_lock(&fairsched_lock);
+	fairsched_decrun(vsched->node);
+
+	vcpu->active = 0;
+	if (!vcpu->running)
+		list_move_tail(&vcpu->list, &vsched->idle_list);
+	nr_runnable_vcpus--;
+	spin_unlock(&fairsched_lock);
+
+	recalc_vcpu_timeslice();
+}
+
+static inline void __vcpu_get(vcpu_t vcpu)
+{
+	struct pcpu_info *pcpu;
+	struct vcpu_scheduler *vsched;
+
+	BUG_ON(!this_vcpu()->running);
+
+	pcpu = this_pcpu();
+	vsched = vcpu_vsched(vcpu);
+
+	pcpu->vcpu = vcpu;
+	pcpu->vsched = vsched;
+
+	fairsched_inccpu(vsched->node);
+
+	list_move_tail(&vcpu->list, &vsched->running_list);
+	vcpu->start_time = jiffies;
+	vcpu->last_pcpu = pcpu->id;
+	vcpu->running = 1;
+	__set_bit(vcpu->id, vsched->vcpu_running_map.bits);
+	__set_bit(pcpu->id, vsched->pcpu_running_map.bits);
+#ifdef CONFIG_SMP
+	vcpu_rq(vcpu)->sd = pcpu->sd;
+#endif
+}
+
+static void vcpu_put(vcpu_t vcpu)
+{
+	struct vcpu_scheduler *vsched;
+	struct pcpu_info *cur_pcpu;
+	struct rq *rq;
+
+	vsched = vcpu_vsched(vcpu);
+	rq = vcpu_rq(vcpu);
+	cur_pcpu = this_pcpu();
+
+	BUG_ON(!vcpu->running);
+
+	spin_lock(&fairsched_lock);
+	vcpu->running = 0;
+	list_move_tail(&vcpu->list,
+		vcpu->active ? &vsched->active_list : &vsched->idle_list);
+	fairsched_deccpu(vsched->node);
+	__clear_bit(vcpu->id, vsched->vcpu_running_map.bits);
+	if (vsched != this_vsched())
+		__clear_bit(cur_pcpu->id, vsched->pcpu_running_map.bits);
+
+	vcpu->stop_time = jiffies;
+	if (!rq->nr_running)
+		rq->expired_timestamp = 0;
+	/* from this point task_running(prev_rq, prev) will be 0 */
+	rq->curr = cur_pcpu->idle;
+	update_rq_cpu_load(rq);
+	spin_unlock(&fairsched_lock);
+}
+
+/*
+ * Find an idle VCPU in given vsched. VCPU runned on this pcpu is 
+ * preferrable. Idle VCPU must be present in *cpus mask also.
+ */
+static vcpu_t find_idle_vcpu(struct vcpu_scheduler *vsched, cpumask_t *cpus)
+{
+	vcpu_t vcpu;
+	vcpu_t best_vcpu;
+	int this_pcpu = smp_processor_id();
+
+	best_vcpu = NULL;
+
+	spin_lock(&fairsched_lock);
+	if (!list_empty(&vsched->idle_list)) {
+		list_for_each_entry(vcpu, &vsched->idle_list, list) {
+			if (unlikely(vcpu_is_offline(vcpu)))
+				continue;
+			if (!cpu_isset(vcpu_last_pcpu(vcpu), *cpus))
+				continue;
+			best_vcpu = vcpu;
+			if (vcpu_last_pcpu(vcpu) == this_pcpu)
+				break;
+		}
+	}
+	spin_unlock(&fairsched_lock);
+	return best_vcpu;
+}
+
+/*
+ * find_busiest_vsched - find busiest vsched among running vsched's.
+ * An active vsched will be balanced when it becomes running.
+ *
+ * This routine must be simple and fast.
+ */
+static inline struct vcpu_scheduler *find_busiest_vsched(cpumask_t *cpus)
+{
+	vcpu_t vcpu;
+	int i, n;
+	cpumask_t mask, tmp_mask;
+	int step;
+
+	step = 0;
+
+	cpus_and(mask, *cpus, cpu_online_map);
+
+	/*
+	 * We implement simple round robin strategy to get 
+	 * PCPU id to start from. Last PCPU number is saved in 
+	 * per_cpu(find_busvs_last_pcpu).
+	 *
+	 * Assume the mask is 0x6789abcd and it's time to start
+	 * from PCPU #13:
+	 * 
+	 * 1) In the first pass we must use mask 0x6789a000:
+	 *
+	 *    ((0x6789abcd >> 13) << 13) => 0x6789a000
+	 *
+	 * 2) In the second pass we must use mask 0x00000bcd:
+	 *
+	 *      0x6789abcd ^ 0x6789a000  => 0x00000bcd
+	 */
+	n = per_cpu(find_busvs_last_pcpu, raw_smp_processor_id());
+
+	cpus_shift_right(tmp_mask, mask, n);
+	cpus_shift_left(tmp_mask, tmp_mask, n);
+restart:
+	for_each_cpu_mask(i, tmp_mask) {
+		vcpu = pcpu(i)->vcpu;
+		if (vcpu_is_offline(vcpu))
+			continue;
+		if (vcpu->vsched == &idle_vsched)
+			continue;
+		if (vcpu == this_vcpu())
+			continue;
+
+		/*
+		 * 'Busiest' mean there at least 2 tasks on this vsched.
+		 */
+		if (vcpu->rq.nr_running > 1) {
+			per_cpu(find_busvs_last_pcpu, raw_smp_processor_id())
+				= ++n % NR_CPUS;
+			return vcpu->vsched;
+		}
+	}
+	if (!step++) {
+		/* Second pass */
+		cpus_xor(tmp_mask, mask, tmp_mask);
+		goto restart;
+	}
+	return NULL;
+}
+
+/*
+ * Find idle VCPUs in a vsched, that can be balanced
+ */
+static inline vcpu_t find_idle_target(cpumask_t *cpus)
+{
+	vcpu_t vcpu;
+	struct vcpu_scheduler *vsched;
+
+	/*
+	 * First of all we have to find busiest vsched
+	 */
+	vsched = find_busiest_vsched(cpus);
+	if (vsched == NULL)
+		return NULL;
+
+	/*
+	 * Try to find an idle VCPU in the target vsched.
+	 * VCPU that was last running on this PCPU is preferred.
+	 */
+	vcpu = find_idle_vcpu(vsched, cpus);
+	if (!vcpu)
+		return NULL;
+	return vcpu;
+}
+
+static int idle_balance(vcpu_t this_cpu, struct rq *this_rq);
+
+static vcpu_t schedule_vcpu(vcpu_t cur_vcpu, cycles_t cycles)
+{
+	struct vcpu_scheduler *vsched;
+	vcpu_t vcpu, best_vcpu;
+	unsigned long time;
+	struct rq *rq;
+#ifdef CONFIG_FAIRSCHED
+	struct fairsched_node *node, *nodec;
+
+	nodec = vcpu_vsched(cur_vcpu)->node;
+	node = nodec;
+#endif
+
+	BUG_ON(!cur_vcpu->running);
+restart:
+	if (unlikely(system_state == SYSTEM_BOOTING))
+		goto affine;
+
+	spin_lock(&fairsched_lock);
+#ifdef CONFIG_FAIRSCHED
+	node = fairsched_schedule(node, nodec,
+			cur_vcpu->active,
+			cycles);
+	if (unlikely(node == NULL))
+		goto idle;
+
+	vsched = node->vsched;
+#else
+	vsched = &default_vsched;
+#endif
+	/* FIXME: optimize vcpu switching, maybe we do not need to call
+	   fairsched_schedule() at all if vcpu is still active and too
+	   little time have passed so far */
+	if (cur_vcpu->vsched == vsched && cur_vcpu->active &&
+	    jiffies - cur_vcpu->start_time < msecs_to_jiffies(vcpu_sched_timeslice)) {
+		vcpu = cur_vcpu;
+		goto done;
+	}
+
+	if (list_empty(&vsched->active_list)) {
+		/* nothing except for this cpu can be scheduled */
+		if (likely(cur_vcpu->vsched == vsched && cur_vcpu->active)) {
+			/* 
+			 * Current vcpu is the one we need. We have not
+			 * put it yet, so it's not on the active_list.
+			 */
+			vcpu = cur_vcpu;
+			vcpu->start_time = jiffies;
+			goto done;
+		} else
+			goto none;
+	}
+
+	/*
+	 * Ok, we are going to choose new VCPU now.
+	 */
+	time = jiffies - msecs_to_jiffies(vcpu_hot_timeslice);
+	/*
+	 * First vcpu in the list is more preferable, because it has waited
+	 * for CPU longer than others. If all vcpu's are hot, use the oldest
+	 * one.
+	 */
+	best_vcpu = list_entry(vsched->active_list.next,
+						struct vcpu_struct, list);
+	list_for_each_entry(vcpu, &vsched->active_list, list) {
+		/* Skip hot VCPU's that were running on another CPU's */
+		if (vcpu->stop_time > time && 
+				vcpu_last_pcpu(vcpu) != raw_smp_processor_id())
+			continue;
+
+		best_vcpu = vcpu;
+		break;
+	}
+	vcpu = best_vcpu;
+
+	/* add it to running list */
+	__vcpu_get(vcpu);
+done:
+	spin_unlock(&fairsched_lock);
+
+	rq = vcpu_rq(vcpu);
+	if (unlikely(vcpu != cur_vcpu)) {
+		spin_unlock(&vcpu_rq(cur_vcpu)->lock);
+		spin_lock(&rq->lock);
+		if (unlikely(!rq->nr_running)) {
+			/* race with balancing? */
+			spin_unlock(&rq->lock);
+			vcpu_put(vcpu);
+			spin_lock(&vcpu_rq(cur_vcpu)->lock);
+			goto restart;
+		}
+	}
+	BUG_ON(!rq->nr_running);
+	return vcpu;
+
+none:
+#ifdef CONFIG_FAIRSCHED
+	spin_unlock(&fairsched_lock);
+
+	/* fairsched doesn't schedule more CPUs than we have active */
+	BUG_ON(1);
+#else
+	goto idle;
+#endif
+
+idle:
+	vcpu = task_vcpu(this_pcpu()->idle);
+	__vcpu_get(vcpu);
+	spin_unlock(&fairsched_lock);
+	spin_unlock(&vcpu_rq(cur_vcpu)->lock);
+
+	spin_lock(&vcpu_rq(vcpu)->lock);
+	return vcpu;
+
+affine:
+	vcpu = vsched_vcpu(&default_vsched, raw_smp_processor_id());
+	/* current VCPU busy, continue */
+	if (cur_vcpu == vcpu && vcpu->active)
+		return cur_vcpu;
+	/* current is idle and nothing to run, keep idle */
+	if (vcpu_vsched(cur_vcpu) == &idle_vsched && !vcpu->active)
+		return cur_vcpu;
+
+	/* need to switch to idle... */
+	if (cur_vcpu == vcpu) {
+		spin_lock(&fairsched_lock);
+		goto idle;
+	}
+
+	/* ... and from idle */
+	spin_lock(&fairsched_lock);
+	__vcpu_get(vcpu);
+	goto done;
+}
+
+int vcpu_online(int cpu)
+{
+	return cpu_isset(cpu, vsched_vcpu_online_map(this_vsched()));
+}
+#else /* CONFIG_SCHED_VCPU */
+
+#define set_task_vsched(task, vsched)		do { } while (0)
+
+static inline void vcpu_attach(struct rq *rq)
+{
+}
+
+static inline void vcpu_detach(struct rq *rq)
+{
+}
+
+static inline void vcpu_put(vcpu_t vcpu)
+{
+}
+
+static inline vcpu_t schedule_vcpu(vcpu_t prev_vcpu, cycles_t cycles)
+{
+	return prev_vcpu;
+}
+
+static inline void set_task_vcpu(struct task_struct *p, vcpu_t vcpu)
+{
+	set_task_pcpu(p, vcpu->id);
+}
+
+#endif /* CONFIG_SCHED_VCPU */
+
 
 #ifndef prepare_arch_switch
 # define prepare_arch_switch(next)	do { } while (0)
@@ -298,6 +938,32 @@ static inline int cpu_of(struct rq *rq)
 #ifndef finish_arch_switch
 # define finish_arch_switch(prev)	do { } while (0)
 #endif
+
+#ifdef CONFIG_SMP
+static struct percpu_data kstat_lat_pcpu_stats;
+#endif
+static struct kstat_lat_pcpu_snap_struct kstat_lat_pcpu_stats_data[NR_CPUS];
+struct kernel_stat_glob kstat_glob;
+
+spinlock_t kstat_glb_lock = SPIN_LOCK_UNLOCKED;
+EXPORT_SYMBOL(kstat_glob);
+EXPORT_SYMBOL(kstat_glb_lock);
+
+static inline void finish_vsched_switch(struct rq *rq, vcpu_t prev_vcpu)
+{
+	vcpu_t vcpu;
+
+	vcpu = rq_vcpu(rq);
+	if (prev_vcpu != vcpu) {
+#ifdef __ARCH_WANT_INTERRUPTS_ON_CTXSW
+		local_irq_disable();
+		vcpu_put(prev_vcpu);
+		local_irq_enable();
+#else
+		vcpu_put(prev_vcpu);
+#endif
+	}
+}
 
 #ifndef __ARCH_WANT_UNLOCKED_CTXSW
 static inline int task_running(struct rq *rq, struct task_struct *p)
@@ -311,6 +977,7 @@ static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
 
 static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 {
+	vcpu_t prev_vcpu;
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
 	rq->lock.owner = current;
@@ -322,7 +989,10 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 */
 	spin_acquire(&rq->lock.dep_map, 0, 0, _THIS_IP_);
 
-	spin_unlock_irq(&rq->lock);
+	prev_vcpu = task_vcpu(prev);
+	spin_unlock(&rq->lock);
+	finish_vsched_switch(rq, prev_vcpu);
+	local_irq_enable();
 }
 
 #else /* __ARCH_WANT_UNLOCKED_CTXSW */
@@ -354,6 +1024,8 @@ static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
 
 static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 {
+	/* vcpu_put() should be done before setting prev->oncpu = 0 */
+	finish_vsched_switch(rq, task_vcpu(prev));
 #ifdef CONFIG_SMP
 	/*
 	 * After ->oncpu is cleared, the task can be moved to a different CPU.
@@ -421,25 +1093,234 @@ static inline void task_rq_unlock(struct rq *rq, unsigned long *flags)
 	spin_unlock_irqrestore(&rq->lock, *flags);
 }
 
+#ifdef CONFIG_VE
+#define ve_nr_unint_inc(env, cpu)					\
+	do {								\
+		VE_CPU_STATS((env), (cpu))->nr_unint++;			\
+	} while(0)
+#define ve_nr_unint_dec(env, cpu)					\
+	do {								\
+		VE_CPU_STATS((env), (cpu))->nr_unint--;			\
+	} while(0)
+
+#define cycles_after(a, b)	((long long)(b) - (long long)(a) < 0)
+
+cycles_t __ve_sched_get_idle_time(struct ve_struct *ve, int cpu)
+{
+	struct ve_cpu_stats *ve_stat;
+	unsigned v;
+	cycles_t strt, ret, cycles;
+
+	ve_stat = VE_CPU_STATS(ve, cpu);
+	do {
+		v = read_seqcount_begin(&ve_stat->stat_lock);
+		ret = ve_stat->idle_time;
+		strt = ve_stat->strt_idle_time;
+		if (strt && nr_uninterruptible_ve(ve) == 0) {
+			cycles = get_cycles();
+			if (cycles_after(cycles, strt))
+				ret += cycles - strt;
+		}
+	} while (read_seqcount_retry(&ve_stat->stat_lock, v));
+	return ret;
+}
+EXPORT_SYMBOL(__ve_sched_get_idle_time);
+
+cycles_t ve_sched_get_iowait_time(int cpu)
+{
+	struct ve_struct *ve;
+	struct ve_cpu_stats *ve_stat;
+	unsigned v;
+	cycles_t strt, ret, cycles;
+	vcpu_t vcpu;
+
+	preempt_disable();
+	ret = 0;
+	vcpu = vsched_vcpu(this_vsched(), cpu);
+	if (!vcpu)
+		goto done;
+
+	ve = get_exec_env();
+	ve_stat = VE_CPU_STATS(ve, cpu);
+	do {
+		struct rq *rq;
+		rq = vcpu_rq(vcpu);
+		v = read_seqcount_begin(&ve_stat->stat_lock);
+		ret = ve_stat->iowait_time;
+		strt = ve_stat->strt_idle_time;
+		if (strt && atomic_read(&rq->nr_iowait) > 0) {
+			cycles = get_cycles();
+			if (cycles_after(cycles, strt))
+				ret += cycles - strt;
+		}
+	} while (read_seqcount_retry(&ve_stat->stat_lock, v));
+done:
+	preempt_enable();
+	return ret;
+}
+
+EXPORT_SYMBOL(ve_sched_get_iowait_time);
+
+static inline void ve_stop_idle(struct ve_struct *ve,
+		vcpu_t vcpu, cycles_t cycles)
+{
+	struct ve_cpu_stats *ve_stat;
+
+	ve_stat = VE_CPU_STATS(ve, vcpu->id);
+
+	write_seqcount_begin(&ve_stat->stat_lock);
+	if (ve_stat->strt_idle_time) {
+		if (cycles_after(cycles, ve_stat->strt_idle_time)) {
+			if (atomic_read(&vcpu_rq(vcpu)->nr_iowait) == 0)
+				ve_stat->idle_time += cycles -
+					ve_stat->strt_idle_time;
+			else
+				ve_stat->iowait_time += cycles - 
+					ve_stat->strt_idle_time;
+		}
+		ve_stat->strt_idle_time = 0;
+	}
+	write_seqcount_end(&ve_stat->stat_lock);
+}
+
+static inline void ve_strt_idle(struct ve_struct *ve,
+		unsigned int cpu, cycles_t cycles)
+{
+	struct ve_cpu_stats *ve_stat;
+
+	ve_stat = VE_CPU_STATS(ve, cpu);
+
+	write_seqcount_begin(&ve_stat->stat_lock);
+	ve_stat->strt_idle_time = cycles;
+	write_seqcount_end(&ve_stat->stat_lock);
+}
+
+#define ve_nr_running_inc(env, cpu)		do {			\
+		VE_CPU_STATS((env), (cpu))->nr_running++;		\
+	} while (0)
+#define ve_nr_running_dec(env, cpu)		do {			\
+		VE_CPU_STATS((env), (cpu))->nr_running--;		\
+	} while (0)
+
+void ve_sched_attach(struct ve_struct *envid)
+{
+	struct task_struct *tsk;
+	unsigned int cpu;
+
+	tsk = current;
+	preempt_disable();
+	cpu = task_cpu(tsk);
+	ve_nr_running_dec(VE_TASK_INFO(tsk)->owner_env, cpu);
+	ve_nr_running_inc(envid, cpu);
+	preempt_enable();
+}
+EXPORT_SYMBOL(ve_sched_attach);
+
+static inline void write_wakeup_stamp(struct task_struct *p, cycles_t cyc)
+{
+	struct ve_task_info *ti;
+
+	ti = VE_TASK_INFO(p);
+	write_seqcount_begin(&ti->wakeup_lock);
+	ti->wakeup_stamp = cyc;
+	write_seqcount_end(&ti->wakeup_lock);
+}
+
+static inline void update_sched_lat(struct task_struct *t, cycles_t cycles)
+{
+	int cpu;
+	cycles_t ve_wstamp;
+
+	/* safe due to runqueue lock */
+	cpu = smp_processor_id();
+	ve_wstamp = t->ve_task_info.wakeup_stamp;
+
+	if (ve_wstamp && cycles > ve_wstamp) {
+		KSTAT_LAT_PCPU_ADD(&kstat_glob.sched_lat,
+				cpu, cycles - ve_wstamp);
+		KSTAT_LAT_PCPU_ADD(&t->ve_task_info.exec_env->sched_lat_ve,
+				cpu, cycles - ve_wstamp);
+	}
+}
+
+static inline void update_ve_task_info(struct task_struct *prev,
+		cycles_t cycles)
+{
+	if (prev != this_pcpu()->idle) {
+		VE_CPU_STATS(prev->ve_task_info.owner_env,
+				smp_processor_id())->used_time +=
+			cycles - prev->ve_task_info.sched_time;
+
+		prev->ve_task_info.sched_time = cycles;
+	}
+}
+#else /* CONFIG_VE */
+#define ve_nr_running_inc(env, cpu)		do { } while(0)
+#define ve_nr_running_dec(env, cpu)		do { } while(0)
+#define ve_nr_unint_inc(env, cpu)		do { } while(0)
+#define ve_nr_unint_dec(env, cpu)		do { } while(0)
+#define update_ve_task_info(prev, cycles)	do { } while (0)
+#define ve_stop_idle(ve, vcpu, cycles)		do { } while (0)
+#define ve_strt_idle(ve, cpu, cycles)		do { } while (0)
+#endif /* CONFIG_VE */
+
+struct task_nrs_struct {
+	long nr_running;
+	long nr_unint;
+	long nr_stopped;
+	long nr_sleeping;
+	atomic_t nr_iowait;
+	long long nr_switches;
+} ____cacheline_aligned_in_smp;
+
+static struct task_nrs_struct glob_task_nrs[NR_CPUS];
+#define nr_running_inc(cpu)	do { glob_task_nrs[cpu].nr_running++; } while (0)
+#define nr_running_dec(cpu)	do { glob_task_nrs[cpu].nr_running--; } while (0)
+#define nr_unint_inc(cpu)	do { glob_task_nrs[cpu].nr_unint++; } while (0)
+#define nr_unint_dec(cpu)	do { glob_task_nrs[cpu].nr_unint--; } while (0)
+#define nr_stopped_inc(cpu)	do { glob_task_nrs[cpu].nr_stopped++; } while (0)
+#define nr_stopped_dec(cpu)	do { glob_task_nrs[cpu].nr_stopped--; } while (0)
+#define nr_sleeping_inc(cpu)	do { glob_task_nrs[cpu].nr_sleeping++; } while (0)
+#define nr_sleeping_dec(cpu)	do { glob_task_nrs[cpu].nr_sleeping--; } while (0)
+#define nr_iowait_inc(cpu)	do {				\
+		atomic_inc(&glob_task_nrs[cpu].nr_iowait);	\
+	} while (0)
+#define nr_iowait_dec(cpu)	do {				\
+		atomic_dec(&glob_task_nrs[cpu].nr_iowait);	\
+	} while (0)
+
+
+unsigned long nr_zombie = 0;   /* protected by tasklist_lock */
+EXPORT_SYMBOL(nr_zombie);
+
+atomic_t nr_dead = ATOMIC_INIT(0);
+EXPORT_SYMBOL(nr_dead);
+ 
 #ifdef CONFIG_SCHEDSTATS
+
 /*
  * bump this up when changing the output format or the meaning of an existing
  * format, so that tools can adapt (or abort)
  */
 #define SCHEDSTAT_VERSION 12
 
-static int show_schedstat(struct seq_file *seq, void *v)
+static int show_schedstat_vsched(struct seq_file *seq,
+		struct vcpu_scheduler *vsched)
 {
 	int cpu;
 
-	seq_printf(seq, "version %d\n", SCHEDSTAT_VERSION);
-	seq_printf(seq, "timestamp %lu\n", jiffies);
-	for_each_online_cpu(cpu) {
-		struct rq *rq = cpu_rq(cpu);
+	seq_printf(seq, "vsched%d\n", vsched->id);
+
+	for_each_cpu_mask (cpu, vsched_vcpu_online_map(vsched)) {
+		vcpu_t vcpu;
+		struct rq *rq;
 #ifdef CONFIG_SMP
 		struct sched_domain *sd;
 		int dcnt = 0;
 #endif
+
+		vcpu = vsched_vcpu(vsched, cpu);
+		rq = vcpu_rq(vcpu);
 
 		/* runqueue-specific stats */
 		seq_printf(seq,
@@ -456,7 +1337,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 #ifdef CONFIG_SMP
 		/* domain-specific stats */
 		preempt_disable();
-		for_each_domain(cpu, sd) {
+		for_each_domain(vcpu, sd) {
 			enum idle_type itype;
 			char mask_str[NR_CPUS];
 
@@ -483,6 +1364,20 @@ static int show_schedstat(struct seq_file *seq, void *v)
 		preempt_enable();
 #endif
 	}
+	return 0;
+}
+
+static int show_schedstat(struct seq_file *seq, void *v)
+{
+	struct vcpu_scheduler *vsched;
+
+	seq_printf(seq, "version %d\n", SCHEDSTAT_VERSION);
+	seq_printf(seq, "timestamp %lu\n", jiffies);
+
+	spin_lock(&vsched_list_lock);
+	list_for_each_entry (vsched, &vsched_list, list)
+		show_schedstat_vsched(seq, vsched);
+	spin_unlock(&vsched_list_lock);
 	return 0;
 }
 
@@ -643,17 +1538,18 @@ static inline void sched_info_depart(struct task_struct *t)
 static inline void
 __sched_info_switch(struct task_struct *prev, struct task_struct *next)
 {
-	struct rq *rq = task_rq(prev);
+	int cpu;
+	cpu = smp_processor_id();
 
 	/*
 	 * prev now departs the cpu.  It's not interesting to record
 	 * stats about how efficient we were at scheduling the idle
 	 * process, however.
 	 */
-	if (prev != rq->idle)
+	if (prev != idle_task(cpu))
 		sched_info_depart(prev);
 
-	if (next != rq->idle)
+	if (next != idle_task(cpu))
 		sched_info_arrive(next);
 }
 static inline void
@@ -842,11 +1738,25 @@ static int effective_prio(struct task_struct *p)
 static void __activate_task(struct task_struct *p, struct rq *rq)
 {
 	struct prio_array *target = rq->active;
+	cycles_t cycles;
+#ifdef CONFIG_VE
+	struct ve_struct *ve;
 
+	cycles = get_cycles();
+	write_wakeup_stamp(p, cycles);
+	p->ve_task_info.sleep_time += cycles;
+	ve = VE_TASK_INFO(p)->owner_env;
+#endif
 	if (batch_task(p))
 		target = rq->expired;
 	enqueue_task(p, target);
 	inc_nr_running(p, rq);
+	ve_nr_running_inc(ve, task_cpu(p));
+	nr_running_inc(smp_processor_id());
+	if (rq->nr_running == 1) {
+		ve_stop_idle(ve, task_vcpu(p), cycles);
+		vcpu_attach(rq);
+	}
 }
 
 /*
@@ -983,9 +1893,40 @@ static void activate_task(struct task_struct *p, struct rq *rq, int local)
  */
 static void deactivate_task(struct task_struct *p, struct rq *rq)
 {
+	cycles_t cycles;
+#ifdef CONFIG_VE
+	unsigned int cpu, pcpu;
+	struct ve_struct *ve;
+
+	cycles = get_cycles();
+	cpu = task_cpu(p);
+	pcpu = smp_processor_id();
+	ve = p->ve_task_info.owner_env;
+
+	p->ve_task_info.sleep_time -= cycles;
+#endif
+	if (p->state == TASK_UNINTERRUPTIBLE) {
+		ve_nr_unint_inc(ve, cpu);
+		nr_unint_inc(pcpu);
+	}
+	if (p->state == TASK_INTERRUPTIBLE) {
+		rq->nr_sleeping++;
+		nr_sleeping_inc(pcpu);
+	}
+	if (p->state == TASK_STOPPED) {
+		rq->nr_stopped++;
+		nr_stopped_inc(pcpu);
+	}
+
+	ve_nr_running_dec(VE_TASK_INFO(p)->owner_env, cpu);
+	nr_running_dec(pcpu);
 	dec_nr_running(p, rq);
 	dequeue_task(p, p->array);
 	p->array = NULL;
+	if (rq->nr_running == 0) {
+		ve_strt_idle(ve, cpu, cycles);
+		vcpu_detach(rq);
+	}
 }
 
 /*
@@ -1001,18 +1942,22 @@ static void deactivate_task(struct task_struct *p, struct rq *rq)
 #define tsk_is_polling(t) test_tsk_thread_flag(t, TIF_POLLING_NRFLAG)
 #endif
 
+/* FIXME: need to add vsched arg */
 static void resched_task(struct task_struct *p)
 {
 	int cpu;
 
+#if 0
+	/* FIXME: this fails due to idle rq->curre == idle */
 	assert_spin_locked(&task_rq(p)->lock);
+#endif
 
 	if (unlikely(test_tsk_thread_flag(p, TIF_NEED_RESCHED)))
 		return;
 
 	set_tsk_thread_flag(p, TIF_NEED_RESCHED);
 
-	cpu = task_cpu(p);
+	cpu = task_pcpu(p);
 	if (cpu == smp_processor_id())
 		return;
 
@@ -1024,7 +1969,10 @@ static void resched_task(struct task_struct *p)
 #else
 static inline void resched_task(struct task_struct *p)
 {
+#if 0
+	/* FIXME: this fails due to idle rq->curre == idle */
 	assert_spin_locked(&task_rq(p)->lock);
+#endif
 	set_tsk_need_resched(p);
 }
 #endif
@@ -1035,21 +1983,39 @@ static inline void resched_task(struct task_struct *p)
  */
 inline int task_curr(const struct task_struct *p)
 {
-	return cpu_curr(task_cpu(p)) == p;
+	return task_rq(p)->curr == p;
 }
 
-/* Used instead of source_load when we know the type == 0 */
-unsigned long weighted_cpuload(const int cpu)
+/**
+ * idle_cpu - is a given cpu idle currently?
+ * @cpu: the processor in question.
+ */
+inline int idle_cpu(int cpu)
 {
-	return cpu_rq(cpu)->raw_weighted_load;
+#ifdef CONFIG_SCHED_VCPU
+	return pcpu(cpu)->vsched == &idle_vsched;
+#else
+	return vcpu_rq(pcpu(cpu)->vcpu)->curr == pcpu(cpu)->idle;
+#endif
 }
 
-#ifdef CONFIG_SMP
+EXPORT_SYMBOL_GPL(idle_cpu);
+
+static inline int idle_vcpu(vcpu_t cpu)
+{
+#ifdef CONFIG_SCHED_VCPU
+	return !cpu->active;
+#else
+	return idle_cpu(cpu->id);
+#endif
+}
+
+#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_VCPU)
 struct migration_req {
 	struct list_head list;
 
 	struct task_struct *task;
-	int dest_cpu;
+	vcpu_t dest_cpu;
 
 	struct completion done;
 };
@@ -1059,7 +2025,7 @@ struct migration_req {
  * Returns true if you have to wait for migration thread.
  */
 static int
-migrate_task(struct task_struct *p, int dest_cpu, struct migration_req *req)
+migrate_task(struct task_struct *p, vcpu_t dest_cpu, struct migration_req *req)
 {
 	struct rq *rq = task_rq(p);
 
@@ -1067,8 +2033,13 @@ migrate_task(struct task_struct *p, int dest_cpu, struct migration_req *req)
 	 * If the task is not on a runqueue (and not running), then
 	 * it is sufficient to simply update the task's cpu field.
 	 */
+#ifdef CONFIG_SCHED_VCPU
+	BUG_ON(task_vsched(p) == &idle_vsched);
+	BUG_ON(vcpu_vsched(dest_cpu) == &idle_vsched);
+#endif
 	if (!p->array && !task_running(rq, p)) {
-		set_task_cpu(p, dest_cpu);
+		set_task_vsched(p, vcpu_vsched(dest_cpu));
+		set_task_vcpu(p, dest_cpu);
 		return 0;
 	}
 
@@ -1109,6 +2080,7 @@ repeat:
 	}
 	task_rq_unlock(rq, &flags);
 }
+EXPORT_SYMBOL_GPL(wait_task_inactive);
 
 /***
  * kick_process - kick a running thread to enter/exit the kernel
@@ -1128,12 +2100,18 @@ void kick_process(struct task_struct *p)
 	int cpu;
 
 	preempt_disable();
-	cpu = task_cpu(p);
+	cpu = task_pcpu(p);
 	if ((cpu != smp_processor_id()) && task_curr(p))
+		/* FIXME: ??? think over */
+		/* should add something like get_pcpu(cpu)->vcpu->id == task_cpu(p),
+		   but with serialization of vcpu access... */
 		smp_send_reschedule(cpu);
 	preempt_enable();
 }
 
+#endif
+
+#ifdef CONFIG_SMP
 /*
  * Return a low guess at the load of a migration-source cpu weighted
  * according to the scheduling class and "nice" value.
@@ -1141,9 +2119,9 @@ void kick_process(struct task_struct *p)
  * We want to under-estimate the load of migration sources, to
  * balance conservatively.
  */
-static inline unsigned long source_load(int cpu, int type)
+static inline unsigned long source_load(vcpu_t cpu, int type)
 {
-	struct rq *rq = cpu_rq(cpu);
+	struct rq *rq = vcpu_rq(cpu);
 
 	if (type == 0)
 		return rq->raw_weighted_load;
@@ -1155,9 +2133,9 @@ static inline unsigned long source_load(int cpu, int type)
  * Return a high guess at the load of a migration-target cpu weighted
  * according to the scheduling class and "nice" value.
  */
-static inline unsigned long target_load(int cpu, int type)
+static inline unsigned long target_load(vcpu_t cpu, int type)
 {
-	struct rq *rq = cpu_rq(cpu);
+	struct rq *rq = vcpu_rq(cpu);
 
 	if (type == 0)
 		return rq->raw_weighted_load;
@@ -1168,9 +2146,9 @@ static inline unsigned long target_load(int cpu, int type)
 /*
  * Return the average load per task on the cpu's run queue
  */
-static inline unsigned long cpu_avg_load_per_task(int cpu)
+static inline unsigned long cpu_avg_load_per_task(vcpu_t vcpu)
 {
-	struct rq *rq = cpu_rq(cpu);
+	struct rq *rq = vcpu_rq(vcpu);
 	unsigned long n = rq->nr_running;
 
 	return n ? rq->raw_weighted_load / n : SCHED_LOAD_SCALE;
@@ -1181,33 +2159,35 @@ static inline unsigned long cpu_avg_load_per_task(int cpu)
  * domain.
  */
 static struct sched_group *
-find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
+find_idlest_group(struct sched_domain *sd, struct task_struct *p, vcpu_t this_cpu)
 {
 	struct sched_group *idlest = NULL, *this = NULL, *group = sd->groups;
 	unsigned long min_load = ULONG_MAX, this_load = 0;
 	int load_idx = sd->forkexec_idx;
 	int imbalance = 100 + (sd->imbalance_pct-100)/2;
+	struct vcpu_scheduler *vsched;
+	vcpu_t vcpu;
+	int this_pcpu;
 
+	vsched = vcpu_vsched(this_cpu);
+	this_pcpu = vcpu_last_pcpu(this_cpu);
 	do {
 		unsigned long load, avg_load;
 		int local_group;
 		int i;
 
-		/* Skip over this group if it has no CPUs allowed */
-		if (!cpus_intersects(group->cpumask, p->cpus_allowed))
-			goto nextgroup;
-
-		local_group = cpu_isset(this_cpu, group->cpumask);
+		local_group = cpu_isset(this_pcpu, group->cpumask);
 
 		/* Tally up the load of all CPUs in the group */
 		avg_load = 0;
 
 		for_each_cpu_mask(i, group->cpumask) {
+			vcpu = pcpu(i)->vcpu;
 			/* Bias balancing toward cpus of our domain */
 			if (local_group)
-				load = source_load(i, load_idx);
+				load = source_load(vcpu, load_idx);
 			else
-				load = target_load(i, load_idx);
+				load = target_load(vcpu, load_idx);
 
 			avg_load += load;
 		}
@@ -1222,7 +2202,6 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 			min_load = avg_load;
 			idlest = group;
 		}
-nextgroup:
 		group = group->next;
 	} while (group != sd->groups);
 
@@ -1231,26 +2210,42 @@ nextgroup:
 	return idlest;
 }
 
+/* Used instead of source_load when we know the type == 0 */
+static unsigned long weighted_cpuload(vcpu_t vcpu)
+{
+	return vcpu_rq(vcpu)->raw_weighted_load;
+}
+
 /*
  * find_idlest_queue - find the idlest runqueue among the cpus in group.
  */
-static int
-find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
+static vcpu_t 
+find_idlest_cpu(struct sched_group *group, struct task_struct *p, vcpu_t this_cpu)
 {
-	cpumask_t tmp;
 	unsigned long load, min_load = ULONG_MAX;
-	int idlest = -1;
+	cpumask_t vmask;
+	struct vcpu_scheduler *vsched;
+	vcpu_t idlest = (vcpu_t)-1;
+	vcpu_t vcpu;
 	int i;
 
-	/* Traverse only the allowed CPUs */
-	cpus_and(tmp, group->cpumask, p->cpus_allowed);
+	vsched = vcpu_vsched(this_cpu);
+	BUG_ON(vsched != task_vsched(p));
 
-	for_each_cpu_mask(i, tmp) {
-		load = weighted_cpuload(i);
+	cpus_and(vmask, vsched_vcpu_online_map(vsched), p->cpus_allowed);
+	for_each_cpu_mask(i, vmask) {
+		vcpu = vsched_vcpu(vsched, i);
 
-		if (load < min_load || (load == min_load && i == this_cpu)) {
+		if (!cpu_isset(vcpu_last_pcpu(vcpu), group->cpumask))
+			continue;
+		if (vcpu_is_offline(vcpu))
+			continue;
+
+		load = weighted_cpuload(vcpu);
+
+		if (load < min_load || (load == min_load && vcpu == this_cpu)) {
 			min_load = load;
-			idlest = i;
+			idlest = vcpu;
 		}
 	}
 
@@ -1268,7 +2263,7 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
  *
  * preempt must be disabled.
  */
-static int sched_balance_self(int cpu, int flag)
+static vcpu_t sched_balance_self(vcpu_t cpu, int flag)
 {
 	struct task_struct *t = current;
 	struct sched_domain *tmp, *sd = NULL;
@@ -1286,7 +2281,7 @@ static int sched_balance_self(int cpu, int flag)
 	while (sd) {
 		cpumask_t span;
 		struct sched_group *group;
-		int new_cpu;
+		vcpu_t new_cpu;
 		int weight;
 
 		span = sd->span;
@@ -1295,7 +2290,7 @@ static int sched_balance_self(int cpu, int flag)
 			goto nextlevel;
 
 		new_cpu = find_idlest_cpu(group, t, cpu);
-		if (new_cpu == -1 || new_cpu == cpu)
+		if (new_cpu == (vcpu_t)(-1) || new_cpu == cpu)
 			goto nextlevel;
 
 		/* Now try balancing at a lower domain level */
@@ -1326,21 +2321,27 @@ nextlevel:
  * Returns the CPU we should wake onto.
  */
 #if defined(ARCH_HAS_SCHED_WAKE_IDLE)
-static int wake_idle(int cpu, struct task_struct *p)
+static vcpu_t wake_idle(vcpu_t cpu, struct task_struct *p)
 {
-	cpumask_t tmp;
+	cpumask_t vtmp;
 	struct sched_domain *sd;
+	struct vcpu_scheduler *vsched;
 	int i;
 
-	if (idle_cpu(cpu))
+	if (idle_vcpu(cpu))
 		return cpu;
 
+	vsched = vcpu_vsched(cpu);
+	cpus_and(vtmp, vsched_vcpu_online_map(vsched), p->cpus_allowed);
 	for_each_domain(cpu, sd) {
 		if (sd->flags & SD_WAKE_IDLE) {
-			cpus_and(tmp, sd->span, p->cpus_allowed);
-			for_each_cpu_mask(i, tmp) {
-				if (idle_cpu(i))
-					return i;
+			for_each_cpu_mask(i, vtmp) {
+				vcpu_t vcpu;
+				vcpu = vsched_vcpu(vsched, i);
+				if (!cpu_isset(vcpu_last_pcpu(vcpu), sd->span))
+					continue;
+				if (idle_vcpu(vcpu))
+					return vcpu;
 			}
 		}
 		else
@@ -1349,7 +2350,7 @@ static int wake_idle(int cpu, struct task_struct *p)
 	return cpu;
 }
 #else
-static inline int wake_idle(int cpu, struct task_struct *p)
+static inline vcpu_t wake_idle(vcpu_t cpu, struct task_struct *p)
 {
 	return cpu;
 }
@@ -1371,15 +2372,17 @@ static inline int wake_idle(int cpu, struct task_struct *p)
  */
 static int try_to_wake_up(struct task_struct *p, unsigned int state, int sync)
 {
-	int cpu, this_cpu, success = 0;
+	vcpu_t cpu, this_cpu;
+	int success = 0;
 	unsigned long flags;
 	long old_state;
 	struct rq *rq;
 #ifdef CONFIG_SMP
 	struct sched_domain *sd, *this_sd = NULL;
 	unsigned long load, this_load;
-	int new_cpu;
+	vcpu_t new_cpu;
 #endif
+	cpu = NULL;
 
 	rq = task_rq_lock(p, &flags);
 	old_state = p->state;
@@ -1389,8 +2392,8 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state, int sync)
 	if (p->array)
 		goto out_running;
 
-	cpu = task_cpu(p);
-	this_cpu = smp_processor_id();
+	cpu = task_vcpu(p);
+	this_cpu = this_vcpu();
 
 #ifdef CONFIG_SMP
 	if (unlikely(task_running(rq, p)))
@@ -1399,20 +2402,25 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state, int sync)
 	new_cpu = cpu;
 
 	schedstat_inc(rq, ttwu_cnt);
+	/* FIXME: add vsched->last_vcpu array to optimize wakeups in different vsched */
+	if (vcpu_vsched(cpu) != vcpu_vsched(this_cpu))
+		goto out_set_cpu;
 	if (cpu == this_cpu) {
 		schedstat_inc(rq, ttwu_local);
 		goto out_set_cpu;
 	}
 
 	for_each_domain(this_cpu, sd) {
-		if (cpu_isset(cpu, sd->span)) {
+		if (cpu_isset(vcpu_last_pcpu(cpu), sd->span)) {
 			schedstat_inc(sd, ttwu_wake_remote);
 			this_sd = sd;
 			break;
 		}
 	}
 
-	if (unlikely(!cpu_isset(this_cpu, p->cpus_allowed)))
+	if (unlikely(!vcpu_isset(this_cpu, p->cpus_allowed)))
+		goto out_set_cpu;
+	if (vcpu_is_offline(this_cpu))
 		goto out_set_cpu;
 
 	/*
@@ -1470,7 +2478,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state, int sync)
 out_set_cpu:
 	new_cpu = wake_idle(new_cpu, p);
 	if (new_cpu != cpu) {
-		set_task_cpu(p, new_cpu);
+		set_task_vcpu(p, new_cpu);
 		task_rq_unlock(rq, &flags);
 		/* might preempt at this point */
 		rq = task_rq_lock(p, &flags);
@@ -1480,13 +2488,21 @@ out_set_cpu:
 		if (p->array)
 			goto out_running;
 
-		this_cpu = smp_processor_id();
-		cpu = task_cpu(p);
+		this_cpu = this_vcpu();
+		cpu = task_vcpu(p);
 	}
 
 out_activate:
 #endif /* CONFIG_SMP */
-	if (old_state == TASK_UNINTERRUPTIBLE) {
+	if (old_state == TASK_INTERRUPTIBLE) {
+		nr_sleeping_dec(smp_processor_id());
+		rq->nr_sleeping--;
+	} else if (old_state == TASK_STOPPED) {
+		nr_stopped_dec(smp_processor_id());
+		rq->nr_stopped--;
+	} else if (old_state == TASK_UNINTERRUPTIBLE) {
+		nr_unint_dec(smp_processor_id());
+		ve_nr_unint_dec(p->ve_task_info.owner_env, task_cpu(p));
 		rq->nr_uninterruptible--;
 		/*
 		 * Tasks on involuntary sleep don't earn
@@ -1540,17 +2556,45 @@ int fastcall wake_up_state(struct task_struct *p, unsigned int state)
 }
 
 /*
+ * init is special, it is forked from swapper (idle_vsched) and should
+ * belong to default_vsched, so we have to change it's vsched/fairsched manually
+ */
+static void wake_up_init(struct task_struct *p)
+{
+	struct rq *rq;
+	unsigned long flags;
+
+	/* we should change both fairsched node and vsched here */
+	set_task_vsched(p, &default_vsched);
+	set_task_cpu(p, raw_smp_processor_id());
+
+	/*
+	 * can't call wake_up_new_task() directly here,
+	 * since it assumes that a child belongs to the same vsched
+	 */
+	p->state = TASK_RUNNING;
+	p->sleep_avg = 0;
+	p->prio = effective_prio(p);
+
+	rq = task_rq_lock(p, &flags);
+	__activate_task(p, rq);
+	task_rq_unlock(rq, &flags);
+}
+
+/*
  * Perform scheduler related setup for a newly forked process p.
  * p is forked by current.
  */
 void fastcall sched_fork(struct task_struct *p, int clone_flags)
 {
-	int cpu = get_cpu();
-
+	vcpu_t cpu;
+       
+	preempt_disable();
+	cpu = this_vcpu();
 #ifdef CONFIG_SMP
 	cpu = sched_balance_self(cpu, SD_BALANCE_FORK);
 #endif
-	set_task_cpu(p, cpu);
+	set_task_vcpu(p, cpu);
 
 	/*
 	 * We mark the process as running here, but have not actually
@@ -1592,6 +2636,10 @@ void fastcall sched_fork(struct task_struct *p, int clone_flags)
 	p->first_time_slice = 1;
 	current->time_slice >>= 1;
 	p->timestamp = sched_clock();
+#ifdef CONFIG_VE
+	/*cosmetic: sleep till wakeup below*/
+	p->ve_task_info.sleep_time -= get_cycles();
+#endif
 	if (unlikely(!current->time_slice)) {
 		/*
 		 * This case is rare, it happens when the parent has only
@@ -1602,7 +2650,7 @@ void fastcall sched_fork(struct task_struct *p, int clone_flags)
 		scheduler_tick();
 	}
 	local_irq_enable();
-	put_cpu();
+	preempt_enable();
 }
 
 /*
@@ -1616,12 +2664,19 @@ void fastcall wake_up_new_task(struct task_struct *p, unsigned long clone_flags)
 {
 	struct rq *rq, *this_rq;
 	unsigned long flags;
-	int this_cpu, cpu;
+	vcpu_t this_cpu, cpu;
+
+	if (unlikely(p->pid == 1)) {
+		/* FIXME - fastpath */
+		wake_up_init(p);
+		return;
+	}
 
 	rq = task_rq_lock(p, &flags);
 	BUG_ON(p->state != TASK_RUNNING);
-	this_cpu = smp_processor_id();
-	cpu = task_cpu(p);
+	BUG_ON(task_vsched(current) != task_vsched(p));
+	this_cpu = this_vcpu();
+	cpu = task_vcpu(p);
 
 	/*
 	 * We decrease the sleep average of forking parents
@@ -1650,6 +2705,9 @@ void fastcall wake_up_new_task(struct task_struct *p, unsigned long clone_flags)
 				p->array = current->array;
 				p->array->nr_active++;
 				inc_nr_running(p, rq);
+				ve_nr_running_inc(VE_TASK_INFO(p)->owner_env,
+						task_cpu(p));
+				nr_running_inc(smp_processor_id());
 			}
 			set_need_resched();
 		} else
@@ -1663,7 +2721,7 @@ void fastcall wake_up_new_task(struct task_struct *p, unsigned long clone_flags)
 		 */
 		this_rq = rq;
 	} else {
-		this_rq = cpu_rq(this_cpu);
+		this_rq = vcpu_rq(this_cpu);
 
 		/*
 		 * Not the local CPU - must adjust timestamp. This should
@@ -1706,7 +2764,7 @@ void fastcall sched_exit(struct task_struct *p)
 	 * the sleep_avg of the parent as well.
 	 */
 	rq = task_rq_lock(p->parent, &flags);
-	if (p->first_time_slice && task_cpu(p) == task_cpu(p->parent)) {
+	if (p->first_time_slice && task_vcpu(p) == task_vcpu(p->parent)) {
 		p->parent->time_slice += p->time_slice;
 		if (unlikely(p->parent->time_slice > task_timeslice(p)))
 			p->parent->time_slice = task_timeslice(p);
@@ -1773,6 +2831,7 @@ static inline void finish_task_switch(struct rq *rq, struct task_struct *prev)
 	prev_task_flags = prev->flags;
 	finish_arch_switch(prev);
 	finish_lock_switch(rq, prev);
+
 	if (mm)
 		mmdrop(mm);
 	if (unlikely(prev_task_flags & PF_DEAD)) {
@@ -1800,8 +2859,9 @@ asmlinkage void schedule_tail(struct task_struct *prev)
 	preempt_enable();
 #endif
 	if (current->set_child_tid)
-		put_user(current->pid, current->set_child_tid);
+		put_user(virt_pid(current), current->set_child_tid);
 }
+EXPORT_SYMBOL_GPL(schedule_tail);
 
 /*
  * context_switch - switch to the new MM and the new
@@ -1851,20 +2911,26 @@ context_switch(struct rq *rq, struct task_struct *prev,
  */
 unsigned long nr_running(void)
 {
-	unsigned long i, sum = 0;
+	unsigned long i, sum;
 
+	sum = 0;
 	for_each_online_cpu(i)
-		sum += cpu_rq(i)->nr_running;
+		sum += glob_task_nrs[i].nr_running;
+
+	if (unlikely((long)sum < 0))
+		sum = 0;
 
 	return sum;
 }
+EXPORT_SYMBOL(nr_running);
 
 unsigned long nr_uninterruptible(void)
 {
-	unsigned long i, sum = 0;
-
-	for_each_possible_cpu(i)
-		sum += cpu_rq(i)->nr_uninterruptible;
+	unsigned long i, sum;
+	
+	sum = 0;
+	for_each_online_cpu(i)
+		sum += glob_task_nrs[i].nr_unint;
 
 	/*
 	 * Since we read the counters lockless, it might be slightly
@@ -1876,24 +2942,34 @@ unsigned long nr_uninterruptible(void)
 	return sum;
 }
 
+EXPORT_SYMBOL(nr_uninterruptible);
+
 unsigned long long nr_context_switches(void)
 {
 	int i;
-	unsigned long long sum = 0;
+	unsigned long long sum;
+	
+	sum = 0;
+	for_each_online_cpu(i)
+		sum += glob_task_nrs[i].nr_switches;
 
-	for_each_possible_cpu(i)
-		sum += cpu_rq(i)->nr_switches;
-
+	if (unlikely((long)sum < 0))
+		sum = 0;
 	return sum;
 }
 
+EXPORT_SYMBOL(nr_context_switches);
+
 unsigned long nr_iowait(void)
 {
-	unsigned long i, sum = 0;
+	unsigned long i, sum;
+	
+	sum = 0;
+	for_each_online_cpu(i)
+		sum += atomic_read(&glob_task_nrs[i].nr_iowait);
 
-	for_each_possible_cpu(i)
-		sum += atomic_read(&cpu_rq(i)->nr_iowait);
-
+	if (unlikely((long)sum < 0))
+		sum = 0;
 	return sum;
 }
 
@@ -1902,27 +2978,108 @@ unsigned long nr_active(void)
 	unsigned long i, running = 0, uninterruptible = 0;
 
 	for_each_online_cpu(i) {
-		running += cpu_rq(i)->nr_running;
-		uninterruptible += cpu_rq(i)->nr_uninterruptible;
+		running += glob_task_nrs[i].nr_running;
+		uninterruptible += glob_task_nrs[i].nr_unint;
 	}
 
 	if (unlikely((long)uninterruptible < 0))
 		uninterruptible = 0;
+	if (unlikely((long)running < 0))
+		running = 0;
 
 	return running + uninterruptible;
 }
 
-#ifdef CONFIG_SMP
+EXPORT_SYMBOL(nr_iowait);
 
-/*
- * Is this task likely cache-hot:
- */
-static inline int
-task_hot(struct task_struct *p, unsigned long long now, struct sched_domain *sd)
+unsigned long nr_stopped(void)
 {
-	return (long long)(now - p->last_ran) < (long long)sd->cache_hot_time;
+	unsigned long i, sum;
+
+	sum = 0;
+	for_each_online_cpu(i)
+		sum += glob_task_nrs[i].nr_stopped;
+
+	if (unlikely((long)sum < 0))
+		sum = 0;
+
+	return sum;
 }
 
+EXPORT_SYMBOL(nr_stopped);
+
+unsigned long nr_sleeping(void)
+{
+	unsigned long i, sum;
+
+	sum = 0;
+	for_each_online_cpu(i)
+		sum += glob_task_nrs[i].nr_sleeping;
+
+	if (unlikely((long)sum < 0))
+		sum = 0;
+
+	return sum;
+}
+
+EXPORT_SYMBOL(nr_sleeping);
+
+#ifdef CONFIG_VE
+unsigned long nr_running_ve(struct ve_struct *ve)
+{
+	int i;
+	long sum;
+
+	sum = 0;
+	for_each_online_cpu(i)
+		sum += VE_CPU_STATS(ve, i)->nr_running;
+	return (unsigned long)(sum < 0 ? 0 : sum);
+}
+
+EXPORT_SYMBOL(nr_running_ve);
+
+unsigned long nr_uninterruptible_ve(struct ve_struct *ve)
+{
+	int i;
+	long sum;
+
+	sum = 0;
+	for_each_online_cpu(i)
+		sum += VE_CPU_STATS(ve, i)->nr_unint;
+	return (unsigned long)(sum < 0 ? 0 : sum);
+}
+
+EXPORT_SYMBOL(nr_uninterruptible_ve);
+
+unsigned long nr_iowait_ve(void)
+{
+	long sum = 0;
+
+#ifdef CONFIG_SCHED_VCPU
+	int i;
+	struct vcpu_scheduler *vsched;
+	vsched = this_vsched();
+	for_each_cpu_mask(i, vsched_vcpu_online_map(vsched)) {
+		struct rq *rq;
+
+		rq = vcpu_rq(vsched_vcpu(vsched, i));
+		sum += atomic_read(&rq->nr_iowait);
+	}
+#endif
+	return (unsigned long)(sum < 0 ? 0 : sum);
+}
+
+EXPORT_SYMBOL(nr_iowait_ve);
+#endif
+
+#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_VCPU)
+/*
+ * This has calready hanged two times since 2.6.16 started, so
+ * let's keep generic rq_compare() to handle it next time
+ * SCHED_VCPU has many rq-s so somparing of their ->cpu-s
+ * doesn't work as expected.
+ */
+#define rq_compare(rq1, rq2)	(rq1 < rq2)
 /*
  * double_rq_lock - safely lock two runqueues
  *
@@ -1933,16 +3090,25 @@ static void double_rq_lock(struct rq *rq1, struct rq *rq2)
 	__acquires(rq1->lock)
 	__acquires(rq2->lock)
 {
+	BUG_ON(!irqs_disabled());
 	if (rq1 == rq2) {
 		spin_lock(&rq1->lock);
 		__acquire(rq2->lock);	/* Fake it out ;) */
 	} else {
-		if (rq1 < rq2) {
+		if (rq_compare(rq1, rq2)) {
 			spin_lock(&rq1->lock);
+#ifdef CONFIG_SCHED_VCPU
+			spin_lock_nested(&rq2->lock, SINGLE_DEPTH_NESTING);
+#else
 			spin_lock(&rq2->lock);
+#endif
 		} else {
 			spin_lock(&rq2->lock);
+#ifdef CONFIG_SCHED_VCPU
+			spin_lock_nested(&rq1->lock, SINGLE_DEPTH_NESTING);
+#else
 			spin_lock(&rq1->lock);
+#endif
 		}
 	}
 }
@@ -1965,38 +3131,20 @@ static void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 }
 
 /*
- * double_lock_balance - lock the busiest runqueue, this_rq is locked already.
- */
-static void double_lock_balance(struct rq *this_rq, struct rq *busiest)
-	__releases(this_rq->lock)
-	__acquires(busiest->lock)
-	__acquires(this_rq->lock)
-{
-	if (unlikely(!spin_trylock(&busiest->lock))) {
-		if (busiest < this_rq) {
-			spin_unlock(&this_rq->lock);
-			spin_lock(&busiest->lock);
-			spin_lock(&this_rq->lock);
-		} else
-			spin_lock(&busiest->lock);
-	}
-}
-
-/*
  * If dest_cpu is allowed for this process, migrate the task to it.
  * This is accomplished by forcing the cpu_allowed mask to only
  * allow dest_cpu, which will force the cpu onto dest_cpu.  Then
  * the cpu_allowed mask is restored.
  */
-static void sched_migrate_task(struct task_struct *p, int dest_cpu)
+static void sched_migrate_task(struct task_struct *p, vcpu_t dest_cpu)
 {
 	struct migration_req req;
 	unsigned long flags;
 	struct rq *rq;
 
 	rq = task_rq_lock(p, &flags);
-	if (!cpu_isset(dest_cpu, p->cpus_allowed)
-	    || unlikely(cpu_is_offline(dest_cpu)))
+	if (unlikely(!vcpu_isset(dest_cpu, p->cpus_allowed)
+	    || vcpu_is_offline(dest_cpu)))
 		goto out;
 
 	/* force the process onto the specified CPU */
@@ -2015,6 +3163,49 @@ static void sched_migrate_task(struct task_struct *p, int dest_cpu)
 out:
 	task_rq_unlock(rq, &flags);
 }
+#endif
+
+#ifdef CONFIG_SMP
+
+/*
+ * Is this task likely cache-hot:
+ */
+static inline int
+task_hot(struct task_struct *p, unsigned long long now, struct sched_domain *sd)
+{
+	return (long long)(now - p->last_ran) < (long long)sd->cache_hot_time;
+}
+
+/*
+ * double_lock_balance - lock the busiest runqueue, this_rq is locked already.
+ */
+static void double_lock_balance(struct rq *this_rq, struct rq *busiest)
+	__releases(this_rq->lock)
+	__acquires(busiest->lock)
+	__acquires(this_rq->lock)
+{
+	if (unlikely(!irqs_disabled())) {
+		/* printk() doesn't work good under rq->lock */
+		spin_unlock(&this_rq->lock);
+		BUG_ON(1);
+	}
+	if (unlikely(!spin_trylock(&busiest->lock))) {
+		if (rq_compare(busiest, this_rq)) {
+			spin_unlock(&this_rq->lock);
+			spin_lock(&busiest->lock);
+#ifdef CONFIG_SCHED_VCPU
+			spin_lock_nested(&this_rq->lock, SINGLE_DEPTH_NESTING);
+#else
+			spin_lock(&this_rq->lock);
+#endif
+		} else
+#ifdef CONFIG_SCHED_VCPU
+			spin_lock_nested(&busiest->lock, SINGLE_DEPTH_NESTING);
+#else
+			spin_lock(&busiest->lock);
+#endif
+	}
+}
 
 /*
  * sched_exec - execve() is a valuable balancing opportunity, because at
@@ -2022,9 +3213,12 @@ out:
  */
 void sched_exec(void)
 {
-	int new_cpu, this_cpu = get_cpu();
+	vcpu_t new_cpu, this_cpu;
+
+	preempt_disable();
+	this_cpu = this_vcpu();
 	new_cpu = sched_balance_self(this_cpu, SD_BALANCE_EXEC);
-	put_cpu();
+	preempt_enable();
 	if (new_cpu != this_cpu)
 		sched_migrate_task(current, new_cpu);
 }
@@ -2035,11 +3229,31 @@ void sched_exec(void)
  */
 static void pull_task(struct rq *src_rq, struct prio_array *src_array,
 		      struct task_struct *p, struct rq *this_rq,
-		      struct prio_array *this_array, int this_cpu)
+		      struct prio_array *this_array, vcpu_t this_cpu)
 {
+	cycles_t cycles;
+	int cpu;
+#ifdef CONFIG_VE
+	struct ve_struct *ve;
+
+	ve = VE_TASK_INFO(p)->owner_env;
+#endif
+	cycles = get_cycles();
+
 	dequeue_task(p, src_array);
 	dec_nr_running(p, src_rq);
-	set_task_cpu(p, this_cpu);
+	cpu = task_cpu(p);
+	ve_nr_running_dec(ve, cpu);
+	if (src_rq->nr_running == 0) {
+		ve_strt_idle(ve, cpu, cycles);
+		vcpu_detach(src_rq);
+	}
+	set_task_vcpu(p, this_cpu);
+	if (this_rq->nr_running == 0) {
+		ve_stop_idle(ve, this_cpu, cycles);
+		vcpu_attach(this_rq);
+	}
+	ve_nr_running_inc(ve, task_cpu(p));
 	inc_nr_running(p, this_rq);
 	enqueue_task(p, this_array);
 	p->timestamp = (p->timestamp - src_rq->timestamp_last_tick)
@@ -2056,7 +3270,7 @@ static void pull_task(struct rq *src_rq, struct prio_array *src_array,
  * can_migrate_task - may task p from runqueue rq be migrated to this_cpu?
  */
 static
-int can_migrate_task(struct task_struct *p, struct rq *rq, int this_cpu,
+int can_migrate_task(struct task_struct *p, struct rq *rq, vcpu_t this_cpu,
 		     struct sched_domain *sd, enum idle_type idle,
 		     int *all_pinned)
 {
@@ -2066,7 +3280,7 @@ int can_migrate_task(struct task_struct *p, struct rq *rq, int this_cpu,
 	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
 	 * 3) are cache-hot on their current CPU.
 	 */
-	if (!cpu_isset(this_cpu, p->cpus_allowed))
+	if (!vcpu_isset(this_cpu, p->cpus_allowed))
 		return 0;
 	*all_pinned = 0;
 
@@ -2096,7 +3310,7 @@ int can_migrate_task(struct task_struct *p, struct rq *rq, int this_cpu,
  *
  * Called with both runqueues locked.
  */
-static int move_tasks(struct rq *this_rq, int this_cpu, struct rq *busiest,
+static int move_tasks(struct rq *this_rq, vcpu_t this_cpu, struct rq *busiest,
 		      unsigned long max_nr_move, unsigned long max_load_move,
 		      struct sched_domain *sd, enum idle_type idle,
 		      int *all_pinned)
@@ -2108,6 +3322,8 @@ static int move_tasks(struct rq *this_rq, int this_cpu, struct rq *busiest,
 	struct task_struct *tmp;
 	long rem_load_move;
 
+	if (vcpu_is_offline(this_cpu))
+		goto out;
 	if (max_nr_move == 0 || max_load_move == 0)
 		goto out;
 
@@ -2220,7 +3436,7 @@ out:
  * should be moved to restore balance via the imbalance parameter.
  */
 static struct sched_group *
-find_busiest_group(struct sched_domain *sd, int this_cpu,
+find_busiest_group(struct sched_domain *sd, vcpu_t this_cpu,
 		   unsigned long *imbalance, enum idle_type idle, int *sd_idle,
 		   cpumask_t *cpus)
 {
@@ -2236,6 +3452,11 @@ find_busiest_group(struct sched_domain *sd, int this_cpu,
 	unsigned long min_nr_running = ULONG_MAX;
 	struct sched_group *group_min = NULL, *group_leader = NULL;
 #endif
+	struct vcpu_scheduler *vsched;
+	int this_pcpu;
+
+	vsched = vcpu_vsched(this_cpu);
+	this_pcpu = vcpu_last_pcpu(this_cpu);
 
 	max_load = this_load = total_load = total_pwr = 0;
 	busiest_load_per_task = busiest_nr_running = 0;
@@ -2248,32 +3469,31 @@ find_busiest_group(struct sched_domain *sd, int this_cpu,
 		load_idx = sd->idle_idx;
 
 	do {
+		cpumask_t tmp;
 		unsigned long load, group_capacity;
 		int local_group;
 		int i;
 		unsigned long sum_nr_running, sum_weighted_load;
 
-		local_group = cpu_isset(this_cpu, group->cpumask);
+		local_group = cpu_isset(this_pcpu, group->cpumask);
 
 		/* Tally up the load of all CPUs in the group */
 		sum_weighted_load = sum_nr_running = avg_load = 0;
+		cpus_and(tmp, group->cpumask, vsched_pcpu_running_map(vsched));
+		cpus_and(tmp, tmp, *cpus);
 
-		for_each_cpu_mask(i, group->cpumask) {
-			struct rq *rq;
-
-			if (!cpu_isset(i, *cpus))
-				continue;
-
-			rq = cpu_rq(i);
+		for_each_cpu_mask(i, tmp) {
+			vcpu_t vcpu = pcpu(i)->vcpu;
+			struct rq *rq = vcpu_rq(vcpu);
 
 			if (*sd_idle && !idle_cpu(i))
 				*sd_idle = 0;
 
 			/* Bias balancing toward cpus of our domain */
 			if (local_group)
-				load = target_load(i, load_idx);
+				load = target_load(vcpu, load_idx);
 			else
-				load = source_load(i, load_idx);
+				load = source_load(vcpu, load_idx);
 
 			avg_load += load;
 			sum_nr_running += rq->nr_running;
@@ -2361,6 +3581,8 @@ group_next:
 
 	if (!busiest || this_load >= max_load || busiest_nr_running == 0)
 		goto out_balanced;
+	if (!this)
+		this = busiest; /* this->cpu_power is needed below */
 
 	avg_load = (SCHED_LOAD_SCALE * total_load) / total_pwr;
 
@@ -2480,30 +3702,33 @@ ret:
 /*
  * find_busiest_queue - find the busiest runqueue among the cpus in group.
  */
-static struct rq *
-find_busiest_queue(struct sched_group *group, enum idle_type idle,
-		   unsigned long imbalance, cpumask_t *cpus)
+static vcpu_t find_busiest_queue(vcpu_t this_vcpu, struct sched_group *group,
+		enum idle_type idle, unsigned long imbalance, cpumask_t *cpus)
 {
-	struct rq *busiest = NULL, *rq;
+	struct vcpu_scheduler *vsched;
+	vcpu_t vcpu, busiest = NULL;
+	struct rq *rq;
+	cpumask_t tmp;
 	unsigned long max_load = 0;
 	int i;
 
-	for_each_cpu_mask(i, group->cpumask) {
+	vsched = vcpu_vsched(this_vcpu);
+	cpus_and(tmp, group->cpumask, *cpus);
 
-		if (!cpu_isset(i, *cpus))
+	for_each_cpu_mask(i, vsched_vcpu_online_map(vsched)) {
+		vcpu = vsched_vcpu(vsched, i);
+		if (!cpu_isset(vcpu_last_pcpu(vcpu), tmp))
 			continue;
 
-		rq = cpu_rq(i);
-
+		rq = vcpu_rq(vcpu);
 		if (rq->nr_running == 1 && rq->raw_weighted_load > imbalance)
 			continue;
 
 		if (rq->raw_weighted_load > max_load) {
 			max_load = rq->raw_weighted_load;
-			busiest = rq;
+			busiest = vcpu;
 		}
 	}
-
 	return busiest;
 }
 
@@ -2524,11 +3749,12 @@ static inline unsigned long minus_1_or_zero(unsigned long n)
  *
  * Called with this_rq unlocked.
  */
-static int load_balance(int this_cpu, struct rq *this_rq,
+static int load_balance(vcpu_t this_cpu, struct rq *this_rq,
 			struct sched_domain *sd, enum idle_type idle)
 {
 	int nr_moved, all_pinned = 0, active_balance = 0, sd_idle = 0;
 	struct sched_group *group;
+	vcpu_t busiest_vcpu, target_vcpu;
 	unsigned long imbalance;
 	struct rq *busiest;
 	cpumask_t cpus = CPU_MASK_ALL;
@@ -2540,6 +3766,37 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 	schedstat_inc(sd, lb_cnt[idle]);
 
 redo:
+#ifdef CONFIG_SCHED_VCPU
+	/*
+	 * The load_balance() routine can be called on busy or idle PCPU.
+	 *
+	 * 1) For idle PCPU, we are going to find an idle VCPU inside a 
+	 *    busiest vsched, and:
+	 *    - if one is found - we'll try to move task(s) to this VCPU from
+	 *      a busiest one VCPU below using usual balancer algorithms
+	 *      (find_busiest_group() and friends);
+	 *    - if nothing is found - we assume, that this busiest vsched
+	 *	will be rebalanced later on appropriate non-idle
+	 *      rebalance_tick() (FIXME: we may skip some idle rebalance tick's)
+	 *
+ 	 * 2) For busy PCPU, we also need to look for an idle VCPU in a
+	 *    vsched, because find_busiest_group() (below) doesn't operate with
+	 *    detached (i.e. idle) VCPU's. So, if an idle VCPU:
+	 *    - is found (unlikely) - we'll use this VCPU as balancer target.
+	 *      It's quite rare case, because after each successful balancing
+	 *      the idle VCPU will become non-idle;
+	 *    - is not found - continue to use current VCPU (i.e. this_cpu) and
+	 *      try to balance tasks between busy PCPU's that belongs to the
+	 *      current vsched now (see find_busiest_group()).
+	 */
+	target_vcpu = find_idle_target(&cpus);
+	if (target_vcpu)
+		this_cpu = target_vcpu;
+	else if (vcpu_vsched(this_cpu) == &idle_vsched)
+		goto out_balanced;
+
+	this_rq = vcpu_rq(this_cpu);
+#endif
 	group = find_busiest_group(sd, this_cpu, &imbalance, idle, &sd_idle,
 							&cpus);
 	if (!group) {
@@ -2547,13 +3804,17 @@ redo:
 		goto out_balanced;
 	}
 
-	busiest = find_busiest_queue(group, idle, imbalance, &cpus);
-	if (!busiest) {
+	busiest_vcpu = find_busiest_queue(this_cpu, group, idle,
+			imbalance, &cpus);
+	if (!busiest_vcpu) {
 		schedstat_inc(sd, lb_nobusyq[idle]);
 		goto out_balanced;
 	}
 
-	BUG_ON(busiest == this_rq);
+	busiest = vcpu_rq(busiest_vcpu);
+
+	if (unlikely(busiest == this_rq))
+		goto out_balanced;
 
 	schedstat_add(sd, lb_imbalance[idle], imbalance);
 
@@ -2591,7 +3852,7 @@ redo:
 			/* don't kick the migration_thread, if the curr
 			 * task on busiest cpu can't be moved to this_cpu
 			 */
-			if (!cpu_isset(this_cpu, busiest->curr->cpus_allowed)) {
+			if (!vcpu_isset(this_cpu, busiest->curr->cpus_allowed)) {
 				spin_unlock(&busiest->lock);
 				all_pinned = 1;
 				goto out_one_pinned;
@@ -2659,10 +3920,11 @@ out_one_pinned:
  * this_rq is locked.
  */
 static int
-load_balance_newidle(int this_cpu, struct rq *this_rq, struct sched_domain *sd)
+load_balance_newidle(vcpu_t this_cpu, struct rq *this_rq, struct sched_domain *sd)
 {
 	struct sched_group *group;
-	struct rq *busiest = NULL;
+	struct rq *busiest;
+	vcpu_t busiest_vcpu;
 	unsigned long imbalance;
 	int nr_moved = 0;
 	int sd_idle = 0;
@@ -2680,14 +3942,13 @@ redo:
 		goto out_balanced;
 	}
 
-	busiest = find_busiest_queue(group, NEWLY_IDLE, imbalance,
-				&cpus);
-	if (!busiest) {
+	busiest_vcpu = find_busiest_queue(this_cpu, group, NEWLY_IDLE,
+				imbalance, &cpus);
+	if (!busiest_vcpu || busiest_vcpu == this_cpu) {
 		schedstat_inc(sd, lb_nobusyq[NEWLY_IDLE]);
 		goto out_balanced;
 	}
-
-	BUG_ON(busiest == this_rq);
+	busiest = vcpu_rq(busiest_vcpu);
 
 	schedstat_add(sd, lb_imbalance[NEWLY_IDLE], imbalance);
 
@@ -2729,8 +3990,11 @@ out_balanced:
 /*
  * idle_balance is called by schedule() if this_cpu is about to become
  * idle. Attempts to pull tasks from other CPUs.
+ *
+ * Returns whether to continue with another runqueue
+ * instead of switching to idle.
  */
-static void idle_balance(int this_cpu, struct rq *this_rq)
+static int idle_balance(vcpu_t this_cpu, struct rq *this_rq)
 {
 	struct sched_domain *sd;
 
@@ -2738,9 +4002,10 @@ static void idle_balance(int this_cpu, struct rq *this_rq)
 		if (sd->flags & SD_BALANCE_NEWIDLE) {
 			/* If we've pulled tasks over stop searching: */
 			if (load_balance_newidle(this_cpu, this_rq, sd))
-				break;
+				return 1;
 		}
 	}
+	return 0;
 }
 
 /*
@@ -2750,10 +4015,18 @@ static void idle_balance(int this_cpu, struct rq *this_rq)
  * logical imbalances.
  *
  * Called with busiest_rq locked.
+ *
+ * In human terms: balancing of CPU load by moving tasks between CPUs is
+ * performed by 2 methods, push and pull.
+ * In certain places when CPU is found to be idle, it performs pull from busy
+ * CPU to current (idle) CPU.
+ * active_load_balance implements push method, with migration thread getting
+ * scheduled on a busy CPU (hence, making all running processes on this CPU sit
+ * in the queue) and selecting where to push and which task.
  */
-static void active_load_balance(struct rq *busiest_rq, int busiest_cpu)
+static void active_load_balance(struct rq *busiest_rq, vcpu_t busiest_cpu)
 {
-	int target_cpu = busiest_rq->push_cpu;
+	vcpu_t target_cpu = busiest_rq->push_cpu;
 	struct sched_domain *sd;
 	struct rq *target_rq;
 
@@ -2761,7 +4034,7 @@ static void active_load_balance(struct rq *busiest_rq, int busiest_cpu)
 	if (busiest_rq->nr_running <= 1)
 		return;
 
-	target_rq = cpu_rq(target_cpu);
+	target_rq = vcpu_rq(target_cpu);
 
 	/*
 	 * This condition is "impossible", if it occurs
@@ -2773,10 +4046,17 @@ static void active_load_balance(struct rq *busiest_rq, int busiest_cpu)
 	/* move a task from busiest_rq to target_rq */
 	double_lock_balance(busiest_rq, target_rq);
 
+	/*
+	 * Our main candidate where to push our tasks is busiest->push_cpu.
+	 * First, find the domain that spans over both that candidate CPU and
+	 * the current one.
+	 *
+	 * FIXME: make sure that push_cpu doesn't disappear before we get here.
+	 */
 	/* Search for an sd spanning us and the target CPU. */
 	for_each_domain(target_cpu, sd) {
 		if ((sd->flags & SD_LOAD_BALANCE) &&
-		    cpu_isset(busiest_cpu, sd->span))
+		    cpu_isset(vcpu_last_pcpu(busiest_cpu), sd->span))
 				break;
 	}
 
@@ -2809,31 +4089,19 @@ static inline unsigned long cpu_offset(int cpu)
 }
 
 static void
-rebalance_tick(int this_cpu, struct rq *this_rq, enum idle_type idle)
+rebalance_tick(vcpu_t this_cpu, struct rq *this_rq, enum idle_type idle)
 {
-	unsigned long this_load, interval, j = cpu_offset(this_cpu);
+	unsigned long j;
 	struct sched_domain *sd;
-	int i, scale;
 
-	this_load = this_rq->raw_weighted_load;
 
 	/* Update our load: */
-	for (i = 0, scale = 1; i < 3; i++, scale <<= 1) {
-		unsigned long old_load, new_load;
-
-		old_load = this_rq->cpu_load[i];
-		new_load = this_load;
-		/*
-		 * Round up the averaging division if load is increasing. This
-		 * prevents us from getting stuck on 9 if the load is 10, for
-		 * example.
-		 */
-		if (new_load > old_load)
-			new_load += scale-1;
-		this_rq->cpu_load[i] = (old_load*(scale-1) + new_load) / scale;
-	}
+	update_rq_cpu_load(this_rq);
+	j = jiffies + cpu_offset(smp_processor_id());
 
 	for_each_domain(this_cpu, sd) {
+		unsigned long interval;
+
 		if (!(sd->flags & SD_LOAD_BALANCE))
 			continue;
 
@@ -2863,18 +4131,20 @@ rebalance_tick(int this_cpu, struct rq *this_rq, enum idle_type idle)
 /*
  * on UP we do not need to balance between CPUs:
  */
-static inline void rebalance_tick(int cpu, struct rq *rq, enum idle_type idle)
+static inline void rebalance_tick(vcpu_t cpu, struct rq *rq, enum idle_type idle)
 {
 }
-static inline void idle_balance(int cpu, struct rq *rq)
+static inline int idle_balance(vcpu_t cpu, struct rq *rq)
 {
 }
 #endif
 
-static inline int wake_priority_sleeper(struct rq *rq)
+static inline int wake_priority_sleeper(struct rq *rq, struct task_struct *idle)
 {
 	int ret = 0;
 
+#ifndef CONFIG_SCHED_VCPU
+	/* FIXME: can we implement SMT priority sleeping for this? */
 #ifdef CONFIG_SCHED_SMT
 	spin_lock(&rq->lock);
 	/*
@@ -2882,10 +4152,12 @@ static inline int wake_priority_sleeper(struct rq *rq)
 	 * reasons reschedule the idle task to see if it can now run.
 	 */
 	if (rq->nr_running) {
-		resched_task(rq->idle);
+		/* FIXME */
+		resched_task(idle);
 		ret = 1;
 	}
 	spin_unlock(&rq->lock);
+#endif
 #endif
 	return ret;
 }
@@ -2942,6 +4214,15 @@ static inline int expired_starving(struct rq *rq)
 	return 0;
 }
 
+#ifdef CONFIG_VE
+#define update_ve_cpu_time(p, time, tick)	do {		\
+		VE_CPU_STATS((p)->ve_task_info.owner_env,	\
+			task_cpu(p))->time += tick;		\
+	} while (0)
+#else
+#define update_ve_cpu_time(p, time, tick)	do { } while (0)
+#endif
+
 /*
  * Account user cpu time to a process.
  * @p: the process that the cpu time gets accounted to
@@ -2957,10 +4238,13 @@ void account_user_time(struct task_struct *p, cputime_t cputime)
 
 	/* Add user time to cpustat. */
 	tmp = cputime_to_cputime64(cputime);
-	if (TASK_NICE(p) > 0)
+	if (TASK_NICE(p) > 0) {
 		cpustat->nice = cputime64_add(cpustat->nice, tmp);
-	else
+		update_ve_cpu_time(p, nice, tmp);
+	} else {
 		cpustat->user = cputime64_add(cpustat->user, tmp);
+		update_ve_cpu_time(p, user, tmp);
+	}
 }
 
 /*
@@ -2973,20 +4257,22 @@ void account_system_time(struct task_struct *p, int hardirq_offset,
 			 cputime_t cputime)
 {
 	struct cpu_usage_stat *cpustat = &kstat_this_cpu.cpustat;
-	struct rq *rq = this_rq();
+	int this_pcpu = raw_smp_processor_id();
 	cputime64_t tmp;
 
 	p->stime = cputime_add(p->stime, cputime);
+	tmp = cputime_to_cputime64(cputime);
+
+	update_ve_cpu_time(p, system, tmp);
 
 	/* Add system time to cpustat. */
-	tmp = cputime_to_cputime64(cputime);
 	if (hardirq_count() - hardirq_offset)
 		cpustat->irq = cputime64_add(cpustat->irq, tmp);
 	else if (softirq_count())
 		cpustat->softirq = cputime64_add(cpustat->softirq, tmp);
-	else if (p != rq->idle)
+	else if (p != this_pcpu()->idle)
 		cpustat->system = cputime64_add(cpustat->system, tmp);
-	else if (atomic_read(&rq->nr_iowait) > 0)
+	else if ((atomic_read(&glob_task_nrs[this_pcpu].nr_iowait) > 0))
 		cpustat->iowait = cputime64_add(cpustat->iowait, tmp);
 	else
 		cpustat->idle = cputime64_add(cpustat->idle, tmp);
@@ -3005,7 +4291,7 @@ void account_steal_time(struct task_struct *p, cputime_t steal)
 	cputime64_t tmp = cputime_to_cputime64(steal);
 	struct rq *rq = this_rq();
 
-	if (p == rq->idle) {
+	if (p == this_pcpu()->idle) {
 		p->stime = cputime_add(p->stime, steal);
 		if (atomic_read(&rq->nr_iowait) > 0)
 			cpustat->iowait = cputime64_add(cpustat->iowait, tmp);
@@ -3027,16 +4313,21 @@ void scheduler_tick(void)
 	unsigned long long now = sched_clock();
 	struct task_struct *p = current;
 	int cpu = smp_processor_id();
-	struct rq *rq = cpu_rq(cpu);
+	vcpu_t vcpu;
+	struct rq *rq;
 
+	vcpu = this_vcpu();
+	rq = vcpu_rq(vcpu);
 	update_cpu_clock(p, rq, now);
 
 	rq->timestamp_last_tick = now;
 
-	if (p == rq->idle) {
-		if (wake_priority_sleeper(rq))
+	set_tsk_need_resched(p); //FIXME
+
+	if (p == pcpu(cpu)->idle) {
+		if (wake_priority_sleeper(rq, pcpu(cpu)->idle))
 			goto out;
-		rebalance_tick(cpu, rq, SCHED_IDLE);
+		rebalance_tick(vcpu, rq, SCHED_IDLE);
 		return;
 	}
 
@@ -3112,10 +4403,14 @@ void scheduler_tick(void)
 out_unlock:
 	spin_unlock(&rq->lock);
 out:
-	rebalance_tick(cpu, rq, NOT_IDLE);
+	rebalance_tick(vcpu, rq, NOT_IDLE);
 }
 
-#ifdef CONFIG_SCHED_SMT
+#if defined(CONFIG_SCHED_SMT) && !defined(CONFIG_SCHED_VCPU)
+/* FIXME: SMT scheduling
+ * rq->cpu is initialized with rq address if FAIRSCED is on
+ * this is not correct for SMT case
+ */
 static inline void wakeup_busy_runqueue(struct rq *rq)
 {
 	/* If an SMT runqueue is sleeping due to priority reasons wake it up */
@@ -3126,7 +4421,7 @@ static inline void wakeup_busy_runqueue(struct rq *rq)
 /*
  * Called with interrupt disabled and this_rq's runqueue locked.
  */
-static void wake_sleeping_dependent(int this_cpu)
+static void wake_sleeping_dependent(vcpu_t this_cpu)
 {
 	struct sched_domain *tmp, *sd = NULL;
 	int i;
@@ -3172,7 +4467,7 @@ smt_slice(struct task_struct *p, struct sched_domain *sd)
  * need to be obeyed.
  */
 static int
-dependent_sleeper(int this_cpu, struct rq *this_rq, struct task_struct *p)
+dependent_sleeper(vcpu_t this_cpu, struct task_struct *p)
 {
 	struct sched_domain *tmp, *sd = NULL;
 	int ret = 0, i;
@@ -3235,11 +4530,11 @@ unlock:
 	return ret;
 }
 #else
-static inline void wake_sleeping_dependent(int this_cpu)
+static inline void wake_sleeping_dependent(vcpu_t this_cpu)
 {
 }
 static inline int
-dependent_sleeper(int this_cpu, struct rq *this_rq, struct task_struct *p)
+dependent_sleeper(vcpu_t this_cpu, struct task_struct *p)
 {
 	return 0;
 }
@@ -3298,7 +4593,9 @@ asmlinkage void __sched schedule(void)
 	struct list_head *queue;
 	unsigned long long now;
 	unsigned long run_time;
-	int cpu, idx, new_prio;
+	int idx, new_prio;
+	vcpu_t vcpu;
+	cycles_t cycles;
 	long *switch_count;
 	struct rq *rq;
 
@@ -3320,13 +4617,14 @@ need_resched:
 	prev = current;
 	release_kernel_lock(prev);
 need_resched_nonpreemptible:
+	cycles = get_cycles();
 	rq = this_rq();
 
 	/*
 	 * The idle thread is not allowed to schedule!
 	 * Remove this check after it has been exercised a bit.
 	 */
-	if (unlikely(prev == rq->idle) && prev->state != TASK_RUNNING) {
+	if (unlikely(prev == this_pcpu()->idle) && prev->state != TASK_RUNNING) {
 		printk(KERN_ERR "bad: scheduling from the idle thread!\n");
 		dump_stack();
 	}
@@ -3364,17 +4662,32 @@ need_resched_nonpreemptible:
 		}
 	}
 
-	cpu = smp_processor_id();
+	prev->sleep_avg -= run_time;
+	if ((long)prev->sleep_avg <= 0)
+		prev->sleep_avg = 0;
+
+	vcpu = rq_vcpu(rq);
+	if (rq->nr_running && vcpu_is_hot(vcpu))
+		goto same_vcpu;
+
+	if (unlikely(!rq->nr_running))
+		idle_balance(vcpu, rq);
+	vcpu = schedule_vcpu(vcpu, cycles);
+	rq = vcpu_rq(vcpu);
+
 	if (unlikely(!rq->nr_running)) {
-		idle_balance(cpu, rq);
-		if (!rq->nr_running) {
-			next = rq->idle;
-			rq->expired_timestamp = 0;
-			wake_sleeping_dependent(cpu);
-			goto switch_tasks;
-		}
+		next = this_pcpu()->idle;
+		rq->expired_timestamp = 0;
+		wake_sleeping_dependent(vcpu);
+		/*
+		 * wake_sleeping_dependent() might have released
+		 * the runqueue, so break out if we got new
+		 * tasks meanwhile:
+		 */
+		goto switch_tasks;
 	}
 
+same_vcpu:
 	array = rq->active;
 	if (unlikely(!array->nr_active)) {
 		/*
@@ -3410,29 +4723,51 @@ need_resched_nonpreemptible:
 		}
 	}
 	next->sleep_type = SLEEP_NORMAL;
-	if (dependent_sleeper(cpu, rq, next))
-		next = rq->idle;
+	if (dependent_sleeper(vcpu, next))
+		next = this_pcpu()->idle;
+
 switch_tasks:
-	if (next == rq->idle)
+	if (next == this_pcpu()->idle)
 		schedstat_inc(rq, sched_goidle);
 	prefetch(next);
 	prefetch_stack(next);
 	clear_tsk_need_resched(prev);
-	rcu_qsctr_inc(task_cpu(prev));
+	rcu_qsctr_inc(task_pcpu(prev));
 
 	update_cpu_clock(prev, rq, now);
 
-	prev->sleep_avg -= run_time;
-	if ((long)prev->sleep_avg <= 0)
-		prev->sleep_avg = 0;
+	/* updated w/o rq->lock, which is ok due to after-read-checks */
 	prev->timestamp = prev->last_ran = now;
 
 	sched_info_switch(prev, next);
 	if (likely(prev != next)) {
+		cycles_t cycles;
+
+		/* current physical CPU id should be valid after switch */
+		set_task_vcpu(next, vcpu);
+		set_task_pcpu(next, task_pcpu(prev));
+		cycles = get_cycles();
 		next->timestamp = now;
 		rq->nr_switches++;
+		glob_task_nrs[smp_processor_id()].nr_switches++;
 		rq->curr = next;
 		++*switch_count;
+
+#ifdef CONFIG_VE
+		prev->ve_task_info.sleep_stamp = cycles;
+		if (prev->state == TASK_RUNNING && prev != this_pcpu()->idle)
+			write_wakeup_stamp(prev, cycles);
+		update_sched_lat(next, cycles);
+
+		/* because next & prev are protected with
+		 * runqueue lock we may not worry about
+		 * wakeup_stamp and sched_time protection
+		 * (same thing in 'else' branch below)
+		 */
+		update_ve_task_info(prev, cycles);
+		next->ve_task_info.sched_time = cycles;
+		write_wakeup_stamp(next, 0);
+#endif
 
 		prepare_task_switch(rq, next);
 		prev = context_switch(rq, prev, next);
@@ -3443,8 +4778,10 @@ switch_tasks:
 		 * frame will be invalid.
 		 */
 		finish_task_switch(this_rq(), prev);
-	} else
+	} else {
+		update_ve_task_info(prev, get_cycles());
 		spin_unlock_irq(&rq->lock);
+	}
 
 	prev = current;
 	if (unlikely(reacquire_kernel_lock(prev) < 0))
@@ -4030,30 +5367,12 @@ int task_nice(const struct task_struct *p)
 EXPORT_SYMBOL_GPL(task_nice);
 
 /**
- * idle_cpu - is a given cpu idle currently?
- * @cpu: the processor in question.
- */
-int idle_cpu(int cpu)
-{
-	return cpu_curr(cpu) == cpu_rq(cpu)->idle;
-}
-
-/**
- * idle_task - return the idle task for a given cpu.
- * @cpu: the processor in question.
- */
-struct task_struct *idle_task(int cpu)
-{
-	return cpu_rq(cpu)->idle;
-}
-
-/**
  * find_process_by_pid - find a process with a matching PID value.
  * @pid: the pid in question.
  */
 static inline struct task_struct *find_process_by_pid(pid_t pid)
 {
-	return pid ? find_task_by_pid(pid) : current;
+	return pid ? find_task_by_pid_ve(pid) : current;
 }
 
 /* Actually do priority change: must hold rq lock. */
@@ -4114,7 +5433,7 @@ recheck:
 	/*
 	 * Allow unprivileged RT tasks to decrease priority:
 	 */
-	if (!capable(CAP_SYS_NICE)) {
+	if (!capable(CAP_SYS_ADMIN)) {
 		/*
 		 * can't change policy, except between SCHED_NORMAL
 		 * and SCHED_BATCH:
@@ -4491,15 +5810,6 @@ asmlinkage long sys_sched_yield(void)
 	return 0;
 }
 
-static inline int __resched_legal(int expected_preempt_count)
-{
-	if (unlikely(preempt_count() != expected_preempt_count))
-		return 0;
-	if (unlikely(system_state != SYSTEM_RUNNING))
-		return 0;
-	return 1;
-}
-
 static void __cond_resched(void)
 {
 #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
@@ -4519,7 +5829,8 @@ static void __cond_resched(void)
 
 int __sched cond_resched(void)
 {
-	if (need_resched() && __resched_legal(0)) {
+	if (need_resched() && !(preempt_count() & PREEMPT_ACTIVE) &&
+					system_state == SYSTEM_RUNNING) {
 		__cond_resched();
 		return 1;
 	}
@@ -4545,7 +5856,7 @@ int cond_resched_lock(spinlock_t *lock)
 		ret = 1;
 		spin_lock(lock);
 	}
-	if (need_resched() && __resched_legal(1)) {
+	if (need_resched() && system_state == SYSTEM_RUNNING) {
 		spin_release(&lock->dep_map, 1, _THIS_IP_);
 		_raw_spin_unlock(lock);
 		preempt_enable_no_resched();
@@ -4561,7 +5872,7 @@ int __sched cond_resched_softirq(void)
 {
 	BUG_ON(!in_softirq());
 
-	if (need_resched() && __resched_legal(0)) {
+	if (need_resched() && system_state == SYSTEM_RUNNING) {
 		raw_local_irq_disable();
 		_local_bh_enable();
 		raw_local_irq_enable();
@@ -4595,11 +5906,20 @@ EXPORT_SYMBOL(yield);
  */
 void __sched io_schedule(void)
 {
-	struct rq *rq = &__raw_get_cpu_var(runqueues);
+	struct rq *rq = this_rq();
+	int cpu;
 
+#ifdef CONFIG_VE
+	struct ve_struct *ve;
+	ve = current->ve_task_info.owner_env;
+#endif
+
+	cpu = raw_smp_processor_id();
 	delayacct_blkio_start();
 	atomic_inc(&rq->nr_iowait);
+	nr_iowait_inc(cpu);
 	schedule();
+	nr_iowait_dec(cpu);
 	atomic_dec(&rq->nr_iowait);
 	delayacct_blkio_end();
 }
@@ -4607,12 +5927,21 @@ EXPORT_SYMBOL(io_schedule);
 
 long __sched io_schedule_timeout(long timeout)
 {
-	struct rq *rq = &__raw_get_cpu_var(runqueues);
+	struct rq *rq = this_rq();
 	long ret;
+	int cpu;
 
+#ifdef CONFIG_VE
+	struct ve_struct *ve;
+	ve = current->ve_task_info.owner_env;
+#endif
+
+	cpu = raw_smp_processor_id();
 	delayacct_blkio_start();
 	atomic_inc(&rq->nr_iowait);
+	nr_iowait_inc(cpu);
 	ret = schedule_timeout(timeout);
+	nr_iowait_dec(cpu);
 	atomic_dec(&rq->nr_iowait);
 	delayacct_blkio_end();
 	return ret;
@@ -4737,15 +6066,9 @@ static void show_task(struct task_struct *p)
 	printk("%-13.13s %c", p->comm,
 		state < sizeof(stat_nam) - 1 ? stat_nam[state] : '?');
 #if (BITS_PER_LONG == 32)
-	if (state == TASK_RUNNING)
-		printk(" running ");
-	else
-		printk(" %08lX ", thread_saved_pc(p));
+	printk(" %08lX ", (unsigned long)p);
 #else
-	if (state == TASK_RUNNING)
-		printk("  running task   ");
-	else
-		printk(" %016lx ", thread_saved_pc(p));
+	printk(" %016lx ", (unsigned long)p);
 #endif
 #ifdef CONFIG_DEBUG_STACK_USAGE
 	{
@@ -4784,25 +6107,42 @@ void show_state(void)
 #if (BITS_PER_LONG == 32)
 	printk("\n"
 	       "                                               sibling\n");
-	printk("  task             PC      pid father child younger older\n");
+	printk("  task       taskaddr      pid father child younger older\n");
 #else
 	printk("\n"
 	       "                                                       sibling\n");
-	printk("  task                 PC          pid father child younger older\n");
+	printk("  task           taskaddr          pid father child younger older\n");
 #endif
 	read_lock(&tasklist_lock);
-	do_each_thread(g, p) {
+	do_each_thread_all(g, p) {
 		/*
 		 * reset the NMI-timeout, listing all files on a slow
 		 * console might take alot of time:
 		 */
 		touch_nmi_watchdog();
 		show_task(p);
-	} while_each_thread(g, p);
+	} while_each_thread_all(g, p);
 
 	read_unlock(&tasklist_lock);
 	debug_show_all_locks();
 }
+
+#ifdef CONFIG_SCHED_VCPU
+static void init_boot_vcpus(long cpu)
+{
+	if (vsched_vcpu(&idle_vsched, cpu) != NULL)
+		return;
+
+	if (__add_vcpu(&idle_vsched, cpu) != 0)
+		panic("Can't create idle vcpu %ld\n", cpu);
+
+	/* Also create vcpu for default_vsched */
+	if (__add_vcpu(&default_vsched, cpu) != 0)
+		panic("Can't create default vcpu %ld\n", cpu);
+
+	cpu_set(cpu, idle_vsched.pcpu_running_map);
+}
+#endif
 
 /**
  * init_idle - set up an idle thread for a given CPU
@@ -4814,8 +6154,19 @@ void show_state(void)
  */
 void __devinit init_idle(struct task_struct *idle, int cpu)
 {
-	struct rq *rq = cpu_rq(cpu);
+	struct vcpu_scheduler *vsched;
+	vcpu_t vcpu;
+	struct rq *rq;
 	unsigned long flags;
+
+#ifdef CONFIG_SCHED_VCPU
+	init_boot_vcpus(cpu);
+	vsched = &idle_vsched;
+#else
+	vsched = NULL;
+#endif
+	vcpu = vsched_vcpu(vsched, cpu);
+	rq = vcpu_rq(vcpu);
 
 	idle->timestamp = sched_clock();
 	idle->sleep_avg = 0;
@@ -4823,12 +6174,30 @@ void __devinit init_idle(struct task_struct *idle, int cpu)
 	idle->prio = idle->normal_prio = MAX_PRIO;
 	idle->state = TASK_RUNNING;
 	idle->cpus_allowed = cpumask_of_cpu(cpu);
+	set_task_vsched(idle, &idle_vsched);
 	set_task_cpu(idle, cpu);
 
 	spin_lock_irqsave(&rq->lock, flags);
-	rq->curr = rq->idle = idle;
+	pcpu(cpu)->idle = idle;
+	rq->curr = idle;
 #if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW)
 	idle->oncpu = 1;
+#endif
+	set_task_pcpu(idle, cpu);
+	set_task_vsched(idle, vsched);
+	set_task_vcpu(idle, vcpu);
+#ifdef CONFIG_SCHED_VCPU
+	/* the following code is very close to vcpu_get */
+	spin_lock(&fairsched_lock);
+	pcpu(cpu)->vcpu = vcpu;
+	pcpu(cpu)->vsched = vcpu->vsched;
+	list_move_tail(&vcpu->list, &vsched->running_list);
+	__set_bit(cpu, vsched->vcpu_running_map.bits);
+	__set_bit(cpu, vsched->pcpu_running_map.bits);
+	vcpu->running = 1;
+	spin_unlock(&fairsched_lock);
+#else
+	pcpu(cpu)->vcpu = vcpu;
 #endif
 	spin_unlock_irqrestore(&rq->lock, flags);
 
@@ -4849,7 +6218,6 @@ void __devinit init_idle(struct task_struct *idle, int cpu)
  */
 cpumask_t nohz_cpu_mask = CPU_MASK_NONE;
 
-#ifdef CONFIG_SMP
 /*
  * This is how migration works:
  *
@@ -4866,6 +6234,7 @@ cpumask_t nohz_cpu_mask = CPU_MASK_NONE;
  * 7) we wake up and the migration is done.
  */
 
+#ifdef CONFIG_SMP
 /*
  * Change a given task's CPU affinity. Migrate the thread to a
  * proper CPU and schedule it away if the CPU it's executing on
@@ -4881,9 +6250,11 @@ int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
 	unsigned long flags;
 	struct rq *rq;
 	int ret = 0;
+	struct vcpu_scheduler *vsched;
 
 	rq = task_rq_lock(p, &flags);
-	if (!cpus_intersects(new_mask, cpu_online_map)) {
+	vsched = task_vsched(p);
+	if (!cpus_intersects(new_mask, vsched_vcpu_online_map(vsched))) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -4893,7 +6264,8 @@ int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
 	if (cpu_isset(task_cpu(p), new_mask))
 		goto out;
 
-	if (migrate_task(p, any_online_cpu(new_mask), &req)) {
+	if (migrate_task(p, vsched_vcpu(vsched, any_online_cpu(new_mask)),
+								&req)) {
 		/* Need help from migration thread: drop lock and wait. */
 		task_rq_unlock(rq, &flags);
 		wake_up_process(rq->migration_thread);
@@ -4907,6 +6279,7 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(set_cpus_allowed);
+#endif
 
 /*
  * Move (not current) task off this cpu, onto dest cpu.  We're doing
@@ -4919,26 +6292,31 @@ EXPORT_SYMBOL_GPL(set_cpus_allowed);
  *
  * Returns non-zero if task was successfully migrated.
  */
-static int __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
+static int __migrate_task(struct task_struct *p, vcpu_t src_cpu, vcpu_t dest_cpu)
 {
 	struct rq *rq_dest, *rq_src;
 	int ret = 0;
 
-	if (unlikely(cpu_is_offline(dest_cpu)))
+	if (unlikely(vcpu_is_offline(dest_cpu)))
 		return ret;
 
-	rq_src = cpu_rq(src_cpu);
-	rq_dest = cpu_rq(dest_cpu);
+#ifdef CONFIG_SCHED_VCPU
+	BUG_ON(vcpu_vsched(src_cpu) == &idle_vsched);
+#endif
+	rq_src = vcpu_rq(src_cpu);
+	rq_dest = vcpu_rq(dest_cpu);
 
 	double_rq_lock(rq_src, rq_dest);
 	/* Already moved. */
-	if (task_cpu(p) != src_cpu)
+	if (task_vcpu(p) != src_cpu)
 		goto out;
 	/* Affinity changed (again). */
-	if (!cpu_isset(dest_cpu, p->cpus_allowed))
+	if (!vcpu_isset(dest_cpu, p->cpus_allowed))
 		goto out;
 
-	set_task_cpu(p, dest_cpu);
+	BUG_ON(task_running(rq_src, p));
+	set_task_vsched(p, vcpu_vsched(dest_cpu));
+	set_task_vcpu(p, dest_cpu);
 	if (p->array) {
 		/*
 		 * Sync timestamp with rq_dest's before activating.
@@ -4964,13 +6342,21 @@ out:
  * thread migration by bumping thread off CPU then 'pushing' onto
  * another runqueue.
  */
+#if defined (CONFIG_HOTPLUG_CPU) || defined (CONFIG_SCHED_VCPU)
+static void migrate_live_tasks(vcpu_t src_cpu);
+static void migrate_dead_tasks(vcpu_t dead_cpu);
+#endif
 static int migration_thread(void *data)
 {
-	int cpu = (long)data;
 	struct rq *rq;
+	vcpu_t cpu = (vcpu_t)data;
 
-	rq = cpu_rq(cpu);
+	rq = vcpu_rq(cpu);
 	BUG_ON(rq->migration_thread != current);
+	BUG_ON(!rq->migration_thread_init);
+
+	/* migration thread startup has complete */
+	rq->migration_thread_init = 0;
 
 	set_current_state(TASK_INTERRUPTIBLE);
 	while (!kthread_should_stop()) {
@@ -4981,15 +6367,17 @@ static int migration_thread(void *data)
 
 		spin_lock_irq(&rq->lock);
 
-		if (cpu_is_offline(cpu)) {
+		if (vcpu_is_offline(cpu)) {
 			spin_unlock_irq(&rq->lock);
 			goto wait_to_die;
 		}
 
+#ifdef CONFIG_SMP
 		if (rq->active_balance) {
 			active_load_balance(rq, cpu);
 			rq->active_balance = 0;
 		}
+#endif
 
 		head = &rq->migration_queue;
 
@@ -5008,8 +6396,7 @@ static int migration_thread(void *data)
 
 		complete(&req->done);
 	}
-	__set_current_state(TASK_RUNNING);
-	return 0;
+	goto die;
 
 wait_to_die:
 	/* Wait for kthread_stop */
@@ -5018,20 +6405,33 @@ wait_to_die:
 		schedule();
 		set_current_state(TASK_INTERRUPTIBLE);
 	}
+die:
 	__set_current_state(TASK_RUNNING);
+#if defined (CONFIG_HOTPLUG_CPU) || defined (CONFIG_SCHED_VCPU)
+	migrate_live_tasks(cpu);
+	spin_lock_irq(&rq->lock);
+	migrate_dead_tasks(cpu);
+	spin_unlock_irq(&rq->lock);
+#endif
 	return 0;
 }
 
-#ifdef CONFIG_HOTPLUG_CPU
-/* Figure out where task on dead CPU should go, use force if neccessary. */
-static void move_task_off_dead_cpu(int dead_cpu, struct task_struct *p)
+#if defined(CONFIG_HOTPLUG_CPU) || defined(CONFIG_SCHED_VCPU)
+/*
+ * Figure out where task on dead CPU should go, use force if neccessary.
+ * NOTE: interrupts should be disabled by the caller
+ */
+static void move_task_off_dead_cpu(vcpu_t dead_cpu, struct task_struct *p)
 {
 	unsigned long flags;
-	cpumask_t mask;
 	struct rq *rq;
+	struct vcpu_scheduler *vsched;
+	cpumask_t mask;
 	int dest_cpu;
 
 restart:
+#ifndef CONFIG_SCHED_VCPU
+#error "FIXME: wrong code"
 	/* On same node? */
 	mask = node_to_cpumask(cpu_to_node(dead_cpu));
 	cpus_and(mask, mask, p->cpus_allowed);
@@ -5058,10 +6458,27 @@ restart:
 			       "longer affine to cpu%d\n",
 			       p->pid, p->comm, dead_cpu);
 	}
-	if (!__migrate_task(p, dead_cpu, dest_cpu))
+#else
+	vsched = vcpu_vsched(dead_cpu);
+	cpus_and(mask, vsched_vcpu_online_map(vsched), p->cpus_allowed);
+	dest_cpu = any_online_cpu(mask);
+
+	/* On any allowed CPU? */
+	if (dest_cpu == NR_CPUS) {
+		rq = task_rq_lock(p, &flags);
+		cpus_setall(p->cpus_allowed);
+		task_rq_unlock(rq, &flags);
+		dest_cpu = any_online_cpu(vsched_vcpu_online_map(vsched));
+	}
+	/* this can happen only when non-empty node is removed... */
+	if (dest_cpu == NR_CPUS)
+		printk("BUG: no where to move task %s(%d)\n", p->comm, p->pid);
+#endif
+	if (!__migrate_task(p, dead_cpu, vsched_vcpu(vsched, dest_cpu)))
 		goto restart;
 }
 
+#ifdef CONFIG_HOTPLUG_CPU
 /*
  * While a dead CPU has no uninterruptible tasks queued at this point,
  * it might still have a nonzero ->nr_uninterruptible counter, because
@@ -5081,25 +6498,30 @@ static void migrate_nr_uninterruptible(struct rq *rq_src)
 	double_rq_unlock(rq_src, rq_dest);
 	local_irq_restore(flags);
 }
+#endif
 
 /* Run through task list and migrate tasks from the dead cpu. */
-static void migrate_live_tasks(int src_cpu)
+static void migrate_live_tasks(vcpu_t src_cpu)
 {
 	struct task_struct *p, *t;
 
+	BUG_ON(vcpu_isset(src_cpu, vsched_vcpu_online_map(vcpu_vsched(src_cpu))));
 	write_lock_irq(&tasklist_lock);
 
-	do_each_thread(t, p) {
+	do_each_thread_all(t, p) {
 		if (p == current)
 			continue;
+		if (p == vcpu_rq(src_cpu)->migration_thread)
+			continue;
 
-		if (task_cpu(p) == src_cpu)
+		if (task_vcpu(p) == src_cpu)
 			move_task_off_dead_cpu(src_cpu, p);
-	} while_each_thread(t, p);
+	} while_each_thread_all(t, p);
 
 	write_unlock_irq(&tasklist_lock);
 }
 
+#ifdef CONFIG_HOTPLUG_CPU
 /* Schedules idle task to be the next runnable task on current CPU.
  * It does so by boosting its priority to highest possible and adding it to
  * the _front_ of the runqueue. Used by CPU offline code.
@@ -5123,6 +6545,9 @@ void sched_idle_next(void)
 	__setscheduler(p, SCHED_FIFO, MAX_RT_PRIO-1);
 
 	/* Add idle task to the _front_ of its priority queue: */
+#ifdef CONFIG_SCHED_VCPU
+#error "FIXME: VCPU vs. HOTPLUG: fix the code below"
+#endif
 	__activate_idle_task(p, rq);
 
 	spin_unlock_irqrestore(&rq->lock, flags);
@@ -5142,10 +6567,12 @@ void idle_task_exit(void)
 		switch_mm(mm, &init_mm, current);
 	mmdrop(mm);
 }
+#endif /* CONFIG_HOTPLUG_CPU */
 
-static void migrate_dead(unsigned int dead_cpu, struct task_struct *p)
+/* called under rq->lock with disabled interrupts */
+static void migrate_dead(vcpu_t dead_cpu, struct task_struct *p)
 {
-	struct rq *rq = cpu_rq(dead_cpu);
+	struct rq *rq = vcpu_rq(dead_cpu);
 
 	/* Must be exiting, otherwise would be on tasklist. */
 	BUG_ON(p->exit_state != EXIT_ZOMBIE && p->exit_state != EXIT_DEAD);
@@ -5159,88 +6586,148 @@ static void migrate_dead(unsigned int dead_cpu, struct task_struct *p)
 	 * Drop lock around migration; if someone else moves it,
 	 * that's OK.  No task can be added to this CPU, so iteration is
 	 * fine.
+	 * NOTE: interrupts should be left disabled  --dev@
 	 */
-	spin_unlock_irq(&rq->lock);
+	spin_unlock(&rq->lock);
 	move_task_off_dead_cpu(dead_cpu, p);
-	spin_lock_irq(&rq->lock);
+	spin_lock(&rq->lock);
 
 	put_task_struct(p);
 }
 
 /* release_task() removes task from tasklist, so we won't find dead tasks. */
-static void migrate_dead_tasks(unsigned int dead_cpu)
+static void migrate_dead_tasks(vcpu_t dead_cpu)
 {
-	struct rq *rq = cpu_rq(dead_cpu);
+	struct rq *rq = vcpu_rq(dead_cpu);
 	unsigned int arr, i;
 
 	for (arr = 0; arr < 2; arr++) {
 		for (i = 0; i < MAX_PRIO; i++) {
 			struct list_head *list = &rq->arrays[arr].queue[i];
-
-			while (!list_empty(list))
-				migrate_dead(dead_cpu, list_entry(list->next,
-					     struct task_struct, run_list));
+			struct task_struct *tsk;
+restart:
+			list_for_each_entry(tsk, list, run_list) {
+				if (tsk == rq->migration_thread)
+					continue;
+				migrate_dead(dead_cpu, tsk);
+				goto restart;
+			}
 		}
 	}
 }
-#endif /* CONFIG_HOTPLUG_CPU */
+#endif /* CONFIG_HOTPLUG_CPU || CONFIG_SCHED_VCPU */
+
+static void migration_thread_bind(struct task_struct *k, vcpu_t cpu)
+{
+	BUG_ON(k->state != TASK_INTERRUPTIBLE);
+	/* Must have done schedule() in kthread() before we set_task_cpu */
+	wait_task_inactive(k);
+
+	set_task_vsched(k, vcpu_vsched(cpu));
+	set_task_vcpu(k, cpu);
+	k->cpus_allowed = cpumask_of_cpu(cpu->id);
+}
+
+static void migration_thread_stop(struct rq *rq)
+{
+	struct task_struct *thread;
+
+	thread = rq->migration_thread;
+	if (thread == NULL)
+		return;
+
+	/*
+	 * Wait until migration thread has really started, i.e.
+	 * migration_thread() function has been called. It's important,
+	 * because migration thread can be still sleeping after creation, but
+	 * it's vcpu is already marked as online, and tasks can migrate to this
+	 * cpu. If we kill non-started migration thread now, migration_thread()
+	 * function will not be called at all (see how kthread() works).
+	 * And if migration_thread() is not called, there is no way to move 
+	 * tasks away from thread's vcpu. So, rq->nr_running will be != 0 even
+	 * after migration thread is dead.
+	 */
+	while (rq->migration_thread_init)
+		yield();
+
+	get_task_struct(thread);
+	if (kthread_stop(thread) == -EINTR)
+		/*
+		 * Somebody else has called kthread_stop() without 
+		 * waiting for migration thread init has complete.
+		 */
+		BUG_ON(1);
+
+	/* We MUST ensure, that the do_exit of the migration thread is
+	 * completed and it will never scheduled again before vsched_destroy.
+	 * The task with flag PF_DEAD if unscheduled will never receive
+	 * CPU again. */
+	while (!(thread->flags & PF_DEAD) || task_running(rq, thread))
+		yield();
+	put_task_struct(thread);
+
+	rq->migration_thread = NULL;
+}
 
 /*
  * migration_call - callback that gets triggered when a CPU is added.
  * Here we can start up the necessary migration thread for the new CPU.
  */
-static int __cpuinit
-migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
+static int vmigration_call(struct notifier_block *nfb, unsigned long action,
+			  void *hcpu)
 {
 	struct task_struct *p;
-	int cpu = (long)hcpu;
+	vcpu_t cpu = (vcpu_t)hcpu;
 	unsigned long flags;
 	struct rq *rq;
 
 	switch (action) {
 	case CPU_UP_PREPARE:
-		p = kthread_create(migration_thread, hcpu, "migration/%d",cpu);
+		p = kthread_create(migration_thread, hcpu, "migration/%d/%d", 
+			vsched_id(vcpu_vsched(cpu)), cpu->id);
 		if (IS_ERR(p))
 			return NOTIFY_BAD;
 		p->flags |= PF_NOFREEZE;
-		kthread_bind(p, cpu);
-		/* Must be high prio: stop_machine expects to yield to it. */
+
+		migration_thread_bind(p, cpu);
 		rq = task_rq_lock(p, &flags);
+		/* Must be high prio: stop_machine expects to yield to it. */
 		__setscheduler(p, SCHED_FIFO, MAX_RT_PRIO-1);
 		task_rq_unlock(rq, &flags);
-		cpu_rq(cpu)->migration_thread = p;
+		vcpu_rq(cpu)->migration_thread = p;
+		vcpu_rq(cpu)->migration_thread_init = 1;
+		cpu_set(cpu->id, vsched_vcpu_online_map(vcpu_vsched(cpu)));
 		break;
 
 	case CPU_ONLINE:
 		/* Strictly unneccessary, as first user will wake it. */
-		wake_up_process(cpu_rq(cpu)->migration_thread);
+		wake_up_process(vcpu_rq(cpu)->migration_thread);
 		break;
 
-#ifdef CONFIG_HOTPLUG_CPU
+#if defined(CONFIG_HOTPLUG_CPU) && defined(CONFIG_SCHED_VCPU)
+#error "FIXME: CPU down code doesn't work yet with VCPUs"
+#endif
 	case CPU_UP_CANCELED:
-		if (!cpu_rq(cpu)->migration_thread)
+		if (!vcpu_rq(cpu)->migration_thread)
 			break;
 		/* Unbind it from offline cpu so it can run.  Fall thru. */
-		kthread_bind(cpu_rq(cpu)->migration_thread,
-			     any_online_cpu(cpu_online_map));
-		kthread_stop(cpu_rq(cpu)->migration_thread);
-		cpu_rq(cpu)->migration_thread = NULL;
+		migration_thread_bind(vcpu_rq(cpu)->migration_thread, this_vcpu());
+		migration_thread_stop(vcpu_rq(cpu));
 		break;
 
 	case CPU_DEAD:
-		migrate_live_tasks(cpu);
-		rq = cpu_rq(cpu);
-		kthread_stop(rq->migration_thread);
-		rq->migration_thread = NULL;
+		rq = vcpu_rq(cpu);
+		migration_thread_stop(rq);
+#ifdef CONFIG_HOTPLUG_CPU
 		/* Idle task back to normal (off runqueue, low prio) */
 		rq = task_rq_lock(rq->idle, &flags);
 		deactivate_task(rq->idle, rq);
 		rq->idle->static_prio = MAX_PRIO;
 		__setscheduler(rq->idle, SCHED_NORMAL, 0);
-		migrate_dead_tasks(cpu);
 		task_rq_unlock(rq, &flags);
 		migrate_nr_uninterruptible(rq);
 		BUG_ON(rq->nr_running != 0);
+#endif
 
 		/* No need to migrate the tasks: it was best-effort if
 		 * they didn't do lock_cpu_hotplug().  Just wake up
@@ -5256,15 +6743,25 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 		}
 		spin_unlock_irq(&rq->lock);
 		break;
-#endif
 	}
 	return NOTIFY_OK;
+}
+
+static int migration_call(struct notifier_block *nfb, unsigned long action,
+			  void *hcpu)
+{
+#ifdef CONFIG_SCHED_VCPU
+	if (action == CPU_UP_PREPARE)
+		init_boot_vcpus((long)hcpu);
+#endif
+	/* we need to translate pcpu to vcpu */
+	return vmigration_call(nfb, action, vsched_default_vcpu((long)hcpu));
 }
 
 /* Register at highest priority so that task migration (migrate_all_tasks)
  * happens before everything else.
  */
-static struct notifier_block __cpuinitdata migration_notifier = {
+static struct notifier_block migration_notifier = {
 	.notifier_call = migration_call,
 	.priority = 10
 };
@@ -5280,7 +6777,6 @@ int __init migration_init(void)
 
 	return 0;
 }
-#endif
 
 #ifdef CONFIG_SMP
 #undef SCHED_DOMAIN_DEBUG
@@ -5308,7 +6804,7 @@ static void sched_domain_debug(struct sched_domain *sd, int cpu)
 		printk(KERN_DEBUG);
 		for (i = 0; i < level + 1; i++)
 			printk(" ");
-		printk("domain %d: ", level);
+		printk("domain %d, flags %x: ", level, sd->flags);
 
 		if (!(sd->flags & SD_LOAD_BALANCE)) {
 			printk("does not load-balance\n");
@@ -5433,7 +6929,7 @@ sd_parent_degenerate(struct sched_domain *sd, struct sched_domain *parent)
  */
 static void cpu_attach_domain(struct sched_domain *sd, int cpu)
 {
-	struct rq *rq = cpu_rq(cpu);
+	struct rq *rq = vcpu_rq(vsched_default_vcpu(cpu));
 	struct sched_domain *tmp;
 
 	/* Remove the sched domains which do not contribute to scheduling. */
@@ -5450,6 +6946,7 @@ static void cpu_attach_domain(struct sched_domain *sd, int cpu)
 
 	sched_domain_debug(sd, cpu);
 
+	rcu_assign_pointer(pcpu(cpu)->sd, sd);
 	rcu_assign_pointer(rq->sd, sd);
 }
 
@@ -5628,7 +7125,7 @@ static unsigned long domain_distance(int cpu1, int cpu2)
 	unsigned long distance = 0;
 	struct sched_domain *sd;
 
-	for_each_domain(cpu1, sd) {
+	for_each_pdomain(pcpu(cpu1)->sd, sd) {
 		WARN_ON(!cpu_isset(cpu1, sd->span));
 		if (cpu_isset(cpu2, sd->span))
 			return distance;
@@ -5950,7 +7447,7 @@ static void calibrate_migration_costs(const cpumask_t *cpu_map)
 	 */
 	for_each_cpu_mask(cpu, *cpu_map) {
 		distance = 0;
-		for_each_domain(cpu, sd) {
+		for_each_pdomain(pcpu(cpu)->sd, sd) {
 			sd->cache_hot_time = migration_cost[distance];
 			distance++;
 		}
@@ -6577,6 +8074,9 @@ static int arch_init_sched_domains(const cpumask_t *cpu_map)
 
 	err = build_sched_domains(&cpu_default_map);
 
+#ifdef CONFIG_SCHED_VCPU
+	nr_online_pcpus = num_online_cpus();
+#endif
 	return err;
 }
 
@@ -6762,44 +8262,516 @@ int in_sched_functions(unsigned long addr)
 		&& addr < (unsigned long)__sched_text_end);
 }
 
-void __init sched_init(void)
+static void init_rq(struct rq *rq, int cpu)
 {
-	int i, j, k;
+	int j, k;
+	struct prio_array *array;
 
-	for_each_possible_cpu(i) {
-		struct prio_array *array;
-		struct rq *rq;
-
-		rq = cpu_rq(i);
-		spin_lock_init(&rq->lock);
-		lockdep_set_class(&rq->lock, &rq->rq_lock_key);
-		rq->nr_running = 0;
-		rq->active = rq->arrays;
-		rq->expired = rq->arrays + 1;
-		rq->best_expired_prio = MAX_PRIO;
+	spin_lock_init(&rq->lock);
+	rq->nr_running = 0;
+#ifndef CONFIG_SCHED_VCPU
+	lockdep_set_class(&rq->lock, &rq->rq_lock_key);
+#endif
+	rq->active = rq->arrays;
+	rq->expired = rq->arrays + 1;
+	rq->best_expired_prio = MAX_PRIO;
 
 #ifdef CONFIG_SMP
-		rq->sd = NULL;
-		for (j = 1; j < 3; j++)
-			rq->cpu_load[j] = 0;
-		rq->active_balance = 0;
-		rq->push_cpu = 0;
-		rq->cpu = i;
-		rq->migration_thread = NULL;
-		INIT_LIST_HEAD(&rq->migration_queue);
+	rq->sd = NULL;
+	for (j = 0; j < 3; j++)
+		rq->cpu_load[j] = 0;
+	rq->active_balance = 0;
 #endif
-		atomic_set(&rq->nr_iowait, 0);
+	rq->push_cpu = NULL;
+	rq->migration_thread = NULL;
+	INIT_LIST_HEAD(&rq->migration_queue);
+	atomic_set(&rq->nr_iowait, 0);
 
-		for (j = 0; j < 2; j++) {
-			array = rq->arrays + j;
-			for (k = 0; k < MAX_PRIO; k++) {
-				INIT_LIST_HEAD(array->queue + k);
-				__clear_bit(k, array->bitmap);
-			}
-			// delimiter for bitsearch
-			__set_bit(MAX_PRIO, array->bitmap);
+	for (j = 0; j < 2; j++) {
+		array = rq->arrays + j;
+		for (k = 0; k < MAX_PRIO; k++) {
+			INIT_LIST_HEAD(array->queue + k);
+			__clear_bit(k, array->bitmap);
+		}
+		// delimiter for bitsearch
+		__set_bit(MAX_PRIO, array->bitmap);
+	}
+}
+
+static void init_vcpu(vcpu_t vcpu, int id)
+{
+	memset(vcpu, 0, sizeof(struct vcpu_struct));
+	vcpu->id = id;
+	vcpu_last_pcpu(vcpu) = id;
+	init_rq(vcpu_rq(vcpu), id);
+
+	/* ->curr can be dereferenced in try_to_wakeup(), so let it be idle */
+	vcpu_rq(vcpu)->curr = &init_task;
+}
+
+#if defined(CONFIG_SCHED_VCPU) || defined(CONFIG_FAIRSCHED)
+/* both rq and vsched lock should be taken */
+static void __install_vcpu(struct vcpu_scheduler *vsched, vcpu_t vcpu)
+{
+	int id;
+
+	id = vcpu->id;
+	vcpu->vsched = vsched;
+	vsched->vcpu[id] = vcpu;
+	vcpu_last_pcpu(vcpu) = id;
+	wmb();
+	/* FIXME: probably locking should be reworked, e.g.
+	   we don't have corresponding rmb(), so we need to update mask
+	   only after quiscent state */
+	/* init_boot_vcpu() should be remade if RCU is used here */
+	list_add(&vcpu->list, &vsched->idle_list);
+	vsched->num_online_vcpus++;
+}
+
+static int install_vcpu(vcpu_t vcpu, struct vcpu_scheduler *vsched)
+{
+	struct rq *rq;
+	unsigned long flags;
+	int res = 0;
+
+	rq = vcpu_rq(vcpu);
+	spin_lock_irqsave(&rq->lock, flags);
+	spin_lock(&fairsched_lock);
+
+	if (vsched->vcpu[vcpu->id] != NULL)
+		res = -EBUSY;
+	else
+		__install_vcpu(vsched, vcpu);
+
+	spin_unlock(&fairsched_lock);
+	spin_unlock_irqrestore(&rq->lock, flags);
+	return res;
+}
+
+static int __add_vcpu(struct vcpu_scheduler *vsched, int id)
+{
+	vcpu_t vcpu;
+	int res;
+
+	res = -ENOMEM;
+	vcpu = kmalloc(sizeof(struct vcpu_struct), GFP_KERNEL);
+	if (vcpu == NULL)
+		goto out;
+
+	init_vcpu(vcpu, id);
+	res = install_vcpu(vcpu, vsched);
+	if (res < 0)
+		goto out_free;
+	return 0;
+
+out_free:
+	kfree(vcpu);
+out:
+	return res;
+}
+
+void vsched_init(struct vcpu_scheduler *vsched, int id)
+{
+	memset(vsched, 0, sizeof(*vsched));
+
+	INIT_LIST_HEAD(&vsched->idle_list);
+	INIT_LIST_HEAD(&vsched->active_list);
+	INIT_LIST_HEAD(&vsched->running_list);
+	vsched->num_online_vcpus = 0;
+	vsched->vcpu_online_map = CPU_MASK_NONE;
+	vsched->vcpu_running_map = CPU_MASK_NONE;
+	vsched->pcpu_running_map = CPU_MASK_NONE;
+	vsched->id = id;
+
+	spin_lock(&vsched_list_lock);
+	list_add(&vsched->list, &vsched_list);
+	spin_unlock(&vsched_list_lock);
+}
+
+#ifdef CONFIG_FAIRSCHED
+int scale_vcpu_frequency = 1;
+EXPORT_SYMBOL(scale_vcpu_frequency);
+
+unsigned long ve_scale_khz(unsigned long khz)
+{
+	struct fairsched_node *node;
+	int cpus;
+	unsigned long rate;
+
+	if (!scale_vcpu_frequency)
+		return khz;
+
+	rate = fairsched_nr_cpus << FSCHRATE_SHIFT;
+
+	/*
+	 * Ideally fairsched node should be taken from the current ve_struct.
+	 * However, to simplify the code and locking, it is taken from current
+	 * (currently fairsched_node can be changed only for a sleeping task).
+	 * That means that VE0 processes moved to some special node will get
+	 * fake CPU speed, but that shouldn't be a big problem.
+	 */
+	preempt_disable();
+	node = current->vsched->node;
+	cpus = node->vcpus;
+	if (node->rate_limited)
+		rate = node->rate;
+	preempt_enable();
+
+	return min((unsigned long long)khz,
+		((unsigned long long)khz * (rate / cpus)) >> FSCHRATE_SHIFT);
+}
+
+/* No locks supposed to be held */
+static void vsched_del_vcpu(vcpu_t vcpu, int empty);
+static int vsched_add_vcpu(struct vcpu_scheduler *vsched)
+{
+	int res, err;
+	vcpu_t vcpu;
+	int id;
+	static DECLARE_MUTEX(id_mutex);
+
+	down(&id_mutex);
+	id = find_first_zero_bit(vsched->vcpu_online_map.bits, NR_CPUS);
+	if (id >= NR_CPUS) {
+		err = -EBUSY;
+		goto out_up;
+	}
+
+	err = __add_vcpu(vsched, id);
+	if (err < 0)
+		goto out_up;
+	memset(VE_CPU_STATS(vsched->node->owner_env, id), 0,
+			sizeof(struct ve_cpu_stats));
+	/* Kick idle time collecting logic */
+	ve_strt_idle(vsched->node->owner_env, id, get_cycles());
+
+	vcpu = vsched_vcpu(vsched, id);
+	err = -ENOMEM;
+
+	res = vmigration_call(&migration_notifier, CPU_UP_PREPARE, vcpu);
+	if (res != NOTIFY_OK)
+		goto out_del_up;
+
+	res = vmigration_call(&migration_notifier, CPU_ONLINE, vcpu);
+	if (res != NOTIFY_OK)
+		goto out_cancel_del_up;
+
+	err = 0;
+
+out_up:
+	up(&id_mutex);
+	return err;
+
+out_cancel_del_up:
+	vmigration_call(&migration_notifier, CPU_UP_CANCELED, vcpu);
+out_del_up:
+	vsched_del_vcpu(vcpu, 0);
+	goto out_up;
+}
+
+/* Move stat from dead vcpu to any online vcpu */
+void move_vcpu_stat(vcpu_t src_vcpu)
+{
+	struct vcpu_scheduler *vsched;
+	struct ve_cpu_stats *src_stat, *dst_stat;
+	struct rq *rq_src, *rq_dst;
+	unsigned long flags;
+	int dst_cpu;
+
+	rq_src = vcpu_rq(src_vcpu);
+	vsched = vcpu_vsched(src_vcpu);
+
+	dst_cpu = any_online_cpu(vsched_vcpu_online_map(vsched));
+	if (dst_cpu == NR_CPUS)
+		return;
+
+	rq_dst = vcpu_rq(vsched_vcpu(vsched, dst_cpu));
+
+	local_irq_save(flags);
+	double_rq_lock(rq_src, rq_dst);
+
+	src_stat = VE_CPU_STATS(vsched->node->owner_env, src_vcpu->id);
+	dst_stat = VE_CPU_STATS(vsched->node->owner_env, dst_cpu);
+	dst_stat->nr_running += src_stat->nr_running;
+	dst_stat->nr_unint += src_stat->nr_unint;
+	src_stat->nr_running = 0;
+	src_stat->nr_unint = 0;
+
+	double_rq_unlock(rq_src, rq_dst);
+	local_irq_restore(flags);
+}
+
+static void vsched_del_vcpu(vcpu_t vcpu, int empty)
+{
+	struct vcpu_scheduler *vsched;
+	struct rq *rq;
+
+	vsched = vcpu_vsched(vcpu);
+	rq = vcpu_rq(vcpu);
+
+	spin_lock_irq(&rq->lock);
+	spin_lock(&fairsched_lock);
+	cpu_clear(vcpu->id, vsched->vcpu_online_map);
+	vsched->num_online_vcpus--;
+	spin_unlock(&fairsched_lock);
+	spin_unlock_irq(&rq->lock);
+
+	/* no need to syncronize, if no tasks at all */
+	if (!empty)
+		synchronize_sched();
+
+	/*
+        * FIXME: ideas for VCPU hotplug:
+        *
+        * - push_cpu should be checked/cleanuped
+        * - serialization
+        */
+
+	/*
+	 * all tasks should migrate from this VCPU somewhere,
+	 * also, since this moment VCPU is offline, so migration_thread
+	 * won't accept any new tasks...
+	 */
+	vmigration_call(&migration_notifier, CPU_DEAD, vcpu);
+	BUG_ON(rq->nr_running != 0);
+
+	/* vcpu_put() is called after deactivate_task. This loop makes sure
+	 * that vcpu_put() was finished and vcpu can be freed */
+	while ((volatile int)vcpu->running)
+		yield();
+
+	BUG_ON(vcpu->active);	/* should be in idle_list */
+	BUG_ON(vcpu_rq(vcpu)->prev_mm != NULL);
+
+	spin_lock_irq(&fairsched_lock);
+	list_del(&vcpu->list);
+	vsched_vcpu(vsched, vcpu->id) = NULL;
+	spin_unlock_irq(&fairsched_lock);
+
+	move_vcpu_stat(vcpu);
+	kfree(vcpu);
+}
+
+int vsched_set_vcpus(struct vcpu_scheduler *vsched, unsigned int vcpus)
+{
+	int i, ret = 0;
+	vcpu_t vcpu;
+
+	if (vsched->num_online_vcpus < vcpus) {
+		/* need to add more VCPUs */
+		for (i = vcpus - vsched->num_online_vcpus; i > 0; i--) {
+			ret = vsched_add_vcpu(vsched);
+			if (ret < 0)
+				break;
+		}
+	} else if (vsched->num_online_vcpus > vcpus) {
+		/* remove some VCPUs */
+		while (vcpus != vsched->num_online_vcpus) {
+			vcpu = vsched_vcpu(vsched, vsched->num_online_vcpus - 1);
+			BUG_ON(!vcpu);
+			vsched_del_vcpu(vcpu, 0);
 		}
 	}
+#ifdef CONFIG_FAIRSCHED
+	vsched->node->vcpus = vsched->num_online_vcpus;
+#endif
+	return ret;
+}
+
+int vsched_mvpr(struct task_struct *p, struct vcpu_scheduler *vsched)
+{
+	vcpu_t dest_vcpu;
+	int id;
+
+	id = first_cpu(vsched->vcpu_online_map);
+	if (id >= NR_CPUS)
+		goto err;
+
+	dest_vcpu = vsched_vcpu(vsched, id);
+	set_cpus_allowed(p, CPU_MASK_ALL);
+	sched_migrate_task(p, dest_vcpu);
+
+	if (task_vsched_id(p) != vsched_id(vsched)) {
+		/* race: probably someone changed cpus_allowed? */
+		printk("vsched_mvpr: failed to move task\n");
+		goto err;
+	}
+
+	return 0;
+
+err:
+	return -EINVAL;
+}
+
+void vsched_fairsched_link(struct vcpu_scheduler *vsched,
+		struct fairsched_node *node)
+{
+	vsched->node = node;
+	node->vsched = vsched;
+}
+
+void vsched_fairsched_unlink(struct vcpu_scheduler *vsched,
+		struct fairsched_node *node)
+{
+	vsched->node = NULL;
+	node->vsched = NULL;
+}
+
+int vsched_create(int id, struct fairsched_node *node)
+{
+	struct vcpu_scheduler *vsched;
+	int res, cpus;
+
+	vsched = kmalloc(sizeof(*vsched), GFP_KERNEL);
+	if (vsched == NULL)
+		return -ENOMEM;
+
+	vsched_init(vsched, node->id);
+	vsched_fairsched_link(vsched, node);
+
+	cpus = node->vcpus ? : num_online_cpus();
+	res = vsched_set_vcpus(vsched, cpus);
+	if (res < 0)
+		goto err_add;
+
+	return 0;
+
+err_add:
+	vsched_destroy(vsched);
+	return res;
+}
+
+int vsched_taskcount(struct vcpu_scheduler *vsched)
+{
+	struct task_struct *g, *t;
+	int count = 0;
+
+	if (vsched == NULL)
+		return 0;
+
+	read_lock(&tasklist_lock);
+	do_each_thread_all(g, t) {
+		/* task->vcpu->rq can't point to stale memory, since
+		   both this code and fairsched_set_vcpus() are called under mutex */
+		if (t != task_rq(t)->migration_thread) {
+			if (vsched == t->vsched)
+				count++;
+		}
+	} while_each_thread_all(g, t);
+	read_unlock(&tasklist_lock);
+
+	return count;
+}
+
+int vsched_destroy(struct vcpu_scheduler *vsched)
+{
+	if (vsched == NULL)
+		return 0;
+
+	vsched_set_vcpus(vsched, 0);
+
+	spin_lock_irq(&fairsched_lock);
+	if (vsched->num_online_vcpus ||
+	    !list_empty(&vsched->running_list) ||
+	    !list_empty(&vsched->active_list) ||
+	    !list_empty(&vsched->idle_list))
+		goto err_busy;
+
+	vsched_fairsched_unlink(vsched, vsched->node);
+	spin_unlock_irq(&fairsched_lock);
+
+	spin_lock(&vsched_list_lock);
+	list_del(&vsched->list);
+	spin_unlock(&vsched_list_lock);
+
+	kfree(vsched);
+	return 0;
+
+err_busy:
+	oops_in_progress = 1;
+	printk(KERN_ERR "BUG in vsched_destroy, id %d: n%d r%d a%d i%d\n",
+			vsched->id,
+			vsched->num_online_vcpus,
+			!list_empty(&vsched->running_list),
+			!list_empty(&vsched->active_list),
+			!list_empty(&vsched->idle_list));
+	spin_unlock_irq(&fairsched_lock);
+	oops_in_progress = 0;
+	return -EBUSY;
+	
+}
+#endif /* defined(CONFIG_FAIRSCHED) */
+
+static void init_boot_vcpu(void)
+{
+	int res;
+
+	/*
+	 * We setup boot_vcpu and it's runqueue until init_idle() happens
+	 * on cpu0. This is required since timer interrupts can happen
+	 * between sched_init() and init_idle().
+	 */
+	init_vcpu(&boot_idle_vcpu, raw_smp_processor_id());
+	vcpu_rq(&boot_idle_vcpu)->curr = current;
+	res = install_vcpu(&boot_idle_vcpu, &idle_vsched);
+	if (res < 0)
+		panic("Can't install boot idle vcpu");
+
+	init_vcpu(&boot_vcpu, raw_smp_processor_id());
+	vcpu_rq(&boot_vcpu)->curr = current;
+	res = install_vcpu(&boot_vcpu, &default_vsched);
+	if (res < 0)
+		panic("Can't install boot vcpu");
+
+	cpu_set(boot_vcpu.id, default_vsched.vcpu_online_map);
+
+	this_pcpu()->vcpu = &boot_idle_vcpu;
+	this_pcpu()->vsched = &idle_vsched;
+}
+#endif /* defined(CONFIG_SCHED_VCPU) || defined(CONFIG_FAIRSCHED) */
+
+static void init_pcpu(int id)
+{
+	struct pcpu_info *pcpu;
+
+	pcpu = pcpu(id);
+	pcpu->id = id;
+#ifdef CONFIG_SMP
+	pcpu->sd = NULL;
+#endif
+
+#ifndef CONFIG_SCHED_VCPU
+	init_vcpu(vcpu(id), id);
+#endif
+}
+
+static void init_pcpus(void)
+{
+	int i;
+	for (i = 0; i < NR_CPUS; i++)
+		init_pcpu(i);
+}
+
+void __init sched_init(void)
+{
+	kstat_glob.sched_lat.cur = static_percpu_ptr(&kstat_lat_pcpu_stats,
+			kstat_lat_pcpu_stats_data);
+
+	init_pcpus();
+#if defined(CONFIG_SCHED_VCPU)
+	vsched_init(&idle_vsched, -1);
+	vsched_init(&default_vsched, 0);
+#if defined(CONFIG_FAIRSCHED)
+	fairsched_init_early();
+	vsched_fairsched_link(&idle_vsched, &fairsched_idle_node);
+	vsched_fairsched_link(&default_vsched, &fairsched_init_node);
+#endif
+	init_boot_vcpu();
+#else
+#if defined(CONFIG_FAIRSCHED)
+	fairsched_init_early();
+#endif
+#endif
 
 	set_load_weight(&init_task);
 
@@ -6821,6 +8793,155 @@ void __init sched_init(void)
 	 */
 	init_idle(current, smp_processor_id());
 }
+
+#ifdef CONFIG_SCHED_VCPU
+static void show_vcpu_list(struct vcpu_scheduler *vsched, struct list_head *lh)
+{
+	cpumask_t m;
+	vcpu_t vcpu;
+	int i;
+
+	cpus_clear(m);
+	list_for_each_entry(vcpu, lh, list)
+		cpu_set(vcpu->id, m);
+
+	for (i = 0; i < NR_CPUS; i++)
+		if (cpu_isset(i, m))
+			printk("%d ", i);
+}
+
+#define PRINT(s, sz, fmt...)				\
+	do {						\
+		int __out;				\
+		__out = scnprintf(*s, *sz, fmt);	\
+		*s += __out;				\
+		*sz -= __out;				\
+	} while(0)
+
+static void show_rq_array(struct prio_array *array, char *header, char **s, int *sz)
+{
+	struct list_head *list;
+	struct task_struct *p;
+	int k, h;
+
+	h = 0;
+	for (k = 0; k < MAX_PRIO; k++) {
+		list = array->queue + k;
+		if (list_empty(list))
+			continue;
+
+		if (!h) {
+			PRINT(s, sz, header);
+			h = 1;
+		}
+
+		PRINT(s, sz, " prio %d (", k);
+		list_for_each_entry(p, list, run_list)
+			PRINT(s, sz, "%s[%d] ", p->comm, p->pid);
+		PRINT(s, sz, ")");
+	}
+	if (h)
+		PRINT(s, sz, "\n");
+}
+
+static void show_vcpu(vcpu_t vcpu)
+{
+	struct rq *rq;
+	char buf[1024], *s;
+	unsigned long flags;
+	int sz;
+	unsigned long nr_running, cpu_load[3];
+	unsigned long long nr_switches;
+	struct sched_domain *sd;
+	struct task_struct *curr;
+
+	if (vcpu == NULL)
+		return;
+
+	printk("  vcpu %d: last_pcpu %d, state %s%s\n",
+			vcpu->id, vcpu->last_pcpu,
+			vcpu->active ? "A" : "",
+			vcpu->running ? "R" : "");
+	s = buf;
+	sz = sizeof(buf) - 1;
+
+	rq = vcpu_rq(vcpu);
+	spin_lock_irqsave(&rq->lock, flags);
+	nr_running = rq->nr_running;
+#ifdef CONFIG_SMP
+	cpu_load[0] = rq->cpu_load[0];
+	cpu_load[1] = rq->cpu_load[1];
+	cpu_load[2] = rq->cpu_load[2];
+	sd = rq->sd;
+#else
+	cpu_load[0] = cpu_load[1] = cpu_load[2] = 0;
+	sd = NULL;
+#endif
+	nr_switches = rq->nr_switches;
+	curr = rq->curr;
+
+	show_rq_array(rq->active, "      active:", &s, &sz);
+	show_rq_array(rq->expired, "      expired:", &s, &sz);
+	spin_unlock_irqrestore(&rq->lock, flags);
+	*s = 0;
+
+	printk("    rq: running %lu, load {%lu,%lu,%lu}, sw %Lu, sd %p, curr %p\n",
+		nr_running, cpu_load[0], cpu_load[1], cpu_load[2], nr_switches,
+		sd, curr);
+
+	printk("%s", buf);
+}
+
+static inline void fairsched_show_node(struct vcpu_scheduler *vsched)
+{
+#ifdef CONFIG_FAIRSCHED
+	struct fairsched_node *node;
+
+	node = vsched->node;
+	printk("fsnode: ready %d run %d cpu %d vsched %p, pcpu %d\n",
+			node->nr_ready, node->nr_runnable, node->nr_pcpu,
+			node->vsched, smp_processor_id());
+#endif
+}
+
+static void __show_vsched(struct vcpu_scheduler *vsched)
+{
+	char mask[NR_CPUS + 1];
+	int i;
+
+	spin_lock(&fairsched_lock);
+	printk("vsched id=%d\n", vsched_id(vsched));
+	fairsched_show_node(vsched);
+
+	printk("  idle cpus ");
+	show_vcpu_list(vsched, &vsched->idle_list);
+	printk("; active cpus ");
+	show_vcpu_list(vsched, &vsched->active_list);
+	printk("; running cpus ");
+	show_vcpu_list(vsched, &vsched->running_list);
+	printk("\n");
+
+	cpumask_scnprintf(mask, NR_CPUS, vsched->vcpu_online_map);
+	printk("  num_online_cpus=%d, mask=%s (w=%d)\n",
+			vsched->num_online_vcpus, mask,
+			cpus_weight(vsched->vcpu_online_map));
+	spin_unlock(&fairsched_lock);
+
+	for (i = 0; i < NR_CPUS; i++)
+		show_vcpu(vsched->vcpu[i]);
+}
+
+void show_vsched(void)
+{
+	struct vcpu_scheduler *vsched;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vsched_list_lock, flags);
+	list_for_each_entry (vsched, &vsched_list, list)
+		__show_vsched(vsched);
+	spin_unlock_irqrestore(&vsched_list_lock, flags);
+}
+#endif /* CONFIG_SCHED_VCPU */
 
 #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
 void __might_sleep(char *file, int line)
@@ -6853,7 +8974,7 @@ void normalize_rt_tasks(void)
 	struct rq *rq;
 
 	read_lock_irq(&tasklist_lock);
-	for_each_process(p) {
+	for_each_process_all(p) {
 		if (!rt_task(p))
 			continue;
 
@@ -6896,7 +9017,7 @@ void normalize_rt_tasks(void)
  */
 struct task_struct *curr_task(int cpu)
 {
-	return cpu_curr(cpu);
+	return vcpu_rq(pcpu(cpu)->vcpu)->curr;
 }
 
 /**
@@ -6916,7 +9037,7 @@ struct task_struct *curr_task(int cpu)
  */
 void set_curr_task(int cpu, struct task_struct *p)
 {
-	cpu_curr(cpu) = p;
+	vcpu_rq(pcpu(cpu)->vcpu)->curr = p;
 }
 
 #endif

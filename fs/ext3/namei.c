@@ -959,6 +959,7 @@ static struct buffer_head * ext3_dx_find_entry(struct dentry *dentry,
 				  (block<<EXT3_BLOCK_SIZE_BITS(sb))
 					  +((char *)de - bh->b_data))) {
 				brelse (bh);
+				*err = ERR_BAD_DX_DIR;
 				goto errout;
 			}
 			*res_dir = de;
@@ -1009,6 +1010,11 @@ static struct dentry *ext3_lookup(struct inode * dir, struct dentry *dentry, str
 
 		if (!inode)
 			return ERR_PTR(-EACCES);
+
+		if (is_bad_inode(inode)) {
+			iput(inode);
+			return ERR_PTR(-ENOENT);	
+		}
 	}
 	return d_splice_alias(inode, dentry);
 }
@@ -1043,6 +1049,11 @@ struct dentry *ext3_get_parent(struct dentry *child)
 
 	if (!inode)
 		return ERR_PTR(-EACCES);
+
+	if (is_bad_inode(inode)) {
+		iput(inode);
+		return ERR_PTR(-ENOENT);	
+	}
 
 	parent = d_alloc_anon(inode);
 	if (!parent) {
@@ -1124,9 +1135,9 @@ static struct ext3_dir_entry_2 *do_split(handle_t *handle, struct inode *dir,
 	char *data1 = (*bh)->b_data, *data2;
 	unsigned split;
 	struct ext3_dir_entry_2 *de = NULL, *de2;
-	int	err;
+	int	err = 0;
 
-	bh2 = ext3_append (handle, dir, &newblock, error);
+	bh2 = ext3_append (handle, dir, &newblock, &err);
 	if (!(bh2)) {
 		brelse(*bh);
 		*bh = NULL;
@@ -1135,14 +1146,9 @@ static struct ext3_dir_entry_2 *do_split(handle_t *handle, struct inode *dir,
 
 	BUFFER_TRACE(*bh, "get_write_access");
 	err = ext3_journal_get_write_access(handle, *bh);
-	if (err) {
-	journal_error:
-		brelse(*bh);
-		brelse(bh2);
-		*bh = NULL;
-		ext3_std_error(dir->i_sb, err);
-		goto errout;
-	}
+	if (err)
+		goto journal_error;
+
 	BUFFER_TRACE(frame->bh, "get_write_access");
 	err = ext3_journal_get_write_access(handle, frame->bh);
 	if (err)
@@ -1185,8 +1191,16 @@ static struct ext3_dir_entry_2 *do_split(handle_t *handle, struct inode *dir,
 		goto journal_error;
 	brelse (bh2);
 	dxtrace(dx_show_index ("frame", frame->entries));
-errout:
 	return de;
+
+journal_error:
+	brelse(*bh);
+	brelse(bh2);
+	*bh = NULL;
+	ext3_std_error(dir->i_sb, err);
+errout:
+	*error = err;
+	return NULL;
 }
 #endif
 
@@ -1283,7 +1297,7 @@ static int add_dirent_to_buf(handle_t *handle, struct dentry *dentry,
 	if (err)
 		ext3_std_error(dir->i_sb, err);
 	brelse(bh);
-	return 0;
+	return err;
 }
 
 #ifdef CONFIG_EXT3_INDEX
@@ -2181,6 +2195,12 @@ static int ext3_link (struct dentry * old_dentry,
 
 	if (inode->i_nlink >= EXT3_LINK_MAX)
 		return -EMLINK;
+	/*
+	 * Return -ENOENT if we've raced with unlink and i_nlink is 0.  Doing
+	 * otherwise has the potential to corrupt the orphan inode list.
+	 */
+	if (inode->i_nlink == 0)
+		return -ENOENT;
 
 retry:
 	handle = ext3_journal_start(dir, EXT3_DATA_TRANS_BLOCKS(dir->i_sb) +

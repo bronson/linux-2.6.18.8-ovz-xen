@@ -88,7 +88,7 @@ config NR_CPUS
 
 config HOTPLUG_CPU
 	bool "Support for hot-pluggable CPUs"
-	depends on SMP
+	depends on SMP && !SCHED_VCPU
 	select HOTPLUG
 	default n
 	help
@@ -495,8 +495,12 @@ source "arch/s390/oprofile/Kconfig"
 
 source "arch/s390/Kconfig.debug"
 
+source "kernel/Kconfig.openvz"
+
 source "security/Kconfig"
 
 source "crypto/Kconfig"
 
 source "lib/Kconfig"
+
+source "kernel/ub/Kconfig"

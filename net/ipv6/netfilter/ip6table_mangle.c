@@ -12,6 +12,7 @@
  */
 #include <linux/module.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
+#include <linux/nfcalls.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
@@ -53,7 +54,7 @@ static struct
 	struct ip6t_replace repl;
 	struct ip6t_standard entries[5];
 	struct ip6t_error term;
-} initial_table __initdata
+} initial_table
 = { { "mangle", MANGLE_VALID_HOOKS, 6,
       sizeof(struct ip6t_standard) * 5 + sizeof(struct ip6t_error),
       { [NF_IP6_PRE_ROUTING] 	= 0,
@@ -130,6 +131,13 @@ static struct ip6t_table packet_mangler = {
 	.af		= AF_INET6,
 };
 
+#ifdef CONFIG_VE_IPTABLES
+#include <linux/sched.h>
+#define ve_packet_mangler	(get_exec_env()->_ip6t_mangle_table)
+#else
+#define ve_packet_mangler	&packet_mangler
+#endif
+
 /* The work comes in here from netfilter.c. */
 static unsigned int
 ip6t_route_hook(unsigned int hook,
@@ -138,7 +146,7 @@ ip6t_route_hook(unsigned int hook,
 	 const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	return ip6t_do_table(pskb, hook, in, out, &packet_mangler, NULL);
+	return ip6t_do_table(pskb, hook, in, out, ve_packet_mangler, NULL);
 }
 
 static unsigned int
@@ -174,7 +182,7 @@ ip6t_local_hook(unsigned int hook,
 	/* flowlabel and prio (includes version, which shouldn't change either */
 	flowlabel = *((u_int32_t *) (*pskb)->nh.ipv6h);
 
-	ret = ip6t_do_table(pskb, hook, in, out, &packet_mangler, NULL);
+	ret = ip6t_do_table(pskb, hook, in, out, ve_packet_mangler, NULL);
 
 	if (ret != NF_DROP && ret != NF_STOLEN 
 		&& (memcmp(&(*pskb)->nh.ipv6h->saddr, &saddr, sizeof(saddr))
@@ -228,14 +236,19 @@ static struct nf_hook_ops ip6t_ops[] = {
 	},
 };
 
-static int __init ip6table_mangle_init(void)
+int init_ip6table_mangle(void)
 {
 	int ret;
+	struct ip6t_table *tmp_mangler;
 
 	/* Register table */
-	ret = ip6t_register_table(&packet_mangler, &initial_table.repl);
-	if (ret < 0)
-		return ret;
+	tmp_mangler = ip6t_register_table(&packet_mangler,
+			&initial_table.repl);
+	if (IS_ERR(tmp_mangler))
+		return PTR_ERR(tmp_mangler);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_mangler = tmp_mangler;
+#endif
 
 	/* Register hooks */
 	ret = nf_register_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
@@ -245,14 +258,42 @@ static int __init ip6table_mangle_init(void)
 	return ret;
 
  cleanup_table:
-	ip6t_unregister_table(&packet_mangler);
+	ip6t_unregister_table(ve_packet_mangler);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_mangler = NULL;
+#endif
 	return ret;
+}
+
+void fini_ip6table_mangle(void)
+{
+	nf_unregister_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
+	ip6t_unregister_table(ve_packet_mangler);
+#ifdef CONFIG_VE_IPTABLES
+	ve_packet_mangler = NULL;
+#endif
+}
+
+static int __init ip6table_mangle_init(void)
+{
+	int err;
+
+	err = init_ip6table_mangle();
+	if (err < 0)
+		return err;
+
+	KSYMRESOLVE(init_ip6table_mangle);
+	KSYMRESOLVE(fini_ip6table_mangle);
+	KSYMMODRESOLVE(ip6table_mangle);
+	return 0;
 }
 
 static void __exit ip6table_mangle_fini(void)
 {
-	nf_unregister_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
-	ip6t_unregister_table(&packet_mangler);
+	KSYMMODUNRESOLVE(ip6table_mangle);
+	KSYMUNRESOLVE(init_ip6table_mangle);
+	KSYMUNRESOLVE(fini_ip6table_mangle);
+	fini_ip6table_mangle();
 }
 
 module_init(ip6table_mangle_init);

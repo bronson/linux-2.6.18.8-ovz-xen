@@ -59,6 +59,14 @@ struct autofs_packet_expire_multi {
 	char name[NAME_MAX+1];
 };
 
+/* v4 multi expire (via pipe) for 32 bit userspace daemon and x68_64 kernel */
+struct autofs_packet_expire_multi_32bit {
+	struct autofs_packet_hdr hdr;
+	autofs_wqt_t_32bit wait_queue_token;
+	int len;
+	char name[NAME_MAX+1];
+} __attribute__ ((__packed__));
+
 /* autofs v5 common packet struct */
 struct autofs_v5_packet {
 	struct autofs_packet_hdr hdr;
@@ -73,6 +81,20 @@ struct autofs_v5_packet {
 	char name[NAME_MAX+1];
 };
 
+/* autofs v5 packet struct for 32 bit userspace daemon and x68_64 kernel*/
+struct autofs_v5_packet_32bit {
+	struct autofs_packet_hdr hdr;
+	autofs_wqt_t_32bit wait_queue_token;
+	__u32 dev;
+	__u64 ino;
+	__u32 uid;
+	__u32 gid;
+	__u32 pid;
+	__u32 tgid;
+	__u32 len;
+	char name[NAME_MAX+1];
+} __attribute__ ((__packed__));
+
 typedef struct autofs_v5_packet autofs_packet_missing_indirect_t;
 typedef struct autofs_v5_packet autofs_packet_expire_indirect_t;
 typedef struct autofs_v5_packet autofs_packet_missing_direct_t;
@@ -80,10 +102,18 @@ typedef struct autofs_v5_packet autofs_packet_expire_direct_t;
 
 union autofs_packet_union {
 	struct autofs_packet_hdr hdr;
+	/* packet missing */
 	struct autofs_packet_missing missing;
+	struct autofs_packet_missing_32bit missing_32bit;
+	/* packet expire */
 	struct autofs_packet_expire expire;
+	struct autofs_packet_expire_32bit expire_32bit;
+	/* packet expire multi */
 	struct autofs_packet_expire_multi expire_multi;
+	struct autofs_packet_expire_multi_32bit expire_multi_32bit;
+	/* packet ver. 5 */
 	struct autofs_v5_packet v5_packet;
+	struct autofs_v5_packet_32bit v5_packet_32bit;
 };
 
 #define AUTOFS_IOC_EXPIRE_MULTI		_IOW(0x93,0x66,int)

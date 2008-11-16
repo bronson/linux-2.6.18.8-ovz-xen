@@ -21,6 +21,7 @@
 #include <linux/writeback.h>
 #include <linux/init.h>
 #include <linux/backing-dev.h>
+#include <linux/task_io_accounting_ops.h>
 #include <linux/blkdev.h>
 #include <linux/mpage.h>
 #include <linux/percpu.h>
@@ -29,6 +30,9 @@
 #include <linux/sysctl.h>
 #include <linux/cpu.h>
 #include <linux/syscalls.h>
+
+#include <ub/io_acct.h>
+#include <ub/io_prio.h>
 
 /*
  * The maximum number of pages to writeout in a single bdflush/kupdate
@@ -575,11 +579,14 @@ int write_one_page(struct page *page, int wait)
 		.sync_mode = WB_SYNC_ALL,
 		.nr_to_write = 1,
 	};
+	struct user_beancounter *old_ub;
 
 	BUG_ON(!PageLocked(page));
 
 	if (wait)
 		wait_on_page_writeback(page);
+
+	old_ub = bc_io_switch_context(page);
 
 	if (clear_page_dirty_for_io(page)) {
 		page_cache_get(page);
@@ -593,6 +600,9 @@ int write_one_page(struct page *page, int wait)
 	} else {
 		unlock_page(page);
 	}
+
+	bc_io_restore_context(old_ub);
+	
 	return ret;
 }
 EXPORT_SYMBOL(write_one_page);
@@ -614,6 +624,9 @@ EXPORT_SYMBOL(write_one_page);
  */
 int __set_page_dirty_nobuffers(struct page *page)
 {
+	int acct;
+
+	acct = 0;
 	if (!TestSetPageDirty(page)) {
 		struct address_space *mapping = page_mapping(page);
 		struct address_space *mapping2;
@@ -623,9 +636,11 @@ int __set_page_dirty_nobuffers(struct page *page)
 			mapping2 = page_mapping(page);
 			if (mapping2) { /* Race with truncate? */
 				BUG_ON(mapping2 != mapping);
-				if (mapping_cap_account_dirty(mapping))
+				if (mapping_cap_account_dirty(mapping)) {
 					__inc_zone_page_state(page,
 								NR_FILE_DIRTY);
+					acct = 1;
+				}
 				radix_tree_tag_set(&mapping->page_tree,
 					page_index(page), PAGECACHE_TAG_DIRTY);
 			}
@@ -635,6 +650,8 @@ int __set_page_dirty_nobuffers(struct page *page)
 				__mark_inode_dirty(mapping->host,
 							I_DIRTY_PAGES);
 			}
+			if (acct)
+				task_io_account_write(page, PAGE_CACHE_SIZE, 0);
 		}
 		return 1;
 	}
@@ -712,8 +729,13 @@ int test_clear_page_dirty(struct page *page)
 			radix_tree_tag_clear(&mapping->page_tree,
 						page_index(page),
 						PAGECACHE_TAG_DIRTY);
-			if (mapping_cap_account_dirty(mapping))
+			if (mapping_cap_account_dirty(mapping)) {
 				__dec_zone_page_state(page, NR_FILE_DIRTY);
+				write_unlock_irqrestore(&mapping->tree_lock,
+						flags);
+				ub_io_release_context(page, 0);
+				return 1;
+			}
 			write_unlock_irqrestore(&mapping->tree_lock, flags);
 			return 1;
 		}
@@ -744,8 +766,10 @@ int clear_page_dirty_for_io(struct page *page)
 
 	if (mapping) {
 		if (TestClearPageDirty(page)) {
-			if (mapping_cap_account_dirty(mapping))
+			if (mapping_cap_account_dirty(mapping)) {
 				dec_zone_page_state(page, NR_FILE_DIRTY);
+				ub_io_release_context(page, PAGE_CACHE_SIZE);
+			}
 			return 1;
 		}
 		return 0;

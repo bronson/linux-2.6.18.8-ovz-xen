@@ -454,6 +454,21 @@ hrtimer_start(struct hrtimer *timer, ktime_t tim, const enum hrtimer_mode mode)
 }
 EXPORT_SYMBOL_GPL(hrtimer_start);
 
+/*
+ * schedule_hrtimer taken from 2.6.16 kernel
+ * needed by CPT
+ */
+ktime_t __sched
+schedule_hrtimer(struct hrtimer *timer, const enum hrtimer_mode mode)
+{
+	hrtimer_start(timer, timer->expires, mode);
+	schedule();
+	hrtimer_cancel(timer);
+
+	return hrtimer_get_remaining(timer);
+}
+
+
 /**
  * hrtimer_try_to_cancel - try to deactivate a timer
  * @timer:	hrtimer to stop
@@ -693,7 +708,7 @@ static int __sched do_nanosleep(struct hrtimer_sleeper *t, enum hrtimer_mode mod
 	return t->task == NULL;
 }
 
-static long __sched nanosleep_restart(struct restart_block *restart)
+long __sched nanosleep_restart(struct restart_block *restart)
 {
 	struct hrtimer_sleeper t;
 	struct timespec __user *rmtp;
@@ -723,6 +738,7 @@ static long __sched nanosleep_restart(struct restart_block *restart)
 	/* The other values in restart are already filled in */
 	return -ERESTART_RESTARTBLOCK;
 }
+EXPORT_SYMBOL_GPL(nanosleep_restart);
 
 long hrtimer_nanosleep(struct timespec *rqtp, struct timespec __user *rmtp,
 		       const enum hrtimer_mode mode, const clockid_t clockid)

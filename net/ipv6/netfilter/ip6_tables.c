@@ -32,9 +32,11 @@
 #include <linux/mutex.h>
 #include <linux/proc_fs.h>
 #include <linux/cpumask.h>
+#include <ub/ub_mem.h>
 
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter/x_tables.h>
+#include <linux/nfcalls.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
@@ -1126,8 +1128,13 @@ do_ip6t_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_VE_IPTABLES
+	if (!get_exec_env()->_xt_tables[AF_INET6].next)
+		return -ENOENT;
+#endif
 
 	switch (cmd) {
 	case IP6T_SO_SET_REPLACE:
@@ -1151,8 +1158,13 @@ do_ip6t_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_VE_IPTABLES
+	if (!get_exec_env()->_xt_tables[AF_INET6].next)
+		return -ENOENT;
+#endif
 
 	switch (cmd) {
 	case IP6T_SO_GET_INFO: {
@@ -1249,18 +1261,18 @@ do_ip6t_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 	return ret;
 }
 
-int ip6t_register_table(struct xt_table *table,
+struct ip6t_table *ip6t_register_table(struct xt_table *table,
 			const struct ip6t_replace *repl)
 {
 	int ret;
 	struct xt_table_info *newinfo;
 	static struct xt_table_info bootstrap
-		= { 0, 0, 0, { 0 }, { 0 }, { } };
+		= { 0, 0, 0, 0, { 0 }, { 0 }, { } };
 	void *loc_cpu_entry;
 
 	newinfo = xt_alloc_table_info(repl->size);
 	if (!newinfo)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 
 	/* choose the copy on our node/cpu */
 	loc_cpu_entry = newinfo->entries[raw_smp_processor_id()];
@@ -1273,28 +1285,29 @@ int ip6t_register_table(struct xt_table *table,
 			      repl->underflow);
 	if (ret != 0) {
 		xt_free_table_info(newinfo);
-		return ret;
+		return ERR_PTR(ret);
 	}
 
-	ret = xt_register_table(table, &bootstrap, newinfo);
-	if (ret != 0) {
+	table = virt_xt_register_table(table, &bootstrap, newinfo);
+	if (IS_ERR(table))
 		xt_free_table_info(newinfo);
-		return ret;
-	}
-
-	return 0;
+	return table;
 }
 
 void ip6t_unregister_table(struct xt_table *table)
 {
 	struct xt_table_info *private;
 	void *loc_cpu_entry;
+	struct module *me;
 
-	private = xt_unregister_table(table);
+	me = table->me;
+	private = virt_xt_unregister_table(table);
 
 	/* Decrease module usage counts and free resources */
 	loc_cpu_entry = private->entries[raw_smp_processor_id()];
 	IP6T_ENTRY_ITERATE(loc_cpu_entry, private->size, cleanup_entry, NULL);
+	if (private->number > private->initial_entries)
+		module_put(me);
 	xt_free_table_info(private);
 }
 
@@ -1389,12 +1402,30 @@ static struct ip6t_match icmp6_matchstruct = {
 	.family		= AF_INET6,
 };
 
+static int init_ip6tables(void)
+{
+#ifdef CONFIG_VE_IPTABLES
+	if (get_exec_env()->_xt_tables[AF_INET6].next != NULL)
+		return -EEXIST;
+#endif
+
+	return xt_proto_init(AF_INET6);
+}
+
+static void fini_ip6tables(void)
+{
+#ifdef CONFIG_VE_IPTABLES
+	get_exec_env()->_xt_tables[AF_INET6].next = NULL;
+#endif
+	xt_proto_fini(AF_INET6);
+}
+
 static int __init ip6_tables_init(void)
 {
 	int ret;
 
-	ret = xt_proto_init(AF_INET6);
-	if (ret < 0)
+	ret = init_ip6tables();
+	if (ret)
 		goto err1;
 
 	/* Noone else will be downing sem now, so we won't sleep */
@@ -1413,6 +1444,9 @@ static int __init ip6_tables_init(void)
 	if (ret < 0)
 		goto err5;
 
+	KSYMRESOLVE(init_ip6tables);
+	KSYMRESOLVE(fini_ip6tables);
+	KSYMMODRESOLVE(ip6_tables);
 	printk("ip6_tables: (C) 2000-2006 Netfilter Core Team\n");
 	return 0;
 
@@ -1423,18 +1457,21 @@ err4:
 err3:
 	xt_unregister_target(&ip6t_standard_target);
 err2:
-	xt_proto_fini(AF_INET6);
+	fini_ip6tables();
 err1:
 	return ret;
 }
 
 static void __exit ip6_tables_fini(void)
 {
+	KSYMMODUNRESOLVE(ip6_tables);
+	KSYMUNRESOLVE(init_ip6tables);
+	KSYMUNRESOLVE(fini_ip6tables);
 	nf_unregister_sockopt(&ip6t_sockopts);
 	xt_unregister_match(&icmp6_matchstruct);
 	xt_unregister_target(&ip6t_error_target);
 	xt_unregister_target(&ip6t_standard_target);
-	xt_proto_fini(AF_INET6);
+	fini_ip6tables();
 }
 
 /*
@@ -1516,5 +1553,5 @@ EXPORT_SYMBOL(ip6t_do_table);
 EXPORT_SYMBOL(ip6t_ext_hdr);
 EXPORT_SYMBOL(ipv6_find_hdr);
 
-module_init(ip6_tables_init);
+subsys_initcall(ip6_tables_init);
 module_exit(ip6_tables_fini);

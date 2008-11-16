@@ -8,6 +8,7 @@
 
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/time.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -17,6 +18,8 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+
+#include <ub/ub_mem.h>
 
 struct fdtable_defer {
 	spinlock_t lock;
@@ -44,9 +47,9 @@ struct file ** alloc_fd_array(int num)
 	int size = num * sizeof(struct file *);
 
 	if (size <= PAGE_SIZE)
-		new_fds = (struct file **) kmalloc(size, GFP_KERNEL);
+		new_fds = (struct file **) ub_kmalloc(size, GFP_KERNEL);
 	else 
-		new_fds = (struct file **) vmalloc(size);
+		new_fds = (struct file **) ub_vmalloc(size);
 	return new_fds;
 }
 
@@ -213,9 +216,9 @@ fd_set * alloc_fdset(int num)
 	int size = num / 8;
 
 	if (size <= PAGE_SIZE)
-		new_fdset = (fd_set *) kmalloc(size, GFP_KERNEL);
+		new_fdset = (fd_set *) ub_kmalloc(size, GFP_KERNEL);
 	else
-		new_fdset = (fd_set *) vmalloc(size);
+		new_fdset = (fd_set *) ub_vmalloc(size);
 	return new_fdset;
 }
 
@@ -236,7 +239,7 @@ static struct fdtable *alloc_fdtable(int nr)
   	fd_set *new_openset = NULL, *new_execset = NULL;
 	struct file **new_fds;
 
-	fdt = kzalloc(sizeof(*fdt), GFP_KERNEL);
+	fdt = kzalloc(sizeof(*fdt), GFP_KERNEL_UBC);
 	if (!fdt)
   		goto out;
 
@@ -294,7 +297,7 @@ out:
  * both fd array and fdset. It is expected to be called with the
  * files_lock held.
  */
-static int expand_fdtable(struct files_struct *files, int nr)
+int expand_fdtable(struct files_struct *files, int nr)
 	__releases(files->file_lock)
 	__acquires(files->file_lock)
 {
@@ -330,6 +333,7 @@ static int expand_fdtable(struct files_struct *files, int nr)
 out:
 	return error;
 }
+EXPORT_SYMBOL_GPL(expand_fdtable);
 
 /*
  * Expand files.

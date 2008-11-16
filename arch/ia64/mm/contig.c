@@ -73,6 +73,7 @@ show_mem (void)
 	printk("%ld pages in page table cache\n",
 		pgtable_quicklist_total_size());
 }
+EXPORT_SYMBOL(show_mem);
 
 /* physical address where the bootmem map is located */
 unsigned long bootmap_start;

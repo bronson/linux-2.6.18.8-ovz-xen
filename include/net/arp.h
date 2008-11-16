@@ -7,7 +7,16 @@
 
 #define HAVE_ARP_CREATE
 
-extern struct neigh_table arp_tbl;
+#if defined(CONFIG_VE) && defined(CONFIG_INET)
+#define arp_tbl		(*(get_exec_env()->ve_arp_tbl))
+extern int ve_arp_init(struct ve_struct *ve);
+extern void ve_arp_fini(struct ve_struct *ve);
+#else
+extern struct neigh_table	global_arp_tbl;
+#define arp_tbl		global_arp_tbl
+static inline int ve_arp_init(struct ve_struct *ve) { return 0; }
+static inline void ve_arp_fini(struct ve_struct *ve) { ; }
+#endif
 
 extern void	arp_init(void);
 extern int	arp_find(unsigned char *haddr, struct sk_buff *skb);

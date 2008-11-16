@@ -908,7 +908,7 @@ asids_proc_info(char *buf, char **start, off_t fpos, int length, int *eof, void 
 	int len=0;
 	struct task_struct *p;
 	read_lock(&tasklist_lock);
-	for_each_process(p) {
+	for_each_process_ve(p) {
 		int pid = p->pid;
 		struct mm_struct *mm;
 		if (!pid) continue;

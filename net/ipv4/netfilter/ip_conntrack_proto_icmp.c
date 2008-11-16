@@ -104,7 +104,7 @@ static int icmp_packet(struct ip_conntrack *ct,
 	} else {
 		atomic_inc(&ct->proto.icmp.count);
 		ip_conntrack_event_cache(IPCT_PROTOINFO_VOLATILE, skb);
-		ip_ct_refresh_acct(ct, ctinfo, skb, ip_ct_icmp_timeout);
+		ip_ct_refresh_acct(ct, ctinfo, skb, ve_ip_ct_icmp_timeout);
 	}
 
 	return NF_ACCEPT;

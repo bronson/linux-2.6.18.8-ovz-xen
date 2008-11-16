@@ -52,6 +52,8 @@
 #include <linux/debug_locks.h>
 #include <linux/lockdep.h>
 
+#include <ub/beancounter.h>
+
 #include <asm/io.h>
 #include <asm/bugs.h>
 #include <asm/setup.h>
@@ -83,6 +85,7 @@ extern void mca_init(void);
 extern void sbus_init(void);
 extern void sysctl_init(void);
 extern void signals_init(void);
+extern void fairsched_init_late(void);
 extern void pidhash_init(void);
 extern void pidmap_init(void);
 extern void prio_tree_init(void);
@@ -103,9 +106,30 @@ static inline void mark_rodata_ro(void) { }
 #ifdef CONFIG_TC
 extern void tc_init(void);
 #endif
+extern void grsecurity_init(void);
 
 enum system_states system_state;
 EXPORT_SYMBOL(system_state);
+
+#ifdef CONFIG_VE
+extern void init_ve_system(void);
+extern void init_ve0(void);
+extern void prepare_ve0_process(struct task_struct *tsk);
+extern void prepare_ve0_proc_root(void);
+extern void prepare_ve0_sysctl(void);
+#else
+#define init_ve_system()		do { } while (0)
+#define init_ve0()			do { } while (0)
+#define prepare_ve0_process(tsk)	do { } while (0)
+#define prepare_ve0_proc_root()		do { } while (0)
+#define prepare_ve0_sysctl()		do { } while (0)
+#endif
+
+#if defined(CONFIG_VE) && defined(CONFIG_NET)
+extern void prepare_ve0_loopback(void);
+#else
+#define prepare_ve0_loopback()		do { } while (0)
+#endif
 
 /*
  * Boot command-line arguments
@@ -460,6 +484,9 @@ asmlinkage void __init start_kernel(void)
 
 	smp_setup_processor_id();
 
+	prepare_ve0_process(&init_task);
+	init_ve0();
+
 	/*
 	 * Need to run as early as possible, to initialize the
 	 * lockdep hash:
@@ -475,6 +502,7 @@ asmlinkage void __init start_kernel(void)
  * enable them
  */
 	lock_kernel();
+	ub_init_early();
 	boot_cpu_init();
 	page_address_init();
 	printk(KERN_NOTICE);
@@ -563,6 +591,7 @@ asmlinkage void __init start_kernel(void)
 #endif
 	fork_init(num_physpages);
 	proc_caches_init();
+	ub_init_late();
 	buffer_init();
 	unnamed_dev_init();
 	key_init();
@@ -573,6 +602,8 @@ asmlinkage void __init start_kernel(void)
 	/* rootfs populating might need page-writeback */
 	page_writeback_init();
 #ifdef CONFIG_PROC_FS
+	prepare_ve0_proc_root();
+	prepare_ve0_sysctl();
 	proc_root_init();
 #endif
 	cpuset_init();
@@ -582,6 +613,10 @@ asmlinkage void __init start_kernel(void)
 	check_bugs();
 
 	acpi_early_init(); /* before LAPIC and SMP init */
+
+#ifdef CONFIG_USER_RSS_ACCOUNTING
+	ub_init_pbc();
+#endif
 
 	/* Do the rest non-__init'ed, we're now alive */
 	rest_init();
@@ -652,6 +687,9 @@ static void __init do_initcalls(void)
  */
 static void __init do_basic_setup(void)
 {
+	prepare_ve0_loopback();
+	init_ve_system();
+
 	/* drivers will send hotplug events */
 	init_workqueues();
 	usermodehelper_init();
@@ -667,7 +705,7 @@ static void __init do_basic_setup(void)
 static void do_pre_smp_initcalls(void)
 {
 	extern int spawn_ksoftirqd(void);
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_VCPU)
 	extern int migration_init(void);
 
 	migration_init();
@@ -704,6 +742,12 @@ static int init(void * unused)
 	do_pre_smp_initcalls();
 
 	smp_init();
+
+	/* 
+	 * This should be done after all cpus are known to
+	 * be online.  smp_init gives us confidence in it.
+	 */
+	fairsched_init_late();
 	sched_init_smp();
 
 	cpuset_init_smp();
@@ -728,6 +772,8 @@ static int init(void * unused)
 		ramdisk_execute_command = NULL;
 		prepare_namespace();
 	}
+
+	grsecurity_init();
 
 	/*
 	 * Ok, we have completed the initial bootup, and

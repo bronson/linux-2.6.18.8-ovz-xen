@@ -7,6 +7,7 @@
 #ifdef __KERNEL__
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <linux/slab.h>
 
 /*
  * Real Time signals may be queued.
@@ -17,6 +18,9 @@ struct sigqueue {
 	int flags;
 	siginfo_t info;
 	struct user_struct *user;
+#ifdef CONFIG_USER_RESOURCE
+	struct user_beancounter *sig_ub;
+#endif
 };
 
 /* flags values. */
@@ -240,6 +244,8 @@ extern int sigprocmask(int, sigset_t *, sigset_t *);
 
 struct pt_regs;
 extern int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka, struct pt_regs *regs, void *cookie);
+
+extern kmem_cache_t *sigqueue_cachep;
 
 #endif /* __KERNEL__ */
 

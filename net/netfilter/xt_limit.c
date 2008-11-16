@@ -118,7 +118,7 @@ ipt_limit_checkentry(const char *tablename,
 	/* Check for overflow. */
 	if (r->burst == 0
 	    || user2credits(r->avg * r->burst) < user2credits(r->avg)) {
-		printk("Overflow in xt_limit, try lower: %u/%u\n",
+		ve_printk(VE_LOG, "Overflow in xt_limit, try lower: %u/%u\n",
 		       r->avg, r->burst);
 		return 0;
 	}
@@ -136,11 +136,96 @@ ipt_limit_checkentry(const char *tablename,
 	return 1;
 }
 
+#ifdef CONFIG_COMPAT
+static int ipt_limit_compat_to_user(void *match, void **dstptr,
+		int *size, int off)
+{
+	struct xt_entry_match *pm;
+	struct xt_rateinfo *pinfo;
+	struct compat_xt_rateinfo rinfo;
+	u_int16_t msize;
+
+	pm = (struct xt_entry_match *)match;
+	msize = pm->u.user.match_size;
+	if (__copy_to_user(*dstptr, pm, sizeof(struct xt_entry_match)))
+		return -EFAULT;
+	pinfo = (struct xt_rateinfo *)pm->data;
+	memset(&rinfo, 0, sizeof(struct compat_xt_rateinfo));
+	rinfo.avg = pinfo->avg;
+	rinfo.burst = pinfo->burst;
+	if (__copy_to_user(*dstptr + sizeof(struct xt_entry_match),
+				&rinfo, sizeof(struct compat_xt_rateinfo)))
+		return -EFAULT;
+	msize -= off;
+	if (put_user(msize, (u_int16_t *)*dstptr))
+		return -EFAULT;
+	*size -= off;
+	*dstptr += msize;
+	return 0;
+}
+
+static int ipt_limit_compat_from_user(void *match, void **dstptr,
+		int *size, int off)
+{
+	struct compat_xt_entry_match *pm;
+	struct xt_entry_match *dstpm;
+	struct compat_xt_rateinfo *pinfo;
+	struct xt_rateinfo rinfo;
+	u_int16_t msize;
+
+	pm = (struct compat_xt_entry_match *)match;
+	dstpm = (struct xt_entry_match *)*dstptr;
+	msize = pm->u.user.match_size;
+	memcpy(*dstptr, pm, sizeof(struct compat_xt_entry_match));
+	pinfo = (struct compat_xt_rateinfo *)pm->data;
+	memset(&rinfo, 0, sizeof(struct xt_rateinfo));
+	rinfo.avg = pinfo->avg;
+	rinfo.burst = pinfo->burst;
+	memcpy(*dstptr + sizeof(struct compat_xt_entry_match),
+				&rinfo, sizeof(struct xt_rateinfo));
+	msize += off;
+	dstpm->u.user.match_size = msize;
+	*size += off;
+	*dstptr += msize;
+	return 0;
+}
+
+static int ipt_limit_compat(void *match, void **dstptr,
+		int *size, int convert)
+{
+	int ret, off;
+
+	off = XT_ALIGN(sizeof(struct xt_rateinfo)) -
+		COMPAT_XT_ALIGN(sizeof(struct compat_xt_rateinfo));
+	switch (convert) {
+		case COMPAT_TO_USER:
+			ret = ipt_limit_compat_to_user(match,
+					dstptr, size, off);
+			break;
+		case COMPAT_FROM_USER:
+			ret = ipt_limit_compat_from_user(match,
+					dstptr, size, off);
+			break;
+		case COMPAT_CALC_SIZE:
+			*size += off;
+			ret = 0;
+			break;
+		default:
+			ret = -ENOPROTOOPT;
+			break;
+	}
+	return ret;
+}
+#endif
+
 static struct xt_match ipt_limit_reg = {
 	.name		= "limit",
 	.match		= ipt_limit_match,
 	.matchsize	= sizeof(struct xt_rateinfo),
 	.checkentry	= ipt_limit_checkentry,
+#ifdef CONFIG_COMPAT
+	.compat		= ipt_limit_compat,
+#endif
 	.family		= AF_INET,
 	.me		= THIS_MODULE,
 };
@@ -149,6 +234,9 @@ static struct xt_match limit6_reg = {
 	.match		= ipt_limit_match,
 	.matchsize	= sizeof(struct xt_rateinfo),
 	.checkentry	= ipt_limit_checkentry,
+#ifdef CONFIG_COMPAT
+	.compat		= ipt_limit_compat,
+#endif
 	.family		= AF_INET6,
 	.me		= THIS_MODULE,
 };

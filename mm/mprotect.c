@@ -9,6 +9,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/hugetlb.h>
 #include <linux/slab.h>
 #include <linux/shm.h>
@@ -21,10 +22,13 @@
 #include <linux/syscalls.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
+#include <linux/grsecurity.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
+
+#include <ub/ub_vmpages.h>
 
 static void change_pte_range(struct mm_struct *mm, pmd_t *pmd,
 		unsigned long addr, unsigned long end, pgprot_t newprot)
@@ -129,11 +133,19 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 	pgprot_t newprot;
 	pgoff_t pgoff;
 	int error;
+	unsigned long ch_size;
+	int ch_dir;
 
 	if (newflags == oldflags) {
 		*pprev = vma;
 		return 0;
 	}
+
+	error = -ENOMEM;
+	ch_size = nrpages - pages_in_vma_range(vma, start, end);
+	ch_dir = ub_protected_charge(mm, ch_size, newflags, vma);
+	if (ch_dir == PRIVVM_ERROR)
+		goto fail_ch;
 
 	/*
 	 * If we make a private mapping writable we increase our commit;
@@ -147,7 +159,7 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 		if (!(oldflags & (VM_ACCOUNT|VM_WRITE|VM_SHARED))) {
 			charged = nrpages;
 			if (security_vm_enough_memory(charged))
-				return -ENOMEM;
+				goto fail_sec;
 			newflags |= VM_ACCOUNT;
 		}
 	}
@@ -198,10 +210,16 @@ success:
 		change_protection(vma, start, end, newprot);
 	vm_stat_account(mm, oldflags, vma->vm_file, -nrpages);
 	vm_stat_account(mm, newflags, vma->vm_file, nrpages);
+	if (ch_dir == PRIVVM_TO_SHARED)
+		__ub_unused_privvm_dec(mm, ch_size);
 	return 0;
 
 fail:
 	vm_unacct_memory(charged);
+fail_sec:
+	if (ch_dir == PRIVVM_TO_PRIVATE)
+		__ub_unused_privvm_dec(mm, ch_size);
+fail_ch:
 	return error;
 }
 
@@ -263,6 +281,11 @@ sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 	if (start > vma->vm_start)
 		prev = vma;
 
+	if (!gr_acl_handle_mprotect(vma->vm_file, prot)) {
+		error = -EACCES;
+		goto out;
+	}
+
 	for (nstart = start ; ; ) {
 		unsigned long newflags;
 
@@ -303,3 +326,4 @@ out:
 	up_write(&current->mm->mmap_sem);
 	return error;
 }
+EXPORT_SYMBOL_GPL(sys_mprotect);

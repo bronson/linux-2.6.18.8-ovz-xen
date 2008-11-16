@@ -21,6 +21,12 @@ gianfar_driver-objs := gianfar.o \
 obj-$(CONFIG_UCC_GETH) += ucc_geth_driver.o
 ucc_geth_driver-objs := ucc_geth.o ucc_geth_phy.o
 
+obj-$(CONFIG_VE_NETDEV) += vznetdev.o
+vznetdev-objs := open_vznet.o venet_core.o
+
+obj-$(CONFIG_VE_ETHDEV) += vzethdev.o
+vzethdev-objs := veth.o
+
 #
 # link order important here
 #

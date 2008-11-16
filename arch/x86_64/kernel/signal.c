@@ -302,7 +302,7 @@ static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	   see include/asm-x86_64/uaccess.h for details. */
 	set_fs(USER_DS);
 
-	regs->eflags &= ~TF_MASK;
+	regs->eflags &= ~(TF_MASK | X86_EFLAGS_DF);
 	if (test_thread_flag(TIF_SINGLESTEP))
 		ptrace_notify(SIGTRAP);
 #ifdef DEBUG_SIG
@@ -397,9 +397,9 @@ handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
 static void do_signal(struct pt_regs *regs)
 {
 	struct k_sigaction ka;
+	sigset_t *oldset;
 	siginfo_t info;
 	int signr;
-	sigset_t *oldset;
 
 	/*
 	 * We want the common case to go fast, which
@@ -410,6 +410,9 @@ static void do_signal(struct pt_regs *regs)
 	if (!user_mode(regs))
 		return;
 
+	if (try_to_freeze() && !signal_pending(current))
+  		goto no_signal;
+  
 	if (test_thread_flag(TIF_RESTORE_SIGMASK))
 		oldset = &current->saved_sigmask;
 	else
@@ -431,11 +434,13 @@ static void do_signal(struct pt_regs *regs)
 			 * sigmask will have been stored in the signal frame,
 			 * and will be restored by sigreturn, so we can simply
 			 * clear the TIF_RESTORE_SIGMASK flag */
-			clear_thread_flag(TIF_RESTORE_SIGMASK);
+			if (test_thread_flag(TIF_RESTORE_SIGMASK))
+				clear_thread_flag(TIF_RESTORE_SIGMASK);
 		}
 		return;
 	}
 
+no_signal:
 	/* Did we come from a system call? */
 	if ((long)regs->orig_rax >= 0) {
 		/* Restart the system call - no handlers present */
@@ -457,15 +462,14 @@ static void do_signal(struct pt_regs *regs)
 	}
 
 	/* if there's no signal to deliver, we just put the saved sigmask
-	   back. */
+	 * back */
 	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
 		clear_thread_flag(TIF_RESTORE_SIGMASK);
 		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
 	}
 }
 
-void
-do_notify_resume(struct pt_regs *regs, void *unused, __u32 thread_info_flags)
+void do_notify_resume(struct pt_regs *regs, sigset_t *unused, __u32 thread_info_flags)
 {
 #ifdef DEBUG_SIG
 	printk("do_notify_resume flags:%x rip:%lx rsp:%lx caller:%lx pending:%lx\n",

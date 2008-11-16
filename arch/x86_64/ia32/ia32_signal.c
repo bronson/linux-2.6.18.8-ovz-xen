@@ -37,7 +37,6 @@
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-asmlinkage int do_signal(struct pt_regs *regs, sigset_t *oldset);
 void signal_fault(struct pt_regs *regs, void __user *frame, char *where);
 
 int copy_siginfo_to_user32(compat_siginfo_t __user *to, siginfo_t *from)
@@ -122,8 +121,8 @@ sys32_sigsuspend(int history0, int history1, old_sigset_t mask)
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
 	set_thread_flag(TIF_RESTORE_SIGMASK);
 	return -ERESTARTNOHAND;
 }
@@ -493,7 +492,7 @@ int ia32_setup_frame(int sig, struct k_sigaction *ka,
 	regs->ss = __USER32_DS; 
 
 	set_fs(USER_DS);
-    regs->eflags &= ~TF_MASK;
+    regs->eflags &= ~(TF_MASK | X86_EFLAGS_DF);
     if (test_thread_flag(TIF_SINGLESTEP))
         ptrace_notify(SIGTRAP);
 
@@ -589,7 +588,7 @@ int ia32_setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	regs->ss = __USER32_DS; 
 
 	set_fs(USER_DS);
-    regs->eflags &= ~TF_MASK;
+    regs->eflags &= ~(TF_MASK | X86_EFLAGS_DF);
     if (test_thread_flag(TIF_SINGLESTEP))
         ptrace_notify(SIGTRAP);
 

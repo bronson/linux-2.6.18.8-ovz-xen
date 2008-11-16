@@ -176,7 +176,7 @@ static int ebt_among_check(const char *tablename, unsigned int hookmask,
 			   unsigned int datalen)
 {
 	struct ebt_among_info *info = (struct ebt_among_info *) data;
-	int expected_length = sizeof(struct ebt_among_info);
+	int expected_length = EBT_ALIGN(sizeof(struct ebt_among_info));
 	const struct ebt_mac_wormhash *wh_dst, *wh_src;
 	int err;
 
@@ -185,7 +185,7 @@ static int ebt_among_check(const char *tablename, unsigned int hookmask,
 	expected_length += ebt_mac_wormhash_size(wh_dst);
 	expected_length += ebt_mac_wormhash_size(wh_src);
 
-	if (datalen != EBT_ALIGN(expected_length)) {
+	if (datalen != expected_length) {
 		printk(KERN_WARNING
 		       "ebtables: among: wrong size: %d"
 		       "against expected %d, rounded to %Zd\n",

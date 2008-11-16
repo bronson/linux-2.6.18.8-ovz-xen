@@ -320,8 +320,18 @@
 #define __NR_unshare		299
 #define __NR_set_robust_list	300
 #define __NR_get_robust_list	301
+#define __NR_utimensat		310
+#define __NR_fairsched_mknod	500     /* FairScheduler syscalls */
+#define __NR_fairsched_rmnod	501
+#define __NR_fairsched_chwt	502
+#define __NR_fairsched_mvpr	503
+#define __NR_fairsched_rate	504
+#define __NR_getluid		510
+#define __NR_setluid		511
+#define __NR_setublimit		512
+#define __NR_ubstat		513
 
-#define NR_SYSCALLS		302
+#define NR_SYSCALLS		513
 
 #ifdef __KERNEL__
 /* WARNING: You MAY NOT add syscall numbers larger than 301, since

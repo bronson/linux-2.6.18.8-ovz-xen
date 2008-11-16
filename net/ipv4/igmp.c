@@ -455,6 +455,8 @@ static struct sk_buff *add_grec(struct sk_buff *skb, struct ip_mc_list *pmc,
 			skb = add_grhead(skb, pmc, type, &pgr);
 			first = 0;
 		}
+		if (!skb)
+			return NULL;
 		psrc = (u32 *)skb_put(skb, sizeof(u32));
 		*psrc = psf->sf_inaddr;
 		scount++; stotal++;
@@ -694,22 +696,28 @@ static int igmp_send_report(struct in_device *in_dev, struct ip_mc_list *pmc,
 static void igmp_gq_timer_expire(unsigned long data)
 {
 	struct in_device *in_dev = (struct in_device *)data;
+	struct ve_struct *old_env;
 
+	old_env = set_exec_env(in_dev->dev->owner_env);
 	in_dev->mr_gq_running = 0;
 	igmpv3_send_report(in_dev, NULL);
 	__in_dev_put(in_dev);
+	(void)set_exec_env(old_env);
 }
 
 static void igmp_ifc_timer_expire(unsigned long data)
 {
 	struct in_device *in_dev = (struct in_device *)data;
+	struct ve_struct *old_env;
 
+	old_env = set_exec_env(in_dev->dev->owner_env);
 	igmpv3_send_cr(in_dev);
 	if (in_dev->mr_ifc_count) {
 		in_dev->mr_ifc_count--;
 		igmp_ifc_start_timer(in_dev, IGMP_Unsolicited_Report_Interval);
 	}
 	__in_dev_put(in_dev);
+	(void)set_exec_env(old_env);
 }
 
 static void igmp_ifc_event(struct in_device *in_dev)
@@ -726,6 +734,7 @@ static void igmp_timer_expire(unsigned long data)
 {
 	struct ip_mc_list *im=(struct ip_mc_list *)data;
 	struct in_device *in_dev = im->interface;
+	struct ve_struct *old_env;
 
 	spin_lock(&im->lock);
 	im->tm_running=0;
@@ -737,6 +746,7 @@ static void igmp_timer_expire(unsigned long data)
 	im->reporter = 1;
 	spin_unlock(&im->lock);
 
+	old_env = set_exec_env(in_dev->dev->owner_env);
 	if (IGMP_V1_SEEN(in_dev))
 		igmp_send_report(in_dev, im, IGMP_HOST_MEMBERSHIP_REPORT);
 	else if (IGMP_V2_SEEN(in_dev))
@@ -745,6 +755,7 @@ static void igmp_timer_expire(unsigned long data)
 		igmp_send_report(in_dev, im, IGMPV3_HOST_MEMBERSHIP_REPORT);
 
 	ip_ma_put(im);
+	(void)set_exec_env(old_env);
 }
 
 /* mark EXCLUDE-mode sources */
@@ -2265,6 +2276,8 @@ static inline struct ip_mc_list *igmp_mc_get_first(struct seq_file *seq)
 	     state->dev; 
 	     state->dev = state->dev->next) {
 		struct in_device *in_dev;
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		in_dev = in_dev_get(state->dev);
 		if (!in_dev)
 			continue;
@@ -2294,6 +2307,8 @@ static struct ip_mc_list *igmp_mc_get_next(struct seq_file *seq, struct ip_mc_li
 			state->in_dev = NULL;
 			break;
 		}
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		state->in_dev = in_dev_get(state->dev);
 		if (!state->in_dev)
 			continue;
@@ -2427,6 +2442,8 @@ static inline struct ip_sf_list *igmp_mcf_get_first(struct seq_file *seq)
 	     state->dev; 
 	     state->dev = state->dev->next) {
 		struct in_device *idev;
+		if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+			continue;
 		idev = in_dev_get(state->dev);
 		if (unlikely(idev == NULL))
 			continue;
@@ -2466,6 +2483,8 @@ static struct ip_sf_list *igmp_mcf_get_next(struct seq_file *seq, struct ip_sf_l
 				state->idev = NULL;
 				goto out;
 			}
+			if (unlikely(!ve_accessible_strict(state->dev->owner_env, get_exec_env())))
+				continue;
 			state->idev = in_dev_get(state->dev);
 			if (!state->idev)
 				continue;
@@ -2585,8 +2604,8 @@ static struct file_operations igmp_mcf_seq_fops = {
 
 int __init igmp_mc_proc_init(void)
 {
-	proc_net_fops_create("igmp", S_IRUGO, &igmp_mc_seq_fops);
-	proc_net_fops_create("mcfilter", S_IRUGO, &igmp_mcf_seq_fops);
+	proc_glob_fops_create("net/igmp", S_IRUGO, &igmp_mc_seq_fops);
+	proc_glob_fops_create("net/mcfilter", S_IRUGO, &igmp_mcf_seq_fops);
 	return 0;
 }
 #endif

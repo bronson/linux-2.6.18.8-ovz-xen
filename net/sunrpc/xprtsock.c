@@ -449,18 +449,23 @@ out_release:
  */
 static void xs_close(struct rpc_xprt *xprt)
 {
-	struct socket *sock = xprt->sock;
-	struct sock *sk = xprt->inet;
-
-	if (!sk)
-		goto clear_close_wait;
+	struct socket *sock;
+	struct sock *sk;
 
 	dprintk("RPC:      xs_close xprt %p\n", xprt);
 
-	write_lock_bh(&sk->sk_callback_lock);
-	xprt->inet = NULL;
+	spin_lock_bh(&xprt->transport_lock);
+	if (xprt->sock == NULL) {
+		spin_unlock_bh(&xprt->transport_lock);
+		goto clear_close_wait;
+	}
+	sock = xprt->sock;
+	sk = xprt->inet;
 	xprt->sock = NULL;
+	xprt->inet = NULL;
+	spin_unlock_bh(&xprt->transport_lock);
 
+	write_lock_bh(&sk->sk_callback_lock);
 	sk->sk_user_data = NULL;
 	sk->sk_data_ready = xprt->old_data_ready;
 	sk->sk_state_change = xprt->old_state_change;
@@ -1015,7 +1020,12 @@ static void xs_udp_connect_worker(void *args)
 	struct rpc_xprt *xprt = (struct rpc_xprt *) args;
 	struct socket *sock = xprt->sock;
 	int err, status = -EIO;
+	struct ve_struct *ve;
 
+	ve = set_exec_env(xprt->owner_env);
+	down_read(&xprt->owner_env->op_sem);
+	if (!xprt->owner_env->is_running)
+		goto out;
 	if (xprt->shutdown || xprt->addr.sin_port == 0)
 		goto out;
 
@@ -1061,6 +1071,8 @@ static void xs_udp_connect_worker(void *args)
 out:
 	xprt_wake_pending_tasks(xprt, status);
 	xprt_clear_connecting(xprt);
+	up_read(&xprt->owner_env->op_sem);
+	(void)set_exec_env(ve);
 }
 
 /*
@@ -1098,7 +1110,12 @@ static void xs_tcp_connect_worker(void *args)
 	struct rpc_xprt *xprt = (struct rpc_xprt *)args;
 	struct socket *sock = xprt->sock;
 	int err, status = -EIO;
+	struct ve_struct *ve;
 
+	ve = set_exec_env(xprt->owner_env);
+	down_read(&xprt->owner_env->op_sem);
+	if (!xprt->owner_env->is_running)
+		goto out;
 	if (xprt->shutdown || xprt->addr.sin_port == 0)
 		goto out;
 
@@ -1174,6 +1191,8 @@ out:
 	xprt_wake_pending_tasks(xprt, status);
 out_clear:
 	xprt_clear_connecting(xprt);
+	up_read(&xprt->owner_env->op_sem);
+	(void)set_exec_env(ve);
 }
 
 /**

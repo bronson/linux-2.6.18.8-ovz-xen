@@ -440,6 +440,15 @@ config QUOTA
 	  with the quota tools. Probably the quota support is only useful for
 	  multi user systems. If unsure, say N.
 
+config QUOTA_COMPAT
+	bool "Compatibility with older quotactl interface"
+	depends on QUOTA
+	help
+	  This option enables compatibility layer for older version
+	  of quotactl interface with byte granularity (QUOTAON at 0x0100,
+	  GETQUOTA at 0x0D00).  Interface versions older than that one and
+	  with block granularity are still not supported.
+
 config QFMT_V1
 	tristate "Old quota format support"
 	depends on QUOTA
@@ -454,6 +463,39 @@ config QFMT_V2
 	help
 	  This quota format allows using quotas with 32-bit UIDs/GIDs. If you
 	  need this functionality say Y here.
+
+config SIM_FS
+	tristate "VPS filesystem"
+	depends on VZ_QUOTA
+	default m
+	help
+	  This file system is a part of Virtuozzo. It intoduces a fake
+	  superblock and blockdev to VE to hide real device and show
+	  statfs results taken from quota.
+
+config VZ_QUOTA
+	tristate "Virtuozzo Disk Quota support"
+	depends on QUOTA
+	select VZ_DEV
+	default m
+	help
+	  Virtuozzo Disk Quota imposes disk quota on directories with their
+	  files and subdirectories in total.  Such disk quota is used to
+	  account and limit disk usage by Virtuozzo VPS, but also may be used
+	  separately.
+
+config VZ_QUOTA_UNLOAD
+	bool "Unloadable Virtuozzo Disk Quota module"
+	depends on VZ_QUOTA=m
+	default n
+	help
+	  Make Virtuozzo Disk Quota module unloadable.
+	  Doesn't work reliably now.
+
+config VZ_QUOTA_UGID
+	bool "Per-user and per-group quota in Virtuozzo quota partitions"
+	depends on VZ_QUOTA!=n
+	default y
 
 config QUOTACTL
 	bool

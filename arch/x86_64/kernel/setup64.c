@@ -295,3 +295,5 @@ void __cpuinit cpu_init (void)
 
 	raw_local_save_flags(kernel_eflags);
 }
+
+EXPORT_SYMBOL_GPL(cpu_gdt_descr);

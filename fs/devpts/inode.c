@@ -12,6 +12,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/ve.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/namei.h>
@@ -22,16 +23,17 @@
 
 #define DEVPTS_SUPER_MAGIC 0x1cd1
 
+struct devpts_config devpts_config = {.mode = 0600};
+
+#ifndef CONFIG_VE
 static struct vfsmount *devpts_mnt;
 static struct dentry *devpts_root;
-
-static struct {
-	int setuid;
-	int setgid;
-	uid_t   uid;
-	gid_t   gid;
-	umode_t mode;
-} config = {.mode = 0600};
+#define config	devpts_config
+#else
+#define devpts_mnt	(get_exec_env()->devpts_mnt)
+#define devpts_root	(get_exec_env()->devpts_root)
+#define config		(*(get_exec_env()->devpts_config))
+#endif
 
 enum {
 	Opt_uid, Opt_gid, Opt_mode,
@@ -83,7 +85,8 @@ static int devpts_remount(struct super_block *sb, int *flags, char *data)
 			config.mode = option & ~S_IFMT;
 			break;
 		default:
-			printk(KERN_ERR "devpts: called with bogus options\n");
+			ve_printk(VE_LOG, KERN_ERR
+					"devpts: called with bogus options\n");
 			return -EINVAL;
 		}
 	}
@@ -136,12 +139,14 @@ static int devpts_get_sb(struct file_system_type *fs_type,
 	return get_sb_single(fs_type, flags, data, devpts_fill_super, mnt);
 }
 
-static struct file_system_type devpts_fs_type = {
+struct file_system_type devpts_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "devpts",
 	.get_sb		= devpts_get_sb,
 	.kill_sb	= kill_anon_super,
 };
+
+EXPORT_SYMBOL(devpts_fs_type);
 
 /*
  * The normal naming convention is simply /dev/pts/<number>; this conforms
@@ -234,6 +239,7 @@ static int __init init_devpts_fs(void)
 
 static void __exit exit_devpts_fs(void)
 {
+	/* the code is never called, the argument is irrelevant */
 	unregister_filesystem(&devpts_fs_type);
 	mntput(devpts_mnt);
 }

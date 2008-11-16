@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <asm/checksum.h>
 #include <asm/desc.h>
+#include <asm/pgtable.h>
 
 EXPORT_SYMBOL(__down_failed);
 EXPORT_SYMBOL(__down_failed_interruptible);
@@ -27,4 +28,5 @@ EXPORT_SYMBOL(__write_lock_failed);
 EXPORT_SYMBOL(__read_lock_failed);
 #endif
 
+EXPORT_SYMBOL(empty_zero_page);
 EXPORT_SYMBOL(csum_partial);

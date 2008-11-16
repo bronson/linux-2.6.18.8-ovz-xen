@@ -619,10 +619,36 @@ __SYSCALL(__NR_sync_file_range, sys_sync_file_range)
 __SYSCALL(__NR_vmsplice, sys_vmsplice)
 #define __NR_move_pages		279
 __SYSCALL(__NR_move_pages, sys_move_pages)
+#define __NR_utimensat          280
+__SYSCALL(__NR_utimensat, sys_utimensat)
+#define __NR_fairsched_vcpus	499
+__SYSCALL(__NR_fairsched_vcpus, sys_fairsched_vcpus)
+#define __NR_getluid		500
+__SYSCALL(__NR_getluid, sys_getluid)
+#define __NR_setluid		501
+__SYSCALL(__NR_setluid, sys_setluid)
+#define __NR_setublimit		502
+__SYSCALL(__NR_setublimit, sys_setublimit)
+#define __NR_ubstat		503
+__SYSCALL(__NR_ubstat, sys_ubstat)
+#define __NR_fairsched_mknod	504 /* FairScheduler syscalls */
+__SYSCALL(__NR_fairsched_mknod, sys_fairsched_mknod)
+#define __NR_fairsched_rmnod	505
+__SYSCALL(__NR_fairsched_rmnod, sys_fairsched_rmnod)
+#define __NR_fairsched_chwt	506
+__SYSCALL(__NR_fairsched_chwt, sys_fairsched_chwt)
+#define __NR_fairsched_mvpr	507
+__SYSCALL(__NR_fairsched_mvpr, sys_fairsched_mvpr)
+#define __NR_fairsched_rate	508
+__SYSCALL(__NR_fairsched_rate, sys_fairsched_rate)
+#define __NR_lchmod		509
+__SYSCALL(__NR_lchmod, sys_lchmod)
+#define __NR_lutime		510
+__SYSCALL(__NR_lutime, sys_lutime)
 
 #ifdef __KERNEL__
 
-#define __NR_syscall_max __NR_move_pages
+#define __NR_syscall_max __NR_lutime
 
 #ifndef __NO_STUBS
 
@@ -661,6 +687,7 @@ do { \
 #define __ARCH_WANT_SYS_RT_SIGSUSPEND
 #define __ARCH_WANT_SYS_TIME
 #define __ARCH_WANT_COMPAT_SYS_TIME
+#define __ARCH_WANT_SYS_RT_SIGSUSPEND
 
 #ifndef __KERNEL_SYSCALLS__
 

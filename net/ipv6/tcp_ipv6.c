@@ -61,6 +61,8 @@
 #include <net/dsfield.h>
 #include <net/timewait_sock.h>
 
+#include <ub/ub_tcp.h>
+
 #include <asm/uaccess.h>
 
 #include <linux/proc_fs.h>
@@ -76,7 +78,7 @@ static void	tcp_v6_send_check(struct sock *sk, int len,
 
 static int	tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb);
 
-static struct inet_connection_sock_af_ops ipv6_mapped;
+struct inet_connection_sock_af_ops ipv6_mapped;
 static struct inet_connection_sock_af_ops ipv6_specific;
 
 static int tcp_v6_get_port(struct sock *sk, unsigned short snum)
@@ -966,6 +968,7 @@ static struct sock * tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	   First: no IPv4 options.
 	 */
 	newinet->opt = NULL;
+	newnp->ipv6_fl_list = NULL;
 
 	/* Clone RX bits */
 	newnp->rxopt.all = np->rxopt.all;
@@ -1054,6 +1057,8 @@ static int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb)
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct tcp_sock *tp;
 	struct sk_buff *opt_skb = NULL;
+	struct user_beancounter *ub;
+
 
 	/* Imagine: socket is IPv6. IPv4 packet arrives,
 	   goes to IPv4 receive handler and backlogged.
@@ -1065,6 +1070,8 @@ static int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb)
 
 	if (skb->protocol == htons(ETH_P_IP))
 		return tcp_v4_do_rcv(sk, skb);
+
+	ub = set_exec_ub(sock_bc(sk)->ub);
 
 	if (sk_filter(sk, skb, 0))
 		goto discard;
@@ -1097,7 +1104,7 @@ static int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb)
 		TCP_CHECK_TIMER(sk);
 		if (opt_skb)
 			goto ipv6_pktoptions;
-		return 0;
+		goto restore_context;
 	}
 
 	if (skb->len < (skb->h.th->doff<<2) || tcp_checksum_complete(skb))
@@ -1118,7 +1125,7 @@ static int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb)
 				goto reset;
 			if (opt_skb)
 				__kfree_skb(opt_skb);
-			return 0;
+			goto restore_context;
 		}
 	}
 
@@ -1128,6 +1135,9 @@ static int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb)
 	TCP_CHECK_TIMER(sk);
 	if (opt_skb)
 		goto ipv6_pktoptions;
+
+restore_context:
+	(void)set_exec_ub(ub);
 	return 0;
 
 reset:
@@ -1136,7 +1146,7 @@ discard:
 	if (opt_skb)
 		__kfree_skb(opt_skb);
 	kfree_skb(skb);
-	return 0;
+	goto restore_context;
 csum_err:
 	TCP_INC_STATS_BH(TCP_MIB_INERRS);
 	goto discard;
@@ -1168,7 +1178,7 @@ ipv6_pktoptions:
 
 	if (opt_skb)
 		kfree_skb(opt_skb);
-	return 0;
+	goto restore_context;
 }
 
 static int tcp_v6_rcv(struct sk_buff **pskb)
@@ -1335,12 +1345,13 @@ static struct inet_connection_sock_af_ops ipv6_specific = {
 	.compat_getsockopt = compat_ipv6_getsockopt,
 #endif
 };
+EXPORT_SYMBOL_GPL(ipv6_mapped);
 
 /*
  *	TCP over IPv4 via INET6 API
  */
 
-static struct inet_connection_sock_af_ops ipv6_mapped = {
+struct inet_connection_sock_af_ops ipv6_mapped = {
 	.queue_xmit	   = ip_queue_xmit,
 	.send_check	   = tcp_v4_send_check,
 	.rebuild_header	   = inet_sk_rebuild_header,
@@ -1562,7 +1573,7 @@ out:
 static struct file_operations tcp6_seq_fops;
 static struct tcp_seq_afinfo tcp6_seq_afinfo = {
 	.owner		= THIS_MODULE,
-	.name		= "tcp6",
+	.name		= "net/tcp6",
 	.family		= AF_INET6,
 	.seq_show	= tcp6_seq_show,
 	.seq_fops	= &tcp6_seq_fops,

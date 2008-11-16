@@ -25,6 +25,8 @@
 #include <net/ip6_route.h>
 #include <net/sock.h>
 #include <net/inet6_connection_sock.h>
+#include <ub/ub_net.h>
+#include <ub/ub_orphan.h>
 
 int inet6_csk_bind_conflict(const struct sock *sk,
 			    const struct inet_bind_bucket *tb)
@@ -35,6 +37,7 @@ int inet6_csk_bind_conflict(const struct sock *sk,
 	/* We must walk the whole port owner list in this case. -DaveM */
 	sk_for_each_bound(sk2, node, &tb->owners) {
 		if (sk != sk2 &&
+		    ve_accessible_strict(sk->owner_env, sk2->owner_env) &&
 		    (!sk->sk_bound_dev_if ||
 		     !sk2->sk_bound_dev_if ||
 		     sk->sk_bound_dev_if == sk2->sk_bound_dev_if) &&

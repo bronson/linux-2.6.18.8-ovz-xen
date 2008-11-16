@@ -8,6 +8,8 @@
 #include <linux/netfilter/nf_conntrack_tuple_common.h>
 #include <linux/in.h>
 
+#include <net/compat.h>
+
 #define XT_CONNTRACK_STATE_BIT(ctinfo) (1 << ((ctinfo)%IP_CT_IS_REPLY+1))
 #define XT_CONNTRACK_STATE_INVALID (1 << 0)
 
@@ -60,4 +62,21 @@ struct xt_conntrack_info
 	/* Inverse flags */
 	u_int8_t invflags;
 };
+
+#ifdef CONFIG_COMPAT
+struct compat_xt_conntrack_info
+{
+	unsigned int statemask, statusmask;
+
+	struct ip_conntrack_old_tuple tuple[IP_CT_DIR_MAX];
+	struct in_addr sipmsk[IP_CT_DIR_MAX], dipmsk[IP_CT_DIR_MAX];
+
+	compat_ulong_t expires_min, expires_max;
+
+	/* Flags word */
+	u_int8_t flags;
+	/* Inverse flags */
+	u_int8_t invflags;
+};
+#endif /*CONFIG_COMPAT*/
 #endif /*_XT_CONNTRACK_H*/

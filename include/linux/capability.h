@@ -146,12 +146,9 @@ typedef __u32 kernel_cap_t;
 
 #define CAP_NET_BROADCAST    11
 
-/* Allow interface configuration */
 /* Allow administration of IP firewall, masquerading and accounting */
 /* Allow setting debug option on sockets */
 /* Allow modification of routing tables */
-/* Allow setting arbitrary process / process group ownership on
-   sockets */
 /* Allow binding to any address for transparent proxying */
 /* Allow setting TOS (type of service) */
 /* Allow setting promiscuous mode */
@@ -182,6 +179,7 @@ typedef __u32 kernel_cap_t;
 #define CAP_SYS_MODULE       16
 
 /* Allow ioperm/iopl access */
+/* Allow O_DIRECT access */
 /* Allow sending USB messages to any device via /proc/bus/usb */
 
 #define CAP_SYS_RAWIO        17
@@ -200,24 +198,19 @@ typedef __u32 kernel_cap_t;
 
 /* Allow configuration of the secure attention key */
 /* Allow administration of the random device */
-/* Allow examination and configuration of disk quotas */
 /* Allow configuring the kernel's syslog (printk behaviour) */
 /* Allow setting the domainname */
 /* Allow setting the hostname */
 /* Allow calling bdflush() */
-/* Allow mount() and umount(), setting up new smb connection */
+/* Allow setting up new smb connection */
 /* Allow some autofs root ioctls */
 /* Allow nfsservctl */
 /* Allow VM86_REQUEST_IRQ */
 /* Allow to read/write pci config on alpha */
 /* Allow irix_prctl on mips (setstacksize) */
 /* Allow flushing all cache on m68k (sys_cacheflush) */
-/* Allow removing semaphores */
-/* Used instead of CAP_CHOWN to "chown" IPC message queues, semaphores
-   and shared memory */
 /* Allow locking/unlocking of shared memory segment */
 /* Allow turning swap on/off */
-/* Allow forged pids on socket credentials passing */
 /* Allow setting readahead and flushing buffers on block devices */
 /* Allow setting geometry in floppy driver */
 /* Allow turning DMA on/off in xd driver */
@@ -235,6 +228,8 @@ typedef __u32 kernel_cap_t;
    arbitrary SCSI commands */
 /* Allow setting encryption key on loopback filesystem */
 /* Allow setting zone reclaim policy */
+/* Modify data journaling mode on ext3 filesystem (uses journaling
+   resources) */
 
 #define CAP_SYS_ADMIN        21
 
@@ -254,8 +249,6 @@ typedef __u32 kernel_cap_t;
 /* Override resource limits. Set resource limits. */
 /* Override quota limits. */
 /* Override reserved space on ext2 filesystem */
-/* Modify data journaling mode on ext3 filesystem (uses journaling
-   resources) */
 /* NOTE: ext2 honors fsuid when checking for resource overrides, so 
    you can override using fsuid too */
 /* Override size restrictions on IPC message queues */
@@ -288,11 +281,60 @@ typedef __u32 kernel_cap_t;
 
 #define CAP_AUDIT_CONTROL    30
 
+/*
+ * Important note: VZ capabilities do intersect with CAP_AUDIT
+ * this is due to compatibility reasons. Nothing bad.
+ * Both VZ and Audit/SELinux caps are disabled in VPSs.
+ */
+
+/* Allow access to all information. In the other case some structures will be
+   hiding to ensure different Virtual Environment non-interaction on the same
+   node */
+#define CAP_SETVEID	     29
+
+#define CAP_VE_ADMIN	     30
+
 #ifdef __KERNEL__
+
+#include <linux/config.h>
+
+#ifdef CONFIG_VE
+
+/* Replacement for CAP_NET_ADMIN:
+   delegated rights to the Virtual environment of its network administration.
+   For now the following rights have been delegated:
+
+   Allow setting arbitrary process / process group ownership on sockets
+   Allow interface configuration
+ */
+#define CAP_VE_NET_ADMIN     CAP_VE_ADMIN
+
+/* Replacement for CAP_SYS_ADMIN:
+   delegated rights to the Virtual environment of its administration.
+   For now the following rights have been delegated:
+ */
+/* Allow mount/umount/remount */
+/* Allow examination and configuration of disk quotas */
+/* Allow removing semaphores */
+/* Used instead of CAP_CHOWN to "chown" IPC message queues, semaphores
+   and shared memory */
+/* Allow locking/unlocking of shared memory segment */
+/* Allow forged pids on socket credentials passing */
+
+#define CAP_VE_SYS_ADMIN     CAP_VE_ADMIN
+#else
+#define CAP_VE_NET_ADMIN     CAP_NET_ADMIN
+#define CAP_VE_SYS_ADMIN     CAP_SYS_ADMIN
+#endif
+
 /* 
  * Bounding set
  */
+#ifndef CONFIG_VE
 extern kernel_cap_t cap_bset;
+#else
+#define cap_bset get_exec_env()->ve_cap_bset
+#endif
 
 /*
  * Internal kernel functions only
@@ -352,13 +394,19 @@ static inline kernel_cap_t cap_invert(kernel_cap_t c)
 #define cap_issubset(a,set)  (!(cap_t(a) & ~cap_t(set)))
 
 #define cap_clear(c)         do { cap_t(c) =  0; } while(0)
+#ifndef CONFIG_VE
 #define cap_set_full(c)      do { cap_t(c) = ~0; } while(0)
+#else
+#define cap_set_full(c) \
+        do {cap_t(c) = ve_is_super(get_exec_env()) ? ~0 :		\
+					cap_bset; } while(0)
+#endif
 #define cap_mask(c,mask)     do { cap_t(c) &= cap_t(mask); } while(0)
-
 #define cap_is_fs_cap(c)     (CAP_TO_MASK(c) & CAP_FS_MASK)
 
 int capable(int cap);
 int __capable(struct task_struct *t, int cap);
+extern spinlock_t task_capability_lock;
 
 #endif /* __KERNEL__ */
 

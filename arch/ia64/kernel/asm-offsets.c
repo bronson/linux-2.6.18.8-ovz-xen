@@ -43,11 +43,19 @@ void foo(void)
 	DEFINE(IA64_TASK_CLEAR_CHILD_TID_OFFSET,offsetof (struct task_struct, clear_child_tid));
 	DEFINE(IA64_TASK_GROUP_LEADER_OFFSET, offsetof (struct task_struct, group_leader));
 	DEFINE(IA64_TASK_PENDING_OFFSET,offsetof (struct task_struct, pending));
+#ifdef CONFIG_VE
+	DEFINE(IA64_TASK_PID_OFFSET, offsetof (struct task_struct, vpid));
+#else
 	DEFINE(IA64_TASK_PID_OFFSET, offsetof (struct task_struct, pid));
+#endif
 	DEFINE(IA64_TASK_REAL_PARENT_OFFSET, offsetof (struct task_struct, real_parent));
 	DEFINE(IA64_TASK_SIGHAND_OFFSET,offsetof (struct task_struct, sighand));
 	DEFINE(IA64_TASK_SIGNAL_OFFSET,offsetof (struct task_struct, signal));
+#ifdef CONFIG_VE
+	DEFINE(IA64_TASK_TGID_OFFSET, offsetof (struct task_struct, vtgid));
+#else
 	DEFINE(IA64_TASK_TGID_OFFSET, offsetof (struct task_struct, tgid));
+#endif
 	DEFINE(IA64_TASK_THREAD_KSP_OFFSET, offsetof (struct task_struct, thread.ksp));
 	DEFINE(IA64_TASK_THREAD_ON_USTACK_OFFSET, offsetof (struct task_struct, thread.on_ustack));
 

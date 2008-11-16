@@ -6,7 +6,7 @@
 
 #ifdef __KERNEL__
 
-extern int ip_nat_rule_init(void) __init;
+extern int ip_nat_rule_init(void);
 extern void ip_nat_rule_cleanup(void);
 extern int ip_nat_rule_find(struct sk_buff **pskb,
 			    unsigned int hooknum,

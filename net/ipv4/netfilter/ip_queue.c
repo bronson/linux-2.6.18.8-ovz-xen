@@ -515,7 +515,7 @@ ipq_rcv_skb(struct sk_buff *skb)
 	if (type <= IPQM_BASE)
 		return;
 		
-	if (security_netlink_recv(skb, CAP_NET_ADMIN))
+	if (security_netlink_recv(skb, CAP_VE_NET_ADMIN))
 		RCV_SKB_FAIL(-EPERM);
 	
 	write_lock_bh(&queue_lock);
@@ -547,12 +547,15 @@ ipq_rcv_sk(struct sock *sk, int len)
 {
 	struct sk_buff *skb;
 	unsigned int qlen;
+	struct ve_struct *env;
 
 	mutex_lock(&ipqnl_mutex);
 			
 	for (qlen = skb_queue_len(&sk->sk_receive_queue); qlen; qlen--) {
 		skb = skb_dequeue(&sk->sk_receive_queue);
+		env = set_exec_env(skb->owner_env);
 		ipq_rcv_skb(skb);
+		(void)set_exec_env(env);
 		kfree_skb(skb);
 	}
 		

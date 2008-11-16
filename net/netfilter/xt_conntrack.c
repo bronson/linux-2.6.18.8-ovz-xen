@@ -229,12 +229,109 @@ destroy(const struct xt_match *match, void *matchinfo, unsigned int matchsize)
 #endif
 }
 
+#ifdef CONFIG_COMPAT
+static int conntrack_match_compat_to_user(void *match, void **dstptr,
+		int *size, int off)
+{
+	struct xt_entry_match *pm;
+	struct xt_conntrack_info *pinfo;
+	struct compat_xt_conntrack_info rinfo;
+	u_int16_t msize;
+
+	pm = (struct xt_entry_match *)match;
+	msize = pm->u.user.match_size;
+	if (__copy_to_user(*dstptr, pm, sizeof(struct compat_xt_entry_match)))
+		return -EFAULT;
+	pinfo = (struct xt_conntrack_info *)pm->data;
+	memset(&rinfo, 0, sizeof(struct compat_xt_conntrack_info));
+	/* expires_{min,max} fit in 32bit cause they are read only args */
+	memcpy(&rinfo, pinfo,
+		offsetof(struct compat_xt_conntrack_info, expires_min));
+	rinfo.expires_min = (compat_ulong_t)pinfo->expires_min;
+	rinfo.expires_max = (compat_ulong_t)pinfo->expires_max;
+	rinfo.flags = pinfo->flags;
+	rinfo.invflags = pinfo->invflags;
+	if (__copy_to_user(*dstptr + sizeof(struct compat_xt_entry_match),
+			&rinfo, sizeof(struct compat_xt_conntrack_info)))
+		return -EFAULT;
+	msize -= off;
+	if (put_user(msize, (u_int16_t *)*dstptr))
+		return -EFAULT;
+	*size -= off;
+	*dstptr += msize;
+	return 0;
+}
+
+static int conntrack_match_compat_from_user(void *match, void **dstptr,
+		int *size, int off)
+{
+	struct compat_xt_entry_match *pm;
+	struct xt_entry_match *dstpm;
+	struct compat_xt_conntrack_info *pinfo;
+	struct xt_conntrack_info rinfo;
+	u_int16_t msize;
+
+	pm = (struct compat_xt_entry_match *)match;
+	dstpm = (struct xt_entry_match *)*dstptr;
+	msize = pm->u.user.match_size;
+	memset(*dstptr, 0, sizeof(struct xt_entry_match));
+	memcpy(*dstptr, pm, sizeof(struct compat_xt_entry_match));
+
+	pinfo = (struct compat_xt_conntrack_info *)pm->data;
+	memset(&rinfo, 0, sizeof(struct xt_conntrack_info));
+	memcpy(&rinfo, pinfo,
+		offsetof(struct compat_xt_conntrack_info, expires_min));
+	rinfo.expires_min = pinfo->expires_min;
+	rinfo.expires_max = pinfo->expires_max;
+	rinfo.flags = pinfo->flags;
+	rinfo.invflags = pinfo->invflags;
+
+	memcpy(*dstptr + sizeof(struct xt_entry_match),
+				&rinfo, sizeof(struct xt_conntrack_info));
+	msize += off;
+	dstpm->u.user.match_size = msize;
+	*size += off;
+	*dstptr += msize;
+	return 0;
+}
+
+static int conntrack_match_compat(void *match, void **dstptr,
+		int *size, int convert)
+{
+	int ret, off;
+
+	off = XT_ALIGN(sizeof(struct xt_conntrack_info)) -
+		COMPAT_XT_ALIGN(sizeof(struct compat_xt_conntrack_info));
+	switch (convert) {
+		case COMPAT_TO_USER:
+			ret = conntrack_match_compat_to_user(match,
+					dstptr, size, off);
+			break;
+		case COMPAT_FROM_USER:
+			ret = conntrack_match_compat_from_user(match,
+					dstptr, size, off);
+			break;
+		case COMPAT_CALC_SIZE:
+			*size += off;
+			ret = 0;
+			break;
+		default:
+			ret = -ENOPROTOOPT;
+			break;
+	}
+	return ret;
+}
+#endif /*CONFIG_COMPAT*/
+
 static struct xt_match conntrack_match = {
 	.name		= "conntrack",
 	.match		= match,
 	.checkentry	= checkentry,
 	.destroy	= destroy,
 	.matchsize	= sizeof(struct xt_conntrack_info),
+#ifdef CONFIG_COMPAT
+	.compat		= conntrack_match_compat,
+#endif
 	.family		= AF_INET,
 	.me		= THIS_MODULE,
 };

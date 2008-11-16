@@ -4,8 +4,10 @@
 
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
+#include <linux/vmalloc.h>
 #include <linux/swap.h>
 #include <linux/smp.h>
 #include <linux/highmem.h>
@@ -65,6 +67,7 @@ void show_mem(void)
 	printk(KERN_INFO "%lu pages pagetables\n",
 					global_page_state(NR_PAGETABLE));
 }
+EXPORT_SYMBOL(show_mem);
 
 /*
  * Associate a virtual page frame with a given physical page frame 
@@ -170,9 +173,11 @@ struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 	struct page *pte;
 
 #ifdef CONFIG_HIGHPTE
-	pte = alloc_pages(GFP_KERNEL|__GFP_HIGHMEM|__GFP_REPEAT|__GFP_ZERO, 0);
+	pte = alloc_pages(GFP_KERNEL_UBC|__GFP_SOFT_UBC|__GFP_HIGHMEM|
+			__GFP_REPEAT|__GFP_ZERO, 0);
 #else
-	pte = alloc_pages(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO, 0);
+	pte = alloc_pages(GFP_KERNEL_UBC|__GFP_SOFT_UBC|
+			__GFP_REPEAT|__GFP_ZERO, 0);
 #endif
 	return pte;
 }

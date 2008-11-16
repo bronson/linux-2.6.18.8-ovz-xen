@@ -77,6 +77,7 @@
 #include <linux/file.h>
 #include <linux/proc_fs.h>
 #include <linux/mutex.h>
+#include <linux/module.h>
 
 #include <net/sock.h>
 #include <net/af_unix.h>
@@ -136,7 +137,7 @@ void unix_notinflight(struct file *fp)
 		atomic_dec(&unix_tot_inflight);
 	}
 }
-
+EXPORT_SYMBOL_GPL(unix_notinflight);
 
 /*
  *	Garbage Collector Support Functions

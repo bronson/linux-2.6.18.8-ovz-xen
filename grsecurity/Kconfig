@@ -1,0 +1,129 @@
+#
+# grecurity configuration
+#
+
+menu "Grsecurity"
+
+config GRKERNSEC
+	bool "Grsecurity"
+	help
+	  If you say Y here, you will be able to configure many features
+	  that will enhance the security of your system.  It is highly
+	  recommended that you say Y here and read through the help
+	  for each option so that you fully understand the features and
+	  can evaluate their usefulness for your machine.
+
+menu "Executable Protections"
+depends on GRKERNSEC
+
+config GRKERNSEC_TPE
+	bool "Trusted Path Execution (TPE)"
+	help
+	  If you say Y here, you will be able to choose a gid to add to the
+	  supplementary groups of users you want to mark as "untrusted."
+	  These users will not be able to execute any files that are not in
+	  root-owned directories writable only by root.  If the sysctl option
+	  is enabled, a sysctl option with name "tpe" is created.
+
+config GRKERNSEC_TPE_ALL
+	bool "Partially restrict non-root users"
+	depends on GRKERNSEC_TPE
+	help
+	  If you say Y here, All non-root users other than the ones in the
+	  group specified in the main TPE option will only be allowed to
+	  execute files in directories they own that are not group or
+	  world-writable, or in directories owned by root and writable only by
+	  root.  If the sysctl option is enabled, a sysctl option with name
+	  "tpe_restrict_all" is created.
+
+config GRKERNSEC_TPE_INVERT
+	bool "Invert GID option"
+	depends on GRKERNSEC_TPE
+	help
+	  If you say Y here, the group you specify in the TPE configuration will
+	  decide what group TPE restrictions will be *disabled* for.  This
+	  option is useful if you want TPE restrictions to be applied to most
+	  users on the system.
+
+config GRKERNSEC_TPE_GID
+	int "GID for untrusted users"
+	depends on GRKERNSEC_TPE && !GRKERNSEC_TPE_INVERT
+	default 1005
+	help
+	  If you have selected the "Invert GID option" above, setting this
+	  GID determines what group TPE restrictions will be *disabled* for.
+	  If you have not selected the "Invert GID option" above, setting this
+	  GID determines what group TPE restrictions will be *enabled* for.
+	  If the sysctl option is enabled, a sysctl option with name "tpe_gid"
+	  is created.
+
+config GRKERNSEC_TPE_GID
+	int "GID for trusted users"
+	depends on GRKERNSEC_TPE && GRKERNSEC_TPE_INVERT
+	default 1005
+	help
+	  If you have selected the "Invert GID option" above, setting this
+	  GID determines what group TPE restrictions will be *disabled* for.
+	  If you have not selected the "Invert GID option" above, setting this
+	  GID determines what group TPE restrictions will be *enabled* for.
+	  If the sysctl option is enabled, a sysctl option with name "tpe_gid"
+	  is created.
+
+endmenu
+menu "Sysctl support"
+depends on GRKERNSEC && SYSCTL
+
+config GRKERNSEC_SYSCTL
+	bool "Sysctl support"
+	help
+	  If you say Y here, you will be able to change the options that
+	  grsecurity runs with at bootup, without having to recompile your
+	  kernel.  You can echo values to files in /proc/sys/kernel/grsecurity
+	  to enable (1) or disable (0) various features.  All the sysctl entries
+	  are mutable until the "grsec_lock" entry is set to a non-zero value.
+	  All features enabled in the kernel configuration are disabled at boot
+	  if you do not say Y to the "Turn on features by default" option.
+	  All options should be set at startup, and the grsec_lock entry should
+	  be set to a non-zero value after all the options are set.
+	  *THIS IS EXTREMELY IMPORTANT*
+
+config GRKERNSEC_SYSCTL_ON
+	bool "Turn on features by default"
+	depends on GRKERNSEC_SYSCTL
+	help
+	  If you say Y here, instead of having all features enabled in the
+	  kernel configuration disabled at boot time, the features will be
+	  enabled at boot time.  It is recommended you say Y here unless
+	  there is some reason you would want all sysctl-tunable features to
+	  be disabled by default.  As mentioned elsewhere, it is important
+	  to enable the grsec_lock entry once you have finished modifying
+	  the sysctl entries.
+
+endmenu
+
+menu "Logging Options"
+depends on GRKERNSEC
+
+config GRKERNSEC_FLOODTIME
+	int "Seconds in between log messages (minimum)"
+	default 10
+	help
+	  This option allows you to enforce the number of seconds between
+	  grsecurity log messages.  The default should be suitable for most
+	  people, however, if you choose to change it, choose a value small enough
+	  to allow informative logs to be produced, but large enough to
+	  prevent flooding.
+
+config GRKERNSEC_FLOODBURST
+	int "Number of messages in a burst (maximum)"
+	default 4
+	help
+	  This option allows you to choose the maximum number of messages allowed
+	  within the flood time interval you chose in a separate option.  The
+	  default should be suitable for most people, however if you find that
+	  many of your logs are being interpreted as flooding, you may want to
+	  raise this value.
+
+endmenu
+
+endmenu

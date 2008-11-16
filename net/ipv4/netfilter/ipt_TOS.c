@@ -66,7 +66,7 @@ checkentry(const char *tablename,
 	    && tos != IPTOS_RELIABILITY
 	    && tos != IPTOS_MINCOST
 	    && tos != IPTOS_NORMALSVC) {
-		printk(KERN_WARNING "TOS: bad tos value %#x\n", tos);
+		ve_printk(VE_LOG, KERN_WARNING "TOS: bad tos value %#x\n", tos);
 		return 0;
 	}
 	return 1;

@@ -361,6 +361,9 @@ svc_sendto(struct svc_rqst *rqstp, struct xdr_buf *xdr)
 	size_t		base = xdr->page_base;
 	unsigned int	pglen = xdr->page_len;
 	unsigned int	flags = MSG_MORE;
+	struct ve_struct *old_env;
+
+	old_env = set_exec_env(sock->sk->owner_env);
 
 	slen = xdr->len;
 
@@ -425,6 +428,8 @@ out:
 			rqstp->rq_sock, xdr->head[0].iov_base, xdr->head[0].iov_len, xdr->len, len,
 		rqstp->rq_addr.sin_addr.s_addr);
 
+	(void)set_exec_env(old_env);
+
 	return len;
 }
 
@@ -437,9 +442,12 @@ svc_recv_available(struct svc_sock *svsk)
 	mm_segment_t	oldfs;
 	struct socket	*sock = svsk->sk_sock;
 	int		avail, err;
+	struct ve_struct *old_env;
 
 	oldfs = get_fs(); set_fs(KERNEL_DS);
+	old_env = set_exec_env(sock->sk->owner_env);
 	err = sock->ops->ioctl(sock, TIOCINQ, (unsigned long) &avail);
+	(void)set_exec_env(old_env);
 	set_fs(oldfs);
 
 	return (err >= 0)? avail : err;
@@ -454,6 +462,7 @@ svc_recvfrom(struct svc_rqst *rqstp, struct kvec *iov, int nr, int buflen)
 	struct msghdr	msg;
 	struct socket	*sock;
 	int		len, alen;
+	struct ve_struct *old_env;
 
 	rqstp->rq_addrlen = sizeof(rqstp->rq_addr);
 	sock = rqstp->rq_sock->sk_sock;
@@ -465,7 +474,9 @@ svc_recvfrom(struct svc_rqst *rqstp, struct kvec *iov, int nr, int buflen)
 
 	msg.msg_flags	= MSG_DONTWAIT;
 
+	old_env = set_exec_env(sock->sk->owner_env);
 	len = kernel_recvmsg(sock, &msg, iov, nr, buflen, MSG_DONTWAIT);
+	(void)set_exec_env(old_env);
 
 	/* sock_recvmsg doesn't fill in the name/namelen, so we must..
 	 * possibly we should cache this in the svc_sock structure
@@ -1440,6 +1451,8 @@ svc_delete_socket(struct svc_sock *svsk)
 	serv = svsk->sk_server;
 	sk = svsk->sk_sk;
 
+	/* XXX: serialization? */
+	sk->sk_user_data = NULL;
 	sk->sk_state_change = svsk->sk_ostate;
 	sk->sk_data_ready = svsk->sk_odata;
 	sk->sk_write_space = svsk->sk_owspace;

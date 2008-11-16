@@ -676,6 +676,13 @@ pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	long retval;
 
+	/* Don't allow kernel_thread() inside VE */
+	if (!ve_is_super(get_exec_env())) {
+		printk("kernel_thread call inside container\n");
+		dump_stack();
+		return -EPERM;
+	}
+
 	/* If the parent runs before fn(arg) is called by the child,
 	 * the input registers of this function can be clobbered.
 	 * So we stash 'fn' and 'arg' into global registers which

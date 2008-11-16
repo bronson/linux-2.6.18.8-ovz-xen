@@ -115,6 +115,7 @@
 #ifdef CONFIG_IP_MROUTE
 #include <linux/mroute.h>
 #endif
+#include <ub/ub_net.h>
 
 DEFINE_SNMP_STAT(struct linux_mib, net_statistics) __read_mostly;
 
@@ -282,6 +283,10 @@ lookup_protocol:
 			goto out_rcu_unlock;
 	}
 
+	err = vz_security_protocol_check(answer->protocol);
+	if (err < 0)
+		goto out_rcu_unlock;
+
 	err = -EPERM;
 	if (answer->capability > 0 && !capable(answer->capability))
 		goto out_rcu_unlock;
@@ -298,6 +303,13 @@ lookup_protocol:
 	sk = sk_alloc(PF_INET, GFP_KERNEL, answer_prot, 1);
 	if (sk == NULL)
 		goto out;
+
+	err = -ENOBUFS;
+	if (ub_sock_charge(sk, PF_INET, sock->type))
+		goto out_sk_free;
+	/* if charge was successful, sock_init_data() MUST be called to
+	 * set sk->sk_type. otherwise sk will be uncharged to wrong resource
+	 */
 
 	err = 0;
 	sk->sk_no_check = answer_no_check;
@@ -356,6 +368,9 @@ out:
 out_rcu_unlock:
 	rcu_read_unlock();
 	goto out;
+out_sk_free:
+	sk_free(sk);
+	return err;
 }
 
 
@@ -370,6 +385,9 @@ int inet_release(struct socket *sock)
 
 	if (sk) {
 		long timeout;
+		struct ve_struct *saved_env;
+
+		saved_env = set_exec_env(sk->owner_env);
 
 		/* Applications forget to leave groups before exiting */
 		ip_mc_drop_socket(sk);
@@ -387,6 +405,8 @@ int inet_release(struct socket *sock)
 			timeout = sk->sk_lingertime;
 		sock->sk = NULL;
 		sk->sk_prot->close(sk, timeout);
+
+		(void)set_exec_env(saved_env);
 	}
 	return 0;
 }
@@ -1213,20 +1233,20 @@ static struct net_protocol icmp_protocol = {
 
 static int __init init_ipv4_mibs(void)
 {
-	net_statistics[0] = alloc_percpu(struct linux_mib);
-	net_statistics[1] = alloc_percpu(struct linux_mib);
-	ip_statistics[0] = alloc_percpu(struct ipstats_mib);
-	ip_statistics[1] = alloc_percpu(struct ipstats_mib);
-	icmp_statistics[0] = alloc_percpu(struct icmp_mib);
-	icmp_statistics[1] = alloc_percpu(struct icmp_mib);
-	tcp_statistics[0] = alloc_percpu(struct tcp_mib);
-	tcp_statistics[1] = alloc_percpu(struct tcp_mib);
-	udp_statistics[0] = alloc_percpu(struct udp_mib);
-	udp_statistics[1] = alloc_percpu(struct udp_mib);
+	ve_net_statistics[0] = alloc_percpu(struct linux_mib);
+	ve_net_statistics[1] = alloc_percpu(struct linux_mib);
+	ve_ip_statistics[0] = alloc_percpu(struct ipstats_mib);
+	ve_ip_statistics[1] = alloc_percpu(struct ipstats_mib);
+	ve_icmp_statistics[0] = alloc_percpu(struct icmp_mib);
+	ve_icmp_statistics[1] = alloc_percpu(struct icmp_mib);
+	ve_tcp_statistics[0] = alloc_percpu(struct tcp_mib);
+	ve_tcp_statistics[1] = alloc_percpu(struct tcp_mib);
+	ve_udp_statistics[0] = alloc_percpu(struct udp_mib);
+	ve_udp_statistics[1] = alloc_percpu(struct udp_mib);
 	if (!
-	    (net_statistics[0] && net_statistics[1] && ip_statistics[0]
-	     && ip_statistics[1] && tcp_statistics[0] && tcp_statistics[1]
-	     && udp_statistics[0] && udp_statistics[1]))
+	    (ve_net_statistics[0] && ve_net_statistics[1] && ve_ip_statistics[0]
+	     && ve_ip_statistics[1] && ve_tcp_statistics[0] && ve_tcp_statistics[1]
+	     && ve_udp_statistics[0] && ve_udp_statistics[1]))
 		return -ENOMEM;
 
 	(void) tcp_mib_init();

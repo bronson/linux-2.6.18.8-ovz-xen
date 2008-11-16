@@ -95,6 +95,7 @@ static inline int qdisc_restart(struct net_device *dev)
 
 	/* Dequeue packet */
 	if (((skb = dev->gso_skb)) || ((skb = q->dequeue(q)))) {
+		struct ve_struct *envid;
 		unsigned nolock = (dev->features & NETIF_F_LLTX);
 
 		dev->gso_skb = NULL;
@@ -108,6 +109,7 @@ static inline int qdisc_restart(struct net_device *dev)
 		 * of lock congestion it should return -1 and the packet
 		 * will be requeued.
 		 */
+		envid = set_exec_env(skb->owner_env);
 		if (!nolock) {
 			if (!netif_tx_trylock(dev)) {
 			collision:
@@ -122,6 +124,7 @@ static inline int qdisc_restart(struct net_device *dev)
 					kfree_skb(skb);
 					if (net_ratelimit())
 						printk(KERN_DEBUG "Dead loop on netdevice %s, fix it urgently!\n", dev->name);
+					(void)set_exec_env(envid);
 					return -1;
 				}
 				__get_cpu_var(netdev_rx_stat).cpu_collision++;
@@ -142,6 +145,7 @@ static inline int qdisc_restart(struct net_device *dev)
 						netif_tx_unlock(dev);
 					}
 					spin_lock(&dev->queue_lock);
+					(void)set_exec_env(envid);
 					return -1;
 				}
 				if (ret == NETDEV_TX_LOCKED && nolock) {
@@ -175,6 +179,7 @@ requeue:
 		else
 			q->ops->requeue(skb, q);
 		netif_schedule(dev);
+		(void)set_exec_env(envid);
 		return 1;
 	}
 	BUG_ON((int) q->q.qlen < 0);
@@ -617,3 +622,4 @@ EXPORT_SYMBOL(qdisc_destroy);
 EXPORT_SYMBOL(qdisc_reset);
 EXPORT_SYMBOL(qdisc_lock_tree);
 EXPORT_SYMBOL(qdisc_unlock_tree);
+EXPORT_SYMBOL(dev_shutdown);

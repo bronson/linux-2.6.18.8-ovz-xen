@@ -595,6 +595,8 @@ static int rtnetlink_dump_all(struct sk_buff *skb, struct netlink_callback *cb)
 		if (rtnetlink_links[idx] == NULL ||
 		    rtnetlink_links[idx][type].dumpit == NULL)
 			continue;
+		if (vz_security_family_check(idx))
+			continue;
 		if (idx > s_idx)
 			memset(&cb->args[0], 0, sizeof(cb->args));
 		if (rtnetlink_links[idx][type].dumpit(skb, cb))
@@ -662,7 +664,7 @@ rtnetlink_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, int *errp)
 		return 0;
 
 	family = ((struct rtgenmsg*)NLMSG_DATA(nlh))->rtgen_family;
-	if (family >= NPROTO) {
+	if (family >= NPROTO || vz_security_family_check(family)) {
 		*errp = -EAFNOSUPPORT;
 		return -1;
 	}
@@ -675,7 +677,7 @@ rtnetlink_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, int *errp)
 	sz_idx = type>>2;
 	kind = type&3;
 
-	if (kind != 2 && security_netlink_recv(skb, CAP_NET_ADMIN)) {
+	if (kind != 2 && security_netlink_recv(skb, CAP_VE_NET_ADMIN)) {
 		*errp = -EPERM;
 		return -1;
 	}
@@ -819,5 +821,6 @@ EXPORT_SYMBOL(rtnetlink_links);
 EXPORT_SYMBOL(rtnetlink_put_metrics);
 EXPORT_SYMBOL(rtnl);
 EXPORT_SYMBOL(rtnl_lock);
+EXPORT_SYMBOL(__rtnl_unlock);
 EXPORT_SYMBOL(rtnl_trylock);
 EXPORT_SYMBOL(rtnl_unlock);

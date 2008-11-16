@@ -26,6 +26,9 @@ void set_nmi_callback(nmi_callback_t callback);
  */
 void unset_nmi_callback(void);
 
+void set_nmi_ipi_callback(nmi_callback_t callback);
+void unset_nmi_ipi_callback(void);
+
 #ifdef CONFIG_PM
  
 /** Replace the PM callback routine for NMI. */

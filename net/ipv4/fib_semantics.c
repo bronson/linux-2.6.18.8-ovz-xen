@@ -32,6 +32,7 @@
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
 #include <linux/proc_fs.h>
+#include <linux/ve.h>
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/init.h>
@@ -54,6 +55,24 @@ static struct hlist_head *fib_info_hash;
 static struct hlist_head *fib_info_laddrhash;
 static unsigned int fib_hash_size;
 static unsigned int fib_info_cnt;
+
+void prepare_fib_info(void)
+{
+#ifdef CONFIG_VE
+	get_ve0()->_fib_info_hash = fib_info_hash;
+	get_ve0()->_fib_info_laddrhash = fib_info_laddrhash;
+	get_ve0()->_fib_hash_size = fib_hash_size;
+	get_ve0()->_fib_info_cnt = fib_info_cnt;
+#endif
+}
+
+#ifdef CONFIG_VE
+#define fib_info_hash (get_exec_env()->_fib_info_hash)
+#define fib_info_laddrhash (get_exec_env()->_fib_info_laddrhash)
+#define fib_hash_size (get_exec_env()->_fib_hash_size)
+#define fib_info_cnt (get_exec_env()->_fib_info_cnt)
+#endif
+
 
 #define DEVINDEX_HASHBITS 8
 #define DEVINDEX_HASHSIZE (1U << DEVINDEX_HASHBITS)
@@ -234,13 +253,15 @@ static struct fib_info *fib_find_info(const struct fib_info *nfi)
 	return NULL;
 }
 
-static inline unsigned int fib_devindex_hashfn(unsigned int val)
+static inline unsigned int fib_devindex_hashfn(unsigned int val,
+		envid_t veid)
 {
 	unsigned int mask = DEVINDEX_HASHSIZE - 1;
 
 	return (val ^
 		(val >> DEVINDEX_HASHBITS) ^
-		(val >> (DEVINDEX_HASHBITS * 2))) & mask;
+		(val >> (DEVINDEX_HASHBITS * 2)) ^
+		(veid ^ (veid >> 16))) & mask;
 }
 
 /* Check, that the gateway is already configured.
@@ -256,7 +277,7 @@ int ip_fib_check_default(u32 gw, struct net_device *dev)
 
 	read_lock(&fib_info_lock);
 
-	hash = fib_devindex_hashfn(dev->ifindex);
+	hash = fib_devindex_hashfn(dev->ifindex, VEID(dev->owner_env));
 	head = &fib_info_devhash[hash];
 	hlist_for_each_entry(nh, node, head, nh_hash) {
 		if (nh->nh_dev == dev &&
@@ -579,7 +600,7 @@ static struct hlist_head *fib_hash_alloc(int bytes)
 			__get_free_pages(GFP_KERNEL, get_order(bytes));
 }
 
-static void fib_hash_free(struct hlist_head *hash, int bytes)
+void fib_hash_free(struct hlist_head *hash, int bytes)
 {
 	if (!hash)
 		return;
@@ -835,7 +856,8 @@ link_it:
 
 		if (!nh->nh_dev)
 			continue;
-		hash = fib_devindex_hashfn(nh->nh_dev->ifindex);
+		hash = fib_devindex_hashfn(nh->nh_dev->ifindex,
+				VEID(nh->nh_dev->owner_env));
 		head = &fib_info_devhash[hash];
 		hlist_add_head(&nh->nh_hash, head);
 	} endfor_nexthops(fi)
@@ -1186,7 +1208,8 @@ int fib_sync_down(u32 local, struct net_device *dev, int force)
 
 	if (dev) {
 		struct fib_info *prev_fi = NULL;
-		unsigned int hash = fib_devindex_hashfn(dev->ifindex);
+		unsigned int hash = fib_devindex_hashfn(dev->ifindex,
+				VEID(dev->owner_env));
 		struct hlist_head *head = &fib_info_devhash[hash];
 		struct hlist_node *node;
 		struct fib_nh *nh;
@@ -1251,7 +1274,7 @@ int fib_sync_up(struct net_device *dev)
 		return 0;
 
 	prev_fi = NULL;
-	hash = fib_devindex_hashfn(dev->ifindex);
+	hash = fib_devindex_hashfn(dev->ifindex, VEID(dev->owner_env));
 	head = &fib_info_devhash[hash];
 	ret = 0;
 

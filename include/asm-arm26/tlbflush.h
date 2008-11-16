@@ -25,7 +25,7 @@ static inline void memc_update_all(void)
 {
 	struct task_struct *p;
 	cpu_memc_update_all(init_mm.pgd);
-	for_each_process(p) {
+	for_each_process_all(p) {
 		if (!p->mm)
 			continue;
 		cpu_memc_update_all(p->mm->pgd);

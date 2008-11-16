@@ -17,7 +17,7 @@ extern kmem_cache_t *pgtable_cache;
 
 static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	return kmem_cache_alloc(pgtable_cache, GFP_KERNEL);
+	return kmem_cache_alloc(pgtable_cache, GFP_KERNEL_UBC);
 }
 
 static inline void pgd_free(pgd_t *pgd)
@@ -30,7 +30,7 @@ static inline void pgd_free(pgd_t *pgd)
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
 	return kmem_cache_alloc(pgtable_cache,
-				GFP_KERNEL|__GFP_REPEAT);
+				GFP_KERNEL_UBC|__GFP_REPEAT);
 }
 
 static inline void pmd_free(pmd_t *pmd)
@@ -48,7 +48,8 @@ static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm,
 static inline struct page *pte_alloc_one(struct mm_struct *mm,
 					 unsigned long address)
 {
-	return virt_to_page(pte_alloc_one_kernel(mm, address));
+	return virt_to_page(kmem_cache_alloc(pgtable_cache,
+                                GFP_KERNEL_UBC|__GFP_REPEAT));
 }
 		
 static inline void pte_free_kernel(pte_t *pte)

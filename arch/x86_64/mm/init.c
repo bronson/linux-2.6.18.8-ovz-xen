@@ -87,6 +87,7 @@ void show_mem(void)
 	printk(KERN_INFO "%lu pages shared\n",shared);
 	printk(KERN_INFO "%lu pages swap cached\n",cached);
 }
+EXPORT_SYMBOL(show_mem);
 
 int after_bootmem;
 

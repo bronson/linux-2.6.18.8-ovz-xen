@@ -1,6 +1,8 @@
 #ifndef _XT_CONNMARK_H_target
 #define _XT_CONNMARK_H_target
 
+#include <net/compat.h>
+
 /* Copyright (C) 2002,2004 MARA Systems AB <http://www.marasystems.com>
  * by Henrik Nordstrom <hno@marasystems.com>
  *
@@ -22,4 +24,11 @@ struct xt_connmark_target_info {
 	u_int8_t mode;
 };
 
+#ifdef CONFIG_COMPAT
+struct compat_xt_connmark_target_info {
+	compat_ulong_t mark;
+	compat_ulong_t mask;
+	u_int8_t mode;
+};
+#endif /*CONFIG_COMPAT*/
 #endif /*_XT_CONNMARK_H_target*/

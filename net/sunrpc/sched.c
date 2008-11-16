@@ -324,16 +324,6 @@ static void rpc_make_runnable(struct rpc_task *task)
 }
 
 /*
- * Place a newly initialized task on the workqueue.
- */
-static inline void
-rpc_schedule_run(struct rpc_task *task)
-{
-	rpc_set_active(task);
-	rpc_make_runnable(task);
-}
-
-/*
  * Prepare for sleeping on a wait queue.
  * By always appending tasks to the list we ensure FIFO behavior.
  * NB: An RPC task will only receive interrupt-driven events as long
@@ -608,7 +598,9 @@ EXPORT_SYMBOL(rpc_exit_task);
 static int __rpc_execute(struct rpc_task *task)
 {
 	int		status = 0;
+	struct ve_struct *env;
 
+	env = set_exec_env(task->tk_client->cl_xprt->owner_env);
 	dprintk("RPC: %4d rpc_execute flgs %x\n",
 				task->tk_pid, task->tk_flags);
 
@@ -662,10 +654,14 @@ static int __rpc_execute(struct rpc_task *task)
 		rpc_clear_running(task);
 		if (RPC_IS_ASYNC(task)) {
 			/* Careful! we may have raced... */
-			if (RPC_IS_QUEUED(task))
+			if (RPC_IS_QUEUED(task)) {
+				(void)set_exec_env(env);
 				return 0;
-			if (rpc_test_and_set_running(task))
+			}
+			if (rpc_test_and_set_running(task)) {
+				(void)set_exec_env(env);
 				return 0;
+			}
 			continue;
 		}
 
@@ -696,6 +692,7 @@ static int __rpc_execute(struct rpc_task *task)
 	rpc_mark_complete_task(task);
 	/* Release all resources associated with the task */
 	rpc_release_task(task);
+	(void)set_exec_env(env);
 	return status;
 }
 
@@ -814,6 +811,13 @@ void rpc_init_task(struct rpc_task *task, struct rpc_clnt *clnt, int flags, cons
 	/* Add to global list of all tasks */
 	spin_lock(&rpc_sched_lock);
 	list_add_tail(&task->tk_task, &all_tasks);
+
+	/* Prevent the task to run if client is marked as dead */
+	if (task->tk_client != NULL && task->tk_client->cl_dead) {
+		task->tk_flags |= RPC_TASK_KILLED;
+		rpc_exit(task, -EIO);
+		rpc_wake_up_task(task);
+	}
 	spin_unlock(&rpc_sched_lock);
 
 	BUG_ON(task->tk_ops == NULL);
@@ -992,10 +996,12 @@ fail:
 
 void rpc_run_child(struct rpc_task *task, struct rpc_task *child, rpc_action func)
 {
+	rpc_set_active(child);
+
 	spin_lock_bh(&childq.lock);
 	/* N.B. Is it possible for the child to have already finished? */
 	__rpc_sleep_on(&childq, task, func, NULL);
-	rpc_schedule_run(child);
+	rpc_make_runnable(child);
 	spin_unlock_bh(&childq.lock);
 }
 

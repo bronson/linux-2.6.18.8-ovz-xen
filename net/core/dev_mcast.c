@@ -290,9 +290,10 @@ static struct file_operations dev_mc_seq_fops = {
 
 void __init dev_mcast_init(void)
 {
-	proc_net_fops_create("dev_mcast", 0, &dev_mc_seq_fops);
+	proc_glob_fops_create("net/dev_mcast", 0, &dev_mc_seq_fops);
 }
 
 EXPORT_SYMBOL(dev_mc_add);
 EXPORT_SYMBOL(dev_mc_delete);
 EXPORT_SYMBOL(dev_mc_upload);
+EXPORT_SYMBOL(dev_mc_discard);

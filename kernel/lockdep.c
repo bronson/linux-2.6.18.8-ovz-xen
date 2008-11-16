@@ -2678,13 +2678,13 @@ retry:
 	if (count != 10)
 		printk(" locked it.\n");
 
-	do_each_thread(g, p) {
+	do_each_thread_all(g, p) {
 		if (p->lockdep_depth)
 			lockdep_print_held_locks(p);
 		if (!unlock)
 			if (read_trylock(&tasklist_lock))
 				unlock = 1;
-	} while_each_thread(g, p);
+	} while_each_thread_all(g, p);
 
 	printk("\n");
 	printk("=============================================\n\n");

@@ -782,25 +782,26 @@ asmlinkage long sys32_olduname(struct oldold_utsname __user * name)
 
 	if (!name)
 		return -EFAULT;
-	if (!access_ok(VERIFY_WRITE,name,sizeof(struct oldold_utsname)))
+	if (!access_ok(VERIFY_WRITE, name, sizeof(struct oldold_utsname)))
 		return -EFAULT;
   
   	down_read(&uts_sem);
 	
-	error = __copy_to_user(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
-	 __put_user(0,name->sysname+__OLD_UTS_LEN);
-	 __copy_to_user(&name->nodename,&system_utsname.nodename,__OLD_UTS_LEN);
-	 __put_user(0,name->nodename+__OLD_UTS_LEN);
-	 __copy_to_user(&name->release,&system_utsname.release,__OLD_UTS_LEN);
-	 __put_user(0,name->release+__OLD_UTS_LEN);
-	 __copy_to_user(&name->version,&system_utsname.version,__OLD_UTS_LEN);
-	 __put_user(0,name->version+__OLD_UTS_LEN);
+	error = __copy_to_user(&name->sysname, &utsname()->sysname,
+			       __OLD_UTS_LEN);
+	 __put_user(0, name->sysname + __OLD_UTS_LEN);
+	 __copy_to_user(&name->nodename, &utsname()->nodename, __OLD_UTS_LEN);
+	 __put_user(0, name->nodename + __OLD_UTS_LEN);
+	 __copy_to_user(&name->release, &utsname()->release, __OLD_UTS_LEN);
+	 __put_user(0, name->release + __OLD_UTS_LEN);
+	 __copy_to_user(&name->version, &utsname()->version, __OLD_UTS_LEN);
+	 __put_user(0, name->version + __OLD_UTS_LEN);
 	 { 
 		 char *arch = "x86_64";
 		 if (personality(current->personality) == PER_LINUX32)
 			 arch = "i686";
 		 
-		 __copy_to_user(&name->machine,arch,strlen(arch)+1);
+		 __copy_to_user(&name->machine, arch, strlen(arch) + 1);
 	 }
 	
 	 up_read(&uts_sem);
@@ -816,7 +817,7 @@ long sys32_uname(struct old_utsname __user * name)
 	if (!name)
 		return -EFAULT;
 	down_read(&uts_sem);
-	err=copy_to_user(name, &system_utsname, sizeof (*name));
+	err = copy_to_user(name, utsname(), sizeof (*name));
 	up_read(&uts_sem);
 	if (personality(current->personality) == PER_LINUX32) 
 		err |= copy_to_user(&name->machine, "i686", 5);
@@ -895,18 +896,6 @@ long sys32_fadvise64_64(int fd, __u32 offset_low, __u32 offset_high,
 			       (((u64)offset_high)<<32) | offset_low,
 			       (((u64)len_high)<<32) | len_low,
 			       advice); 
-} 
-
-long sys32_vm86_warning(void)
-{ 
-	struct task_struct *me = current;
-	static char lastcomm[sizeof(me->comm)];
-	if (strncmp(lastcomm, me->comm, sizeof(lastcomm))) {
-		compat_printk(KERN_INFO "%s: vm86 mode not supported on 64 bit kernel\n",
-		       me->comm);
-		strncpy(lastcomm, me->comm, sizeof(lastcomm));
-	} 
-	return -ENOSYS;
 } 
 
 long sys32_lookup_dcookie(u32 addr_low, u32 addr_high,

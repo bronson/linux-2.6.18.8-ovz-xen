@@ -99,6 +99,10 @@ struct sock *__raw_v6_lookup(struct sock *sk, unsigned short num,
 			if (sk->sk_bound_dev_if && sk->sk_bound_dev_if != dif)
 				continue;
 
+			if (!ve_accessible_strict(sk->owner_env,
+						get_exec_env()))
+				continue;
+
 			if (!ipv6_addr_any(&np->rcv_saddr)) {
 				if (ipv6_addr_equal(&np->rcv_saddr, loc_addr))
 					goto found;
@@ -1042,6 +1046,14 @@ static void rawv6_close(struct sock *sk, long timeout)
 	sk_common_release(sk);
 }
 
+static int raw6_destroy(struct sock *sk)
+{
+	lock_sock(sk);
+	ip6_flush_pending_frames(sk);
+	release_sock(sk);
+	return 0;
+}
+
 static int rawv6_init_sk(struct sock *sk)
 {
 	if (inet_sk(sk)->num == IPPROTO_ICMPV6) {
@@ -1056,6 +1068,7 @@ struct proto rawv6_prot = {
 	.name		   = "RAWv6",
 	.owner		   = THIS_MODULE,
 	.close		   = rawv6_close,
+	.destroy	   = raw6_destroy,
 	.connect	   = ip6_datagram_connect,
 	.disconnect	   = udp_disconnect,
 	.ioctl		   = rawv6_ioctl,
@@ -1105,8 +1118,13 @@ static struct sock *raw6_get_next(struct seq_file *seq, struct sock *sk)
 	do {
 		sk = sk_next(sk);
 try_again:
-		;
-	} while (sk && sk->sk_family != PF_INET6);
+		if (!sk)
+			break;
+		if (sk->sk_family != PF_INET6)
+			continue;
+		if (ve_accessible(sk->owner_env, get_exec_env()))
+			break;
+	} while (1);
 
 	if (!sk && ++state->bucket < RAWV6_HTABLE_SIZE) {
 		sk = sk_head(&raw_v6_htable[state->bucket]);
@@ -1224,13 +1242,13 @@ static struct file_operations raw6_seq_fops = {
 
 int __init raw6_proc_init(void)
 {
-	if (!proc_net_fops_create("raw6", S_IRUGO, &raw6_seq_fops))
+	if (!proc_glob_fops_create("net/raw6", S_IRUGO, &raw6_seq_fops))
 		return -ENOMEM;
 	return 0;
 }
 
 void raw6_proc_exit(void)
 {
-	proc_net_remove("raw6");
+	remove_proc_glob_entry("net/raw6", NULL);
 }
 #endif	/* CONFIG_PROC_FS */

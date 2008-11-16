@@ -21,6 +21,7 @@
 #include <linux/cpu.h>
 #include <linux/module.h>
 
+#include <asm/nmi.h>
 #include <asm/mtrr.h>
 #include <asm/tlbflush.h>
 #include <mach_apic.h>
@@ -442,6 +443,8 @@ void flush_tlb_mm (struct mm_struct * mm)
 	preempt_enable();
 }
 
+EXPORT_SYMBOL(flush_tlb_mm);
+
 void flush_tlb_page(struct vm_area_struct * vma, unsigned long va)
 {
 	struct mm_struct *mm = vma->vm_mm;
@@ -571,6 +574,89 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	return 0;
 }
 EXPORT_SYMBOL(smp_call_function);
+
+static spinlock_t nmi_call_lock = SPIN_LOCK_UNLOCKED;
+static struct nmi_call_data_struct {
+	smp_nmi_function func;
+	void *info;
+	atomic_t started;
+	atomic_t finished;
+	cpumask_t cpus_called;
+	int wait;
+} *nmi_call_data;
+
+static int smp_nmi_callback(struct pt_regs * regs, int cpu)
+{
+	smp_nmi_function func;
+	void *info;
+	int wait;
+
+	func = nmi_call_data->func;
+	info = nmi_call_data->info;
+	wait = nmi_call_data->wait;
+	ack_APIC_irq();
+	/* prevent from calling func() multiple times */
+	if (cpu_test_and_set(cpu, nmi_call_data->cpus_called))
+		return 0;
+	/*
+	 * notify initiating CPU that I've grabbed the data and am
+	 * about to execute the function
+	 */
+	mb();
+	atomic_inc(&nmi_call_data->started);
+	/* at this point the nmi_call_data structure is out of scope */
+	irq_enter();
+	func(regs, info);
+	irq_exit();
+	if (wait)
+		atomic_inc(&nmi_call_data->finished);
+
+	return 0;
+}
+
+/*
+ * This function tries to call func(regs, info) on each cpu.
+ * Func must be fast and non-blocking.
+ * May be called with disabled interrupts and from any context.
+ */
+int smp_nmi_call_function(smp_nmi_function func, void *info, int wait)
+{
+	struct nmi_call_data_struct data;
+	int cpus;
+
+	cpus = num_online_cpus() - 1;
+	if (!cpus)
+		return 0;
+
+	data.func = func;
+	data.info = info;
+	data.wait = wait;
+	atomic_set(&data.started, 0);
+	atomic_set(&data.finished, 0);
+	cpus_clear(data.cpus_called);
+	/* prevent this cpu from calling func if NMI happens */
+	cpu_set(smp_processor_id(), data.cpus_called);
+
+	if (!spin_trylock(&nmi_call_lock))
+		return -1;
+
+	nmi_call_data = &data;
+	set_nmi_ipi_callback(smp_nmi_callback);
+	mb();
+
+	/* Send a message to all other CPUs and wait for them to respond */
+	send_IPI_allbutself(APIC_DM_NMI);
+	while (atomic_read(&data.started) != cpus)
+		barrier();
+
+	unset_nmi_ipi_callback();
+	if (wait)
+		while (atomic_read(&data.finished) != cpus)
+			barrier();
+	spin_unlock(&nmi_call_lock);
+
+	return 0;
+}
 
 static void stop_this_cpu (void * dummy)
 {

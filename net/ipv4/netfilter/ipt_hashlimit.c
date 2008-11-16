@@ -31,6 +31,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/list.h>
+#include <linux/sched.h>
 
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_hashlimit.h>
@@ -44,7 +45,15 @@ MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
 MODULE_DESCRIPTION("iptables match for limiting per hash-bucket");
 
 /* need to declare this at the top */
+#if defined(CONFIG_VE_IPTABLES)
+#define hashlimit_procdir	\
+		(get_exec_env()->_ipt_hashlimit->hashlimit_procdir)
+#define hashlimit_htables	\
+		(get_exec_env()->_ipt_hashlimit->hashlimit_htables)
+#else
 static struct proc_dir_entry *hashlimit_procdir;
+static HLIST_HEAD(hashlimit_htables);
+#endif /* CONFIG_VE_IPTABLES */
 static struct file_operations dl_file_ops;
 
 /* hash table crap */
@@ -92,8 +101,11 @@ struct ipt_hashlimit_htable {
 
 static DEFINE_SPINLOCK(hashlimit_lock);	/* protects htables list */
 static DEFINE_MUTEX(hlimit_mutex);	/* additional checkentry protection */
-static HLIST_HEAD(hashlimit_htables);
+
 static kmem_cache_t *hashlimit_cachep __read_mostly;
+
+static int init_ipt_hashlimit(void);
+static void fini_ipt_hashlimit(void);
 
 static inline int dst_cmp(const struct dsthash_ent *ent, struct dsthash_dst *b)
 {
@@ -508,6 +520,9 @@ hashlimit_checkentry(const char *tablename,
 	if (r->name[sizeof(r->name) - 1] != '\0')
 		return 0;
 
+	if (init_ipt_hashlimit())
+		return 0;
+
 	/* This is the best we've got: We cannot release and re-grab lock,
 	 * since checkentry() is called before ip_tables.c grabs ipt_mutex.  
 	 * We also cannot grab the hashtable spinlock, since htable_create will 
@@ -535,13 +550,99 @@ hashlimit_destroy(const struct xt_match *match, void *matchinfo,
 	struct ipt_hashlimit_info *r = matchinfo;
 
 	htable_put(r->hinfo);
+	if (!ve_is_super(get_exec_env()) && hlist_empty(&hashlimit_htables))
+		fini_ipt_hashlimit();
 }
+
+#ifdef CONFIG_COMPAT
+static int hashlimit_compat_to_user(void *match, void **dstptr,
+		int *size, int off)
+{
+	struct xt_entry_match *pm;
+	struct ipt_hashlimit_info *pinfo;
+	struct compat_ipt_hashlimit_info rinfo;
+	u_int16_t msize;
+
+	pm = (struct xt_entry_match *)match;
+	msize = pm->u.user.match_size;
+	if (__copy_to_user(*dstptr, pm, sizeof(struct compat_xt_entry_match)))
+		return -EFAULT;
+	pinfo = (struct ipt_hashlimit_info *)pm->data;
+	memset(&rinfo, 0, sizeof(struct compat_ipt_hashlimit_info));
+	memcpy(&rinfo, pinfo, offsetof(struct compat_ipt_hashlimit_info, hinfo));
+	if (__copy_to_user(*dstptr + sizeof(struct compat_xt_entry_match),
+				&rinfo, sizeof(struct compat_ipt_hashlimit_info)))
+		return -EFAULT;
+	msize -= off;
+	if (put_user(msize, (u_int16_t *)*dstptr))
+		return -EFAULT;
+	*size -= off;
+	*dstptr += msize;
+	return 0;
+}
+
+static int hashlimit_compat_from_user(void *match, void **dstptr,
+		int *size, int off)
+{
+	struct compat_xt_entry_match *pm;
+	struct xt_entry_match *dstpm;
+	struct compat_ipt_hashlimit_info *pinfo;
+	struct ipt_hashlimit_info rinfo;
+	u_int16_t msize;
+
+	pm = (struct compat_xt_entry_match *)match;
+	dstpm = (struct xt_entry_match *)*dstptr;
+	msize = pm->u.user.match_size;
+	memset(*dstptr, 0, sizeof(struct xt_entry_match));
+	memcpy(*dstptr, pm, sizeof(struct compat_xt_entry_match));
+	pinfo = (struct compat_ipt_hashlimit_info *)pm->data;
+	memset(&rinfo, 0, sizeof(struct ipt_hashlimit_info));
+	memcpy(&rinfo, pinfo, offsetof(struct compat_ipt_hashlimit_info, hinfo));
+	memcpy(*dstptr + sizeof(struct xt_entry_match), &rinfo,
+		sizeof(struct ipt_hashlimit_info));
+	msize += off;
+	dstpm->u.user.match_size = msize;
+	*size += off;
+	*dstptr += msize;
+	return 0;
+}
+
+static int hashlimit_compat(void *match, void **dstptr,
+		int *size, int convert)
+{
+	int ret, off;
+
+	off = IPT_ALIGN(sizeof(struct ipt_hashlimit_info)) -
+		COMPAT_IPT_ALIGN(sizeof(struct compat_ipt_hashlimit_info));
+	switch (convert) {
+		case COMPAT_TO_USER:
+			ret = hashlimit_compat_to_user(match,
+					dstptr, size, off);
+			break;
+		case COMPAT_FROM_USER:
+			ret = hashlimit_compat_from_user(match,
+					dstptr, size, off);
+			break;
+		case COMPAT_CALC_SIZE:
+			*size += off;
+			ret = 0;
+			break;
+		default:
+			ret = -ENOPROTOOPT;
+			break;
+	}
+	return ret;
+}
+#endif /*CONFIG_COMPAT*/
 
 static struct ipt_match ipt_hashlimit = {
 	.name		= "hashlimit",
 	.match		= hashlimit_match,
 	.matchsize	= sizeof(struct ipt_hashlimit_info),
 	.checkentry	= hashlimit_checkentry,
+#ifdef CONFIG_COMPAT
+	.compat		= hashlimit_compat,
+#endif
 	.destroy	= hashlimit_destroy,
 	.me		= THIS_MODULE
 };
@@ -649,6 +750,51 @@ static struct file_operations dl_file_ops = {
 	.release = seq_release
 };
 
+static int init_ipt_hashlimit(void)
+{
+	struct ve_struct *env;
+
+	env = get_exec_env();
+#if defined(CONFIG_VE_IPTABLES)
+	if (env->_ipt_hashlimit)
+		return 0;
+
+	env->_ipt_hashlimit = kmalloc(sizeof(struct ve_ipt_hashlimit), GFP_KERNEL);
+	if (!env->_ipt_hashlimit)
+		return -ENOMEM;
+
+	memset(env->_ipt_hashlimit, 0, sizeof(struct ve_ipt_hashlimit));
+#endif
+
+	INIT_HLIST_HEAD(&hashlimit_htables);
+
+	hashlimit_procdir = proc_mkdir("ipt_hashlimit", proc_net);
+	if (!hashlimit_procdir)
+		goto out_mem;
+
+	return 0;
+
+out_mem:
+#if defined(CONFIG_VE_IPTABLES)
+	kfree(env->_ipt_hashlimit);
+	env->_ipt_hashlimit = NULL;
+#endif
+	return -ENOMEM;
+}
+
+static void fini_ipt_hashlimit(void)
+{
+	struct ve_struct *env;
+	env = get_exec_env();
+
+	remove_proc_entry("ipt_hashlimit", proc_net);
+
+#if defined(CONFIG_VE_IPTABLES)
+	kfree(env->_ipt_hashlimit);
+	env->_ipt_hashlimit = NULL;
+#endif
+}
+
 static int init_or_fini(int fini)
 {
 	int ret = 0;
@@ -670,17 +816,14 @@ static int init_or_fini(int fini)
 		goto cleanup_unreg_match;
 	}
 
-	hashlimit_procdir = proc_mkdir("ipt_hashlimit", proc_net);
-	if (!hashlimit_procdir) {
-		printk(KERN_ERR "Unable to create proc dir entry\n");
-		ret = -ENOMEM;
+	ret = init_ipt_hashlimit();
+	if (ret)
 		goto cleanup_free_slab;
-	}
 
 	return ret;
 
 cleanup:
-	remove_proc_entry("ipt_hashlimit", proc_net);
+	fini_ipt_hashlimit();
 cleanup_free_slab:
 	kmem_cache_destroy(hashlimit_cachep);
 cleanup_unreg_match:

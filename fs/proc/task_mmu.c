@@ -94,9 +94,12 @@ int proc_exe_link(struct inode *inode, struct dentry **dentry, struct vfsmount *
 	}
 
 	if (vma) {
-		*mnt = mntget(vma->vm_file->f_vfsmnt);
-		*dentry = dget(vma->vm_file->f_dentry);
-		result = 0;
+		result = d_root_check(vma->vm_file->f_dentry,
+				vma->vm_file->f_vfsmnt);
+		if (!result) {
+			*mnt = mntget(vma->vm_file->f_vfsmnt);
+			*dentry = dget(vma->vm_file->f_dentry);
+		}
 	}
 
 	up_read(&mm->mmap_sem);

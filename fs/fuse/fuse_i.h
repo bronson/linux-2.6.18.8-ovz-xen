@@ -38,7 +38,11 @@
 #define FUSE_ALLOW_OTHER         (1 << 1)
 
 /** List of active connections */
+#ifdef CONFIG_VE
+#define fuse_conn_list	(get_exec_env()->_fuse_conn_list)
+#else
 extern struct list_head fuse_conn_list;
+#endif
 
 /** Global mutex protecting fuse_conn_list and the control filesystem */
 extern struct mutex fuse_mutex;

@@ -54,16 +54,34 @@ EXPORT_SYMBOL_GPL(nf_unregister_afinfo);
  * of skbuffs queued for userspace, and not deregister a hook unless
  * this is zero, but that sucks.  Now, we simply check when the
  * packets come back: if the hook is gone, the packet is discarded. */
+static DEFINE_SPINLOCK(nf_hook_lock);
+
 struct list_head nf_hooks[NPROTO][NF_MAX_HOOKS];
 EXPORT_SYMBOL(nf_hooks);
-static DEFINE_SPINLOCK(nf_hook_lock);
+#ifdef CONFIG_VE_IPTABLES
+#define VE_NF_HOOKS(env, x, y) \
+       ((struct list_head (*)[NF_MAX_HOOKS])(env->_nf_hooks))[x][y]
+#else
+#define VE_NF_HOOKS(env, x, y) nf_hooks[x][y]
+#endif
 
 int nf_register_hook(struct nf_hook_ops *reg)
 {
 	struct list_head *i;
+	struct ve_struct *env;
+
+	env = get_exec_env();
+	if (!ve_is_super(env)) {
+		struct nf_hook_ops *tmp;
+		tmp = kmalloc(sizeof(struct nf_hook_ops), GFP_KERNEL);
+		if (!tmp)
+			return -ENOMEM;
+		memcpy(tmp, reg, sizeof(struct nf_hook_ops));
+		reg = tmp;
+	}
 
 	spin_lock_bh(&nf_hook_lock);
-	list_for_each(i, &nf_hooks[reg->pf][reg->hooknum]) {
+	list_for_each(i, &VE_NF_HOOKS(env, reg->pf, reg->hooknum)) {
 		if (reg->priority < ((struct nf_hook_ops *)i)->priority)
 			break;
 	}
@@ -77,11 +95,29 @@ EXPORT_SYMBOL(nf_register_hook);
 
 void nf_unregister_hook(struct nf_hook_ops *reg)
 {
+	struct nf_hook_ops *i;
+	struct ve_struct *env;
+
+	env = get_exec_env();
+	if (!ve_is_super(env)) {
+		list_for_each_entry_rcu(i,
+			&VE_NF_HOOKS(env, reg->pf, reg->hooknum), list) {
+		if (reg->hook == i->hook) {
+			reg = i;
+			break;
+			}
+		}
+		if (reg != i)
+			return;
+	}
+
 	spin_lock_bh(&nf_hook_lock);
 	list_del_rcu(&reg->list);
 	spin_unlock_bh(&nf_hook_lock);
 
 	synchronize_net();
+	if (!ve_is_super(env))
+		kfree(reg);
 }
 EXPORT_SYMBOL(nf_unregister_hook);
 
@@ -166,13 +202,15 @@ int nf_hook_slow(int pf, unsigned int hook, struct sk_buff **pskb,
 	struct list_head *elem;
 	unsigned int verdict;
 	int ret = 0;
+	struct ve_struct *env;
 
 	/* We may already have this, but read-locks nest anyway */
 	rcu_read_lock();
 
-	elem = &nf_hooks[pf][hook];
+	env = get_exec_env();
+	elem = &VE_NF_HOOKS(env, pf, hook);
 next_hook:
-	verdict = nf_iterate(&nf_hooks[pf][hook], pskb, hook, indev,
+	verdict = nf_iterate(&VE_NF_HOOKS(env, pf, hook), pskb, hook, indev,
 			     outdev, &elem, okfn, hook_thresh);
 	if (verdict == NF_ACCEPT || verdict == NF_STOP) {
 		ret = 1;
@@ -245,13 +283,54 @@ struct proc_dir_entry *proc_net_netfilter;
 EXPORT_SYMBOL(proc_net_netfilter);
 #endif
 
-void __init netfilter_init(void)
+void init_nf_hooks(struct list_head (*nh)[NF_MAX_HOOKS])
 {
 	int i, h;
 	for (i = 0; i < NPROTO; i++) {
 		for (h = 0; h < NF_MAX_HOOKS; h++)
-			INIT_LIST_HEAD(&nf_hooks[i][h]);
+			INIT_LIST_HEAD(&nh[i][h]);
 	}
+}
+
+int init_netfilter(void)
+{
+#ifdef CONFIG_VE_IPTABLES
+       struct ve_struct *envid;
+
+       envid = get_exec_env();
+       envid->_nf_hooks = kmalloc(sizeof(nf_hooks), GFP_KERNEL);
+       if (envid->_nf_hooks == NULL)
+               return -ENOMEM;
+
+       /* FIXME: charge ubc */
+
+       init_nf_hooks(envid->_nf_hooks);
+       return 0;
+#else
+       init_nf_hooks(nf_hooks);
+       return 0;
+#endif
+}
+EXPORT_SYMBOL(init_netfilter);
+
+#ifdef CONFIG_VE_IPTABLES
+void fini_netfilter(void)
+{
+       struct ve_struct *envid;
+
+       envid = get_exec_env();
+       if (envid->_nf_hooks != NULL)
+               kfree(envid->_nf_hooks);
+       envid->_nf_hooks = NULL;
+
+       /* FIXME: uncharge ubc */
+}
+EXPORT_SYMBOL(fini_netfilter);
+#endif
+
+void __init netfilter_init(void)
+{
+       init_netfilter();
 
 #ifdef CONFIG_PROC_FS
 	proc_net_netfilter = proc_mkdir("netfilter", proc_net);
@@ -264,3 +343,4 @@ void __init netfilter_init(void)
 	if (netfilter_log_init() < 0)
 		panic("cannot initialize nf_log");
 }
+

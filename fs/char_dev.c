@@ -20,6 +20,8 @@
 #include <linux/cdev.h>
 #include <linux/mutex.h>
 
+#include <linux/ve_proto.h>
+
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
 #endif
@@ -295,6 +297,11 @@ int chrdev_open(struct inode * inode, struct file * filp)
 	struct cdev *p;
 	struct cdev *new = NULL;
 	int ret = 0;
+
+	ret = get_device_perms_ve(S_IFCHR, inode->i_rdev,
+				  filp->f_mode & (FMODE_READ | FMODE_WRITE));
+	if (ret)
+		return ret;
 
 	spin_lock(&cdev_lock);
 	p = inode->i_cdev;

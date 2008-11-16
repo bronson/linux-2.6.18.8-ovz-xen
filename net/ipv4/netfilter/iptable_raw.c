@@ -118,12 +118,13 @@ static struct nf_hook_ops ipt_ops[] = {
 
 static int __init iptable_raw_init(void)
 {
+	struct ipt_table *tmp;
 	int ret;
 
 	/* Register table */
-	ret = ipt_register_table(&packet_raw, &initial_table.repl);
-	if (ret < 0)
-		return ret;
+	tmp = ipt_register_table(&packet_raw, &initial_table.repl);
+	if (IS_ERR(tmp))
+		return PTR_ERR(tmp);
 
 	/* Register hooks */
 	ret = nf_register_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
