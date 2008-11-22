@@ -15,6 +15,8 @@
 #include <asm/ia32_unistd.h>
 #include <xen/interface/callback.h>
 
+#include <ub/ub_vmpages.h>
+
 extern unsigned char syscall32_syscall[], syscall32_syscall_end[];
 extern unsigned char syscall32_sysenter[], syscall32_sysenter_end[];
 extern int sysctl_vsyscall32;
@@ -53,32 +55,45 @@ int syscall32_setup_pages(struct linux_binprm *bprm, int exstack)
 	int npages = (VSYSCALL32_END - VSYSCALL32_BASE) >> PAGE_SHIFT;
 	struct vm_area_struct *vma;
 	struct mm_struct *mm = current->mm;
+	unsigned long flags;
 	int ret;
+
+	flags = VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYEXEC | VM_MAYWRITE |
+		mm->def_flags | VM_DONTEXPAND;
+
+	ret = -ENOMEM;
+	if (ub_memory_charge(mm, VSYSCALL32_END - VSYSCALL32_BASE,
+			flags, NULL, UB_SOFT))
+		goto err_charge;
 
 	vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!vma)
-		return -ENOMEM;
+		goto err_alloc;
 
 	memset(vma, 0, sizeof(struct vm_area_struct));
 	/* Could randomize here */
 	vma->vm_start = VSYSCALL32_BASE;
 	vma->vm_end = VSYSCALL32_END;
 	/* MAYWRITE to allow gdb to COW and set breakpoints */
-	vma->vm_flags = VM_READ|VM_EXEC|VM_MAYREAD|VM_MAYEXEC|VM_MAYWRITE;
-	vma->vm_flags |= mm->def_flags;
+	vma->vm_flags = flags;
 	vma->vm_page_prot = protection_map[vma->vm_flags & 7];
 	vma->vm_ops = &syscall32_vm_ops;
 	vma->vm_mm = mm;
 
 	down_write(&mm->mmap_sem);
-	if ((ret = insert_vm_struct(mm, vma))) {
-		up_write(&mm->mmap_sem);
-		kmem_cache_free(vm_area_cachep, vma);
-		return ret;
-	}
+	if ((ret = insert_vm_struct(mm, vma)))
+		goto err_ins;
 	mm->total_vm += npages;
 	up_write(&mm->mmap_sem);
 	return 0;
+
+err_ins:
+	up_write(&mm->mmap_sem);
+	kmem_cache_free(vm_area_cachep, vma);
+err_alloc:
+	ub_memory_uncharge(mm, VSYSCALL32_END - VSYSCALL32_BASE, flags, NULL);
+err_charge:
+	return ret;
 }
 
 static int __init init_syscall32(void)

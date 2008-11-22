@@ -37,6 +37,7 @@
 #include <linux/kallsyms.h>
 #include <linux/ptrace.h>
 #include <linux/random.h>
+#include <linux/sysctl.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -56,6 +57,7 @@
 #include <xen/cpu_hotplug.h>
 
 #include <linux/err.h>
+#include <linux/utsrelease.h>
 
 #include <asm/tlbflush.h>
 #include <asm/cpu.h>
@@ -233,18 +235,22 @@ __setup("idle=", idle_setup);
 void show_regs(struct pt_regs * regs)
 {
 	unsigned long cr0 = 0L, cr2 = 0L, cr3 = 0L, cr4 = 0L;
+	extern int die_counter;
 
 	printk("\n");
-	printk("Pid: %d, comm: %20s\n", current->pid, current->comm);
-	printk("EIP: %04x:[<%08lx>] CPU: %d\n",0xffff & regs->xcs,regs->eip, smp_processor_id());
-	print_symbol("EIP is at %s\n", regs->eip);
+	printk("Pid: %d, comm: %20s, oopses: %d\n",
+			current->pid, current->comm, die_counter);
+	printk("EIP: %04x:[<%08lx>] CPU: %d, VCPU: %d:%d\n",0xffff & regs->xcs,regs->eip, smp_processor_id(),
+			task_vsched_id(current), task_cpu(current));
+	if (decode_call_traces)
+		print_symbol("EIP is at %s\n", regs->eip);
 
 	if (user_mode_vm(regs))
 		printk(" ESP: %04x:%08lx",0xffff & regs->xss,regs->esp);
-	printk(" EFLAGS: %08lx    %s  (%s %.*s)\n",
-	       regs->eflags, print_tainted(), utsname()->release,
-	       (int)strcspn(utsname()->version, " "),
-	       utsname()->version);
+	printk(" EFLAGS: %08lx    %s  (%s %.*s %s)\n",
+		regs->eflags, print_tainted(), init_utsname()->release,
+		(int)strcspn(init_utsname()->version, " "),
+		init_utsname()->version, VZVERSION);
 	printk("EAX: %08lx EBX: %08lx ECX: %08lx EDX: %08lx\n",
 		regs->eax,regs->ebx,regs->ecx,regs->edx);
 	printk("ESI: %08lx EDI: %08lx EBP: %08lx",
@@ -258,6 +264,8 @@ void show_regs(struct pt_regs * regs)
 	cr4 = read_cr4_safe();
 	printk("CR0: %08lx CR2: %08lx CR3: %08lx CR4: %08lx\n", cr0, cr2, cr3, cr4);
 	show_trace(NULL, regs, &regs->esp);
+	if (!decode_call_traces)
+		printk(" EIP: [<%08lx>]\n",regs->eip);
 }
 
 /*
@@ -269,6 +277,7 @@ extern void kernel_thread_helper(void);
 EXPORT_SYMBOL(kernel_thread_helper);
 __asm__(".section .text\n"
 	".align 4\n"
+	".global kernel_thread_helper\n"
 	"kernel_thread_helper:\n\t"
 	"movl %edx,%eax\n\t"
 	"pushl %edx\n\t"
@@ -283,6 +292,13 @@ __asm__(".section .text\n"
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	struct pt_regs regs;
+
+	/* Don't allow kernel_thread() inside VE */
+	if (!ve_allow_kthreads && !ve_is_super(get_exec_env())) {
+		printk("kernel_thread call inside container\n");
+		dump_stack();
+		return -EPERM;
+	}
 
 	memset(&regs, 0, sizeof(regs));
 

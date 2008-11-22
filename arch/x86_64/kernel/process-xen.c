@@ -39,6 +39,7 @@
 #include <linux/random.h>
 #include <linux/notifier.h>
 #include <linux/kprobes.h>
+#include <linux/sysctl.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -61,7 +62,10 @@
 
 #include <xen/cpu_hotplug.h>
 
-asmlinkage extern void ret_from_fork(void);
+#include <linux/utsrelease.h>
+
+asmlinkage extern void execve(void);
+EXPORT_SYMBOL_GPL(execve);
 
 unsigned long kernel_thread_flags = CLONE_VM | CLONE_UNTRACED;
 
@@ -248,11 +252,11 @@ void __show_regs(struct pt_regs * regs)
 
 	printk("\n");
 	print_modules();
-	printk("Pid: %d, comm: %.20s %s %s %.*s\n",
+	printk("Pid: %d, comm: %.20s %s %s %.*s %s\n",
 		current->pid, current->comm, print_tainted(),
 		utsname()->release,
 		(int)strcspn(utsname()->version, " "),
-		utsname()->version);
+		utsname()->version, VZVERSION);
 	printk("RIP: %04lx:[<%016lx>] ", regs->cs & 0xffff, regs->rip);
 	printk_address(regs->rip); 
 	printk("RSP: %04lx:%016lx  EFLAGS: %08lx\n", regs->ss, regs->rsp,
@@ -286,9 +290,24 @@ void __show_regs(struct pt_regs * regs)
 
 void show_regs(struct pt_regs *regs)
 {
-	printk("CPU %d:", smp_processor_id());
+	printk("CPU %d, VCPU %d:%d", smp_processor_id(), task_vsched_id(current), task_cpu(current));
 	__show_regs(regs);
-	show_trace(NULL, regs, (void *)(regs + 1));
+	show_trace(NULL, regs, &regs->rsp);
+}
+
+void smp_show_regs(struct pt_regs *regs, void *data)
+{
+	static DEFINE_SPINLOCK(show_regs_lock);
+
+	if (regs == NULL)
+		return;
+
+	spin_lock(&show_regs_lock);
+	bust_spinlocks(1);
+	printk("----------- IPI show regs -----------\n");
+	show_regs(regs);
+	bust_spinlocks(0);
+	spin_unlock(&show_regs_lock);
 }
 
 /*
@@ -831,3 +850,22 @@ void _restore_vcpu(void)
 {
 }
 #endif
+
+
+long do_fork_kthread(unsigned long clone_flags,
+		unsigned long stack_start,
+		struct pt_regs *regs,
+		unsigned long stack_size,
+		int __user *parent_tidptr,
+		int __user *child_tidptr)
+{
+	if (ve_allow_kthreads || ve_is_super(get_exec_env()))
+		return do_fork(clone_flags, stack_start, regs, stack_size,
+				parent_tidptr, child_tidptr);
+
+	/* Don't allow kernel_thread() inside VE */
+	printk("kernel_thread call inside container\n");
+	dump_stack();
+	return -EPERM;
+}
+

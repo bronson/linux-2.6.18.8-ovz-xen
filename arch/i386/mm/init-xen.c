@@ -747,7 +747,7 @@ void __init pgtable_cache_init(void)
 		pmd_cache = kmem_cache_create("pmd",
 					PTRS_PER_PMD*sizeof(pmd_t),
 					PTRS_PER_PMD*sizeof(pmd_t),
-					0,
+					SLAB_UBC,
 					pmd_ctor,
 					NULL);
 		if (!pmd_cache)
@@ -761,7 +761,7 @@ void __init pgtable_cache_init(void)
 				PAGE_SIZE,
 				PAGE_SIZE,
 #endif
-				0,
+				SLAB_UBC,
 				pgd_ctor,
 				PTRS_PER_PMD == 1 ? pgd_dtor : NULL);
 	if (!pgd_cache)

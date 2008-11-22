@@ -123,6 +123,11 @@ void printk_address(unsigned long address)
 	char *delim = ":";
 	char namebuf[128];
 
+	if (!decode_call_traces) {
+		printk("[<%016lx>]", address);
+		return;
+	}
+
 	symname = kallsyms_lookup(address, &symsize, &offset,
 					&modname, namebuf);
 	if (!symname) {
@@ -256,11 +261,18 @@ static int show_trace_unwind(struct unwind_frame_info *info, void *context)
  * severe exception (double fault, nmi, stack fault, debug, mce) hardware stack
  */
 
+static inline int valid_stack_ptr(struct thread_info *tinfo, void *p)
+{
+	void *t = (void *)tinfo;
+	return p > t && p < t + THREAD_SIZE - 3;
+}
+
 void show_trace(struct task_struct *tsk, struct pt_regs *regs, unsigned long * stack)
 {
 	const unsigned cpu = safe_smp_processor_id();
 	unsigned long *irqstack_end = (unsigned long *)cpu_pda(cpu)->irqstackptr;
 	unsigned used = 0;
+	struct thread_info *tinfo;
 
 	printk("\nCall Trace:\n");
 
@@ -366,7 +378,8 @@ void show_trace(struct task_struct *tsk, struct pt_regs *regs, unsigned long * s
 	/*
 	 * This prints the process stack:
 	 */
-	HANDLE_STACK (((long) stack & (THREAD_SIZE-1)) != 0);
+	tinfo = task_thread_info(tsk);
+	HANDLE_STACK (valid_stack_ptr(tinfo, stack));
 #undef HANDLE_STACK
 
 	printk("\n");
@@ -401,7 +414,7 @@ static void _show_stack(struct task_struct *tsk, struct pt_regs *regs, unsigned 
 		if (((long) stack & (THREAD_SIZE-1)) == 0)
 			break;
 		}
-		if (i && ((i % 4) == 0))
+		if (i && ((i % 4) == 0) && decode_call_traces)
 			printk("\n");
 		printk(" %016lx", *stack++);
 		touch_nmi_watchdog();
@@ -435,10 +448,12 @@ void show_registers(struct pt_regs *regs)
 
 		rsp = regs->rsp;
 
-	printk("CPU %d ", cpu);
+	printk("CPU: %d ", cpu);
 	__show_regs(regs);
-	printk("Process %s (pid: %d, threadinfo %p, task %p)\n",
-		cur->comm, cur->pid, task_thread_info(cur), cur);
+	printk("Process %s (pid: %d, veid=%d, threadinfo %p, task %p)\n",
+		cur->comm, cur->pid,
+		VEID(VE_TASK_INFO(current)->owner_env),
+		task_thread_info(cur), cur);
 
 	/*
 	 * When in-kernel, we also print out the stack and code at the
@@ -587,6 +602,7 @@ void __kprobes die_nmi(char *str, struct pt_regs *regs)
 		crash_kexec(regs);
 	if (panic_on_timeout || panic_on_oops)
 		panic("nmi watchdog");
+	smp_nmi_call_function(smp_show_regs, NULL, 1);
 	printk("console shuts up ...\n");
 	oops_end(flags);
 	nmi_exit();

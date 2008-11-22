@@ -44,6 +44,7 @@
 #include <linux/dmi.h>
 #include <linux/dma-mapping.h>
 #include <linux/ctype.h>
+#include <linux/vsched.h>
 
 #include <asm/mtrr.h>
 #include <asm/uaccess.h>
@@ -1517,7 +1518,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 
 
 #ifdef CONFIG_SMP
-	if (!cpu_online(c-cpu_data))
+	if (!vcpu_online(c - cpu_data))
 		return 0;
 #endif
 
@@ -1538,9 +1539,13 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		seq_printf(m, "stepping\t: unknown\n");
 	
 	if (cpu_has(c,X86_FEATURE_TSC)) {
+#ifndef CONFIG_FAIRSCHED
 		unsigned int freq = cpufreq_quick_get((unsigned)(c-cpu_data));
 		if (!freq)
 			freq = cpu_khz;
+#else
+		unsigned int freq = (unsigned int)ve_scale_khz(cpu_khz);
+#endif
 		seq_printf(m, "cpu MHz\t\t: %u.%03u\n",
 			     freq / 1000, (freq % 1000));
 	}

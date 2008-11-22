@@ -4,8 +4,10 @@
 
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
+#include <linux/vmalloc.h>
 #include <linux/swap.h>
 #include <linux/smp.h>
 #include <linux/highmem.h>
@@ -108,6 +110,7 @@ void set_pmd_pfn(unsigned long vaddr, unsigned long pfn, pgprot_t flags)
 	 */
 	__flush_tlb_one(vaddr);
 }
+EXPORT_SYMBOL(show_mem);
 
 static int nr_fixmaps = 0;
 unsigned long hypervisor_virt_start = HYPERVISOR_VIRT_START;
@@ -158,9 +161,11 @@ struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 	struct page *pte;
 
 #ifdef CONFIG_HIGHPTE
-	pte = alloc_pages(GFP_KERNEL|__GFP_HIGHMEM|__GFP_REPEAT|__GFP_ZERO, 0);
+	pte = alloc_pages(GFP_KERNEL_UBC|__GFP_SOFT_UBC|__GFP_HIGHMEM|
+			__GFP_REPEAT|__GFP_ZERO, 0);
 #else
-	pte = alloc_pages(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO, 0);
+	pte = alloc_pages(GFP_KERNEL_UBC|__GFP_SOFT_UBC|
+			__GFP_REPEAT|__GFP_ZERO, 0);
 #endif
 	if (pte) {
 		SetPageForeign(pte, pte_free);

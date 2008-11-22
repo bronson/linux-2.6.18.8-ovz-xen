@@ -13,12 +13,15 @@
 #include <linux/smp_lock.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/ldt.h>
 #include <asm/desc.h>
 #include <asm/mmu_context.h>
+
+#include <ub/ub_mem.h>
 
 #ifdef CONFIG_SMP /* avoids "defined but not used" warnig */
 static void flush_ldt(void *null)
@@ -39,9 +42,9 @@ static int alloc_ldt(mm_context_t *pc, int mincount, int reload)
 	oldsize = pc->size;
 	mincount = (mincount+511)&(~511);
 	if (mincount*LDT_ENTRY_SIZE > PAGE_SIZE)
-		newldt = vmalloc(mincount*LDT_ENTRY_SIZE);
+		newldt = ub_vmalloc(mincount*LDT_ENTRY_SIZE);
 	else
-		newldt = kmalloc(mincount*LDT_ENTRY_SIZE, GFP_KERNEL);
+		newldt = ub_kmalloc(mincount*LDT_ENTRY_SIZE, GFP_KERNEL);
 
 	if (!newldt)
 		return -ENOMEM;
@@ -97,6 +100,7 @@ static inline int copy_ldt(mm_context_t *new, mm_context_t *old)
 		XENFEAT_writable_descriptor_tables);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(init_new_context);
 
 /*
  * we do not have to muck with descriptors here, that is
@@ -269,3 +273,5 @@ asmlinkage int sys_modify_ldt(int func, void __user *ptr, unsigned long bytecoun
 	}
 	return ret;
 }
+
+EXPORT_SYMBOL_GPL(default_ldt);

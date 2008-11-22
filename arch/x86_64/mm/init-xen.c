@@ -105,6 +105,7 @@ static void __meminit early_make_page_readonly(void *va, unsigned int feature)
 	if (HYPERVISOR_update_va_mapping(_va, pte, 0))
 		BUG();
 }
+EXPORT_SYMBOL(show_mem);
 
 static void __make_page_readonly(void *va)
 {
