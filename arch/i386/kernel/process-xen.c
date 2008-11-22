@@ -61,6 +61,8 @@
 #include <asm/cpu.h>
 
 asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
+asmlinkage void i386_ret_from_resume(void) __asm__("i386_ret_from_resume");
+EXPORT_SYMBOL_GPL(i386_ret_from_resume);
 
 static int hlt_counter;
 
@@ -264,6 +266,7 @@ void show_regs(struct pt_regs * regs)
  * the "args".
  */
 extern void kernel_thread_helper(void);
+EXPORT_SYMBOL(kernel_thread_helper);
 __asm__(".section .text\n"
 	".align 4\n"
 	"kernel_thread_helper:\n\t"

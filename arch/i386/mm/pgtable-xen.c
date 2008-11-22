@@ -72,6 +72,7 @@ void show_mem(void)
 	printk(KERN_INFO "%lu pages pagetables\n",
 					global_page_state(NR_PAGETABLE));
 }
+EXPORT_SYMBOL(show_mem);
 
 /*
  * Associate a large virtual page frame with a given physical page frame 

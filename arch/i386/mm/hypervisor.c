@@ -189,6 +189,7 @@ void xen_set_ldt(const void *ptr, unsigned int ents)
 	op.arg2.nr_ents     = ents;
 	BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
 }
+EXPORT_SYMBOL(xen_set_ldt);
 
 /*
  * Bitmap is indexed by page number. If bit is set, the page is part of a

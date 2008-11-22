@@ -118,6 +118,7 @@ int init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 	}
 	return retval;
 }
+EXPORT_SYMBOL_GPL(init_new_context);
 
 /*
  * No need to lock the MM as we are the last user
