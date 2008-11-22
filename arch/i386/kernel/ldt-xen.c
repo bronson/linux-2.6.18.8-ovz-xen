@@ -100,7 +100,6 @@ static inline int copy_ldt(mm_context_t *new, mm_context_t *old)
 		XENFEAT_writable_descriptor_tables);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(init_new_context);
 
 /*
  * we do not have to muck with descriptors here, that is

@@ -110,7 +110,6 @@ void set_pmd_pfn(unsigned long vaddr, unsigned long pfn, pgprot_t flags)
 	 */
 	__flush_tlb_one(vaddr);
 }
-EXPORT_SYMBOL(show_mem);
 
 static int nr_fixmaps = 0;
 unsigned long hypervisor_virt_start = HYPERVISOR_VIRT_START;
