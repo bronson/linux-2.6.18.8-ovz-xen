@@ -5,7 +5,10 @@
 #
 # Normal rules
 #
-.*
+.*.cmd
+.*.d
+.tmp_*
+.version
 *.o
 *.a
 *.s
