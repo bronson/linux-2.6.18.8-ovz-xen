@@ -239,11 +239,31 @@ ENTRY(ret_from_fork)
 	GET_THREAD_INFO(%ebp)
 	popl %eax
 	CFI_ADJUST_CFA_OFFSET -4
+ret_from_fork_tail:
 	pushl $0x0202			# Reset kernel eflags
 	CFI_ADJUST_CFA_OFFSET 4
 	popfl
 	CFI_ADJUST_CFA_OFFSET -4
 	jmp syscall_exit
+	CFI_ENDPROC
+
+ENTRY(i386_ret_from_resume)
+	CFI_STARTPROC
+	pushl %eax
+	CFI_ADJUST_CFA_OFFSET 4
+	call schedule_tail
+	GET_THREAD_INFO(%ebp)
+	popl %eax
+	CFI_ADJUST_CFA_OFFSET -4
+	movl (%esp),%eax
+	testl %eax,%eax
+	jz    1f
+	pushl %esp
+	call  *%eax
+	addl  $4,%esp
+1:
+	addl  $256,%esp
+	jmp   ret_from_fork_tail
 	CFI_ENDPROC
 
 /*
